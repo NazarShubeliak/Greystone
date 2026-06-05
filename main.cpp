@@ -15,10 +15,11 @@ struct Player {
 
 Tile map[MAP_HEIGHT][MAP_WIDTH];
 SDL_Texture* tileTextures[MAP_HEIGHT][MAP_WIDTH];
+SDL_Texture* playerTexture = nullptr;
 Player player = {20, 15, "@", white};
 const int VIEW_RADIUS = 8;
 
-std::vector<SDL_Point> curentPath;
+std::vector<SDL_Point> currentPath;
 int pathIndex = 0;
 Uint32 lastMoveTime = 0;
 
@@ -64,14 +65,14 @@ void handleInput(SDL_Event& event, bool& running) {
             int mouseY = event.button.y / TILE_SIZE + cameraY;
             if (mouseX >= 0 && mouseX < MAP_WIDTH && mouseY >= 0 && mouseY < MAP_HEIGHT) {
                 if (map[mouseY][mouseX].walkable) {
-                    curentPath = findPath(player.x, player.y, mouseX, mouseY);
+                    currentPath = findPath(player.x, player.y, mouseX, mouseY);
                     pathIndex = 0;
                 }
             }
         }
 
         if (event.button.button == SDL_BUTTON_RIGHT) {
-            curentPath.clear();
+            currentPath.clear();
             pathIndex = 0;
             previewPath.clear();
             lastHoverX = -1;
@@ -87,13 +88,13 @@ void handleInput(SDL_Event& event, bool& running) {
 
 void updatePlayer() {
     Uint32 currentTime = SDL_GetTicks();
-    if (pathIndex < curentPath.size() && currentTime - lastMoveTime > 100) {
-        player.x = curentPath[pathIndex].x;
-        player.y = curentPath[pathIndex].y;
+    if (pathIndex < (int)currentPath.size() && currentTime - lastMoveTime > 100) {
+        player.x = currentPath[pathIndex].x;
+        player.y = currentPath[pathIndex].y;
         pathIndex++;
         lastMoveTime = currentTime;
-        if (pathIndex >= curentPath.size()) {
-            curentPath.clear();
+        if (pathIndex >= (int)currentPath.size()) {
+            currentPath.clear();
             pathIndex = 0;
             lastHoverX = -1;
             lastHoverY = -1;
@@ -113,11 +114,9 @@ void updateCamera() {
 }
 
 void updateVisibility() {
-    for (int y = 0; y < MAP_HEIGHT; y++) {
-        for (int x = 0; x < MAP_WIDTH; x++) {
+    for (int y = 0; y < MAP_HEIGHT; y++)
+        for (int x = 0; x < MAP_WIDTH; x++)
             map[y][x].visible = false;
-        }
-    }
 
     for (int y = -VIEW_RADIUS; y <= VIEW_RADIUS; y++) {
         for (int x = -VIEW_RADIUS; x <= VIEW_RADIUS; x++) {
@@ -158,21 +157,15 @@ void renderMap(SDL_Renderer* renderer) {
     }
 }
 
-void renderPlayer(SDL_Renderer* renderer, TTF_Font* font) {
-    SDL_Surface* surface = TTF_RenderText_Solid(font, player.symbol, player.color);
-    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    SDL_FreeSurface(surface);
-
+void renderPlayer(SDL_Renderer* renderer) {
     int w, h;
-    SDL_QueryTexture(texture, NULL, NULL, &w, &h);
+    SDL_QueryTexture(playerTexture, NULL, NULL, &w, &h);
     SDL_Rect dest = {(player.x - cameraX) * TILE_SIZE, (player.y - cameraY) * TILE_SIZE, w, h};
-
-    SDL_RenderCopy(renderer, texture, NULL, &dest);
-    SDL_DestroyTexture(texture);
+    SDL_RenderCopy(renderer, playerTexture, NULL, &dest);
 }
 
 void renderPath(SDL_Renderer* renderer) {
-    if (!curentPath.empty()) return;
+    if (!currentPath.empty()) return;
 
     if (hoverX != lastHoverX || hoverY != lastHoverY) {
         previewPath = findPath(player.x, player.y, hoverX, hoverY);
@@ -181,7 +174,7 @@ void renderPath(SDL_Renderer* renderer) {
     }
 
     SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
-    for (int i = 0; i < previewPath.size(); i++) {
+    for (int i = 0; i < (int)previewPath.size(); i++) {
         SDL_Rect dot = {
             (previewPath[i].x - cameraX) * TILE_SIZE + TILE_SIZE / 2 - 2,
             (previewPath[i].y - cameraY) * TILE_SIZE + TILE_SIZE / 2 - 2,
@@ -208,6 +201,10 @@ int main(int argc, char* argv[]) {
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     TTF_Font* font = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 16);
 
+    SDL_Surface* playerSurface = TTF_RenderText_Solid(font, player.symbol, player.color);
+    playerTexture = SDL_CreateTextureFromSurface(renderer, playerSurface);
+    SDL_FreeSurface(playerSurface);
+
     initTextures(renderer, font);
     updateVisibility();
     updateCamera();
@@ -229,11 +226,12 @@ int main(int argc, char* argv[]) {
 
         renderMap(renderer);
         renderPath(renderer);
-        renderPlayer(renderer, font);
+        renderPlayer(renderer);
 
         SDL_RenderPresent(renderer);
     }
 
+    SDL_DestroyTexture(playerTexture);
     TTF_CloseFont(font);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

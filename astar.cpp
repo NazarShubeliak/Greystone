@@ -1,83 +1,77 @@
 #include "astar.h"
 #include <algorithm>
+#include <queue>
+#include <cstring>
 
 extern Tile map[MAP_HEIGHT][MAP_WIDTH];
 
-int heuristic(int x1, int y1, int x2, int y2) {
-    return abs(x1 - x2) + abs(y1 - y2);
+static int heuristic(int x1, int y1, int x2, int y2) {
+    int dx = abs(x1 - x2);
+    int dy = abs(y1 - y2);
+    return 10 * (dx + dy) - 6 * std::min(dx, dy);
 }
 
 std::vector<SDL_Point> findPath(int startX, int startY, int endX, int endY) {
-    std::vector<Node*> openList;
-    std::vector<Node*> closedList;
+    std::vector<Node*> allNodes;
 
-    Node* startNode = new Node{startX, startY, 0, 0, 0, nullptr};
-    startNode->h = heuristic(startX, startY, endX, endY);
-    startNode->f = startNode->h;
-    openList.push_back(startNode);
+    static bool closedSet[MAP_HEIGHT][MAP_WIDTH];
+    static Node* openMap[MAP_HEIGHT][MAP_WIDTH];
+    memset(closedSet, 0, sizeof(closedSet));
+    memset(openMap, 0, sizeof(openMap));
 
-    while (!openList.empty()) {
-        Node* current = openList[0];
-        for (Node* node : openList) {
-            if (node->f < current->f) {
-                current = node;
+    auto cmp = [](const Node* a, const Node* b) { return a->f > b->f; };
+    std::priority_queue<Node*, std::vector<Node*>, decltype(cmp)> openQueue(cmp);
+
+    Node* start = new Node{startX, startY, 0, heuristic(startX, startY, endX, endY), 0, nullptr};
+    start->f = start->h;
+    allNodes.push_back(start);
+    openQueue.push(start);
+    openMap[startY][startX] = start;
+
+    const int dx[] = {0, 0, 1, -1, 1, 1, -1, -1};
+    const int dy[] = {1, -1, 0, 0, 1, -1, 1, -1};
+    const int moveCost[] = {10, 10, 10, 10, 14, 14, 14, 14};
+
+    std::vector<SDL_Point> result;
+
+    while (!openQueue.empty()) {
+        Node* current = openQueue.top();
+        openQueue.pop();
+
+        int cx = current->x, cy = current->y;
+        if (closedSet[cy][cx]) continue;
+        closedSet[cy][cx] = true;
+
+        if (cx == endX && cy == endY) {
+            Node* n = current;
+            while (n) {
+                result.push_back({n->x, n->y});
+                n = n->parent;
             }
+            std::reverse(result.begin(), result.end());
+            break;
         }
-
-        if (current->x == endX && current->y == endY) {
-            std::vector<SDL_Point> path;
-            while (current != nullptr) {
-                path.push_back({current->x, current->y});
-                current = current->parent;
-            }
-            std::reverse(path.begin(), path.end());
-            return path;
-        }
-
-        openList.erase(std::remove(openList.begin(), openList.end(), current), openList.end());
-        closedList.push_back(current);
-
-        int dx[] = {0, 0, 1, -1, 1, 1, -1, -1};
-        int dy[] = {1, -1, 0, 0, 1, -1, 1, -1};
 
         for (int i = 0; i < 8; i++) {
-            int nx = current->x + dx[i];
-            int ny = current->y + dy[i];
+            int nx = cx + dx[i];
+            int ny = cy + dy[i];
 
             if (nx < 0 || nx >= MAP_WIDTH || ny < 0 || ny >= MAP_HEIGHT) continue;
             if (!map[ny][nx].walkable) continue;
+            if (closedSet[ny][nx]) continue;
 
-            bool inClosed = false;
-            for (Node* node : closedList) {
-                if (node->x == nx && node->y == ny) {
-                    inClosed = true;
-                    break;
-                }
-            }
-            if (inClosed) continue;
+            int newG = current->g + moveCost[i];
 
-            int newG = current->g + 1;
-
-            Node* existingNode = nullptr;
-            for (Node* node : openList) {
-                if (node->x == nx && node->y == ny) {
-                    existingNode = node;
-                    break;
-                }
-            }
-
-            if (existingNode == nullptr) {
-                Node* neighbor = new Node{nx, ny, newG, 0, 0, current};
-                neighbor->h = heuristic(nx, ny, endX, endY);
-                neighbor->f = neighbor->g + neighbor->h;
-                openList.push_back(neighbor);
-            } else if (newG < existingNode->g) {
-                existingNode->g = newG;
-                existingNode->f = existingNode->g + existingNode->h;
-                existingNode->parent = current;
+            if (openMap[ny][nx] == nullptr || newG < openMap[ny][nx]->g) {
+                int h = heuristic(nx, ny, endX, endY);
+                Node* neighbor = new Node{nx, ny, newG, h, newG + h, current};
+                allNodes.push_back(neighbor);
+                openMap[ny][nx] = neighbor;
+                openQueue.push(neighbor);
             }
         }
     }
 
-    return {};
+    for (Node* n : allNodes) delete n;
+    return result;
 }
