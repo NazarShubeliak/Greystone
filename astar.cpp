@@ -40,6 +40,7 @@ std::vector<SDL_Point> findPath(int startX, int startY, int endX, int endY) {
 
         int cx = current->x, cy = current->y;
         if (closedSet[cy][cx]) continue;
+        if (openMap[cy][cx] != current) continue;
         closedSet[cy][cx] = true;
 
         if (cx == endX && cy == endY) {

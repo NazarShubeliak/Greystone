@@ -7,6 +7,7 @@ const int MAP_WIDTH = 200;
 const int MAP_HEIGHT = 200;
 const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
+const int VIEW_RADIUS = 16;
 
 struct Tile {
     bool walkable;
