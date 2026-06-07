@@ -1,6 +1,11 @@
 #include "render.h"
 #include <vector>
 
+extern SDL_Color white;
+extern SDL_Color green;
+extern SDL_Color orange;
+extern SDL_Color yellow;
+extern SDL_Color red;
 extern Tile map[MAP_HEIGHT][MAP_WIDTH];
 extern Player player;
 extern std::vector<Enemy> enemies;

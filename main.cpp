@@ -1,5 +1,6 @@
 #include "astar.h"
-#include "types.h"
+#include "actor.h"
+#include "ui.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
@@ -20,7 +21,7 @@ SDL_Texture* texCursor    = nullptr;
 SDL_Texture* playerTexture = nullptr;
 SDL_Texture* enemyTexture  = nullptr;
 
-Player player = {20, 15, "@", white, 100, 0};
+Player player(20, 15);
 std::vector<Enemy> enemies;
 
 std::vector<SDL_Point> currentPath;
@@ -32,6 +33,7 @@ int lastHoverX = -1, lastHoverY = -1;
 std::vector<SDL_Point> previewPath;
 
 int cameraX = 0, cameraY = 0;
+UI ui;
 
 void initEnemy() {
     for (int i = 0; i < 10; i++) {
@@ -40,12 +42,25 @@ void initEnemy() {
             x = rand() % (MAP_WIDTH - 2) + 1;
             y = rand() % (MAP_HEIGHT - 2) + 1;
         } while (!map[y][x].walkable);
-        enemies.push_back({x, y, "E", red, 75, 75, true});
+        enemies.push_back(Enemy(x, y, "E", red, 75, 50, 10));
     }
+}
+
+bool isTileOccupied(int x, int y) {
+    for (Enemy& e : enemies) {
+        if (e.alive && e.x == x && e.y == y) return true;
+    }
+    return false;
 }
 
 void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_QUIT) running = false;
+
+    if (event.type == SDL_KEYDOWN) {
+        if (event.key.keysym.sym == SDLK_o) {
+            ui.toggle();
+        }
+    }
 
     if (event.type == SDL_MOUSEBUTTONDOWN) {
         if (event.button.button == SDL_BUTTON_LEFT) {
@@ -82,8 +97,16 @@ bool updatePlayer() {
 
     Uint32 currentTime = SDL_GetTicks();
     if (pathIndex < (int)currentPath.size() && currentTime - lastMoveTime > 100) {
-        player.x = currentPath[pathIndex].x;
-        player.y = currentPath[pathIndex].y;
+        SDL_Point next = currentPath[pathIndex];
+        if (isTileOccupied(next.x, next.y)) {
+            currentPath.clear();
+            pathIndex = 0;
+            return true;
+        }
+        player.x = next.x;
+        player.y = next.y;
+        // player.x = currentPath[pathIndex].x;
+        // player.y = currentPath[pathIndex].y;
         pathIndex++;
         player.energy -= 100;
         lastMoveTime = currentTime;
@@ -170,7 +193,7 @@ int main(int argc, char* argv[]) {
         while (SDL_PollEvent(&event))
             handleInput(event, running);
 
-        updateEnergy();
+        player.gainEnergy();
         bool playerMoved = updatePlayer();
         if (playerMoved) updateEnemies();
         updatePreviewPath();
@@ -184,6 +207,7 @@ int main(int argc, char* argv[]) {
         renderPath(renderer);
         renderPlayer(renderer);
         renderEnemies(renderer);
+        ui.renderStats(renderer, font);
 
         SDL_RenderPresent(renderer);
     }
