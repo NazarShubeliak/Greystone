@@ -98,10 +98,15 @@ static void spawnObject(Tile& t) {
 
 // ---------------------------------------------------------------- sector generation
 
-void generateSector(BiomeType biome) {
-    srand(time(nullptr));
+void generateSector(BiomeType biome, int seedX, int seedY) {
+    // Deterministic seed from sector coords so revisiting gives same layout.
+    unsigned int seed = (seedX >= 0)
+        ? (unsigned int)(seedX * 73856093u ^ seedY * 19349663u)
+        : (unsigned int)time(nullptr);
+    srand(seed);
 
-    // Step 1: fill with bedrock border, interior with base terrain
+    // Step 1: fill entire map with base terrain (no bedrock border —
+    // reaching the edge triggers a sector transition instead).
     int baseTerrain   = T_GRASSLAND;
     int altTerrain    = T_FOREST_FLOOR;
     int altCount      = 0;
@@ -149,17 +154,12 @@ void generateSector(BiomeType biome) {
     for (int y = 0; y < MAP_HEIGHT; y++) {
         for (int x = 0; x < MAP_WIDTH; x++) {
             Tile& t = map[y][x];
-            t.groundId = -1;
-            t.objectId = -1;
-            t.objectHp = 0;
-            t.visible  = false;
-            t.explored = false;
-
-            if (!inBounds(x, y)) {
-                t.terrainId = T_BEDROCK;
-            } else {
-                t.terrainId = baseTerrain;
-            }
+            t.terrainId = baseTerrain;
+            t.groundId  = -1;
+            t.objectId  = -1;
+            t.objectHp  = 0;
+            t.visible   = false;
+            t.explored  = false;
         }
     }
 

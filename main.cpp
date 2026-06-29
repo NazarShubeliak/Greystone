@@ -5,11 +5,14 @@
 #include "body_panel.h"
 #include "context_menu.h"
 #include "examine_panel.h"
+#include "overmap.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <vector>
+#include <ctime>
+#include <algorithm>
 
 SDL_Color white = {255, 255, 255, 255};
 SDL_Color red   = {255,   0,   0, 255};
@@ -37,6 +40,9 @@ BottomPanel panel;
 BodyPanel bodyPanel;
 ContextMenu contextMenu;
 ExaminePanel examinePanel;
+Overmap overmap;
+int playerSectorX = 50;
+int playerSectorY = 50;
 
 // ------------------------------------------------------------------ helpers
 
@@ -115,15 +121,69 @@ void onPlayerAct() {
         tickWorld();
 }
 
+void updateCamera();
+
+// ------------------------------------------------------------------ sector transition
+
+void checkSectorTransition() {
+    if (player.x > 0 && player.x < MAP_WIDTH - 1 &&
+        player.y > 0 && player.y < MAP_HEIGHT - 1) return;
+
+    int newSX = playerSectorX, newSY = playerSectorY;
+    int newPX = player.x,     newPY = player.y;
+
+    // Horizontal transitions take priority over vertical.
+    if      (player.x == 0)             { newSX--; newPX = MAP_WIDTH  - 2; }
+    else if (player.x == MAP_WIDTH - 1) { newSX++; newPX = 1;              }
+    else if (player.y == 0)             { newSY--; newPY = MAP_HEIGHT - 2; }
+    else if (player.y == MAP_HEIGHT -1) { newSY++; newPY = 1;              }
+
+    // Clamp at world boundary — push player back inside.
+    if (newSX < 0 || newSX >= OVERMAP_W || newSY < 0 || newSY >= OVERMAP_H) {
+        player.x = std::max(1, std::min(MAP_WIDTH  - 2, player.x));
+        player.y = std::max(1, std::min(MAP_HEIGHT - 2, player.y));
+        return;
+    }
+
+    playerSectorX = newSX;
+    playerSectorY = newSY;
+    player.x = newPX;
+    player.y = newPY;
+
+    generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
+                   playerSectorX, playerSectorY);
+    overmap.reveal(playerSectorX, playerSectorY);
+
+    enemies.clear();
+    initEnemy();
+    currentPath.clear();
+    pathIndex = 0;
+    previewPath.clear();
+    examinePanel.hide();
+    updateVisibility();
+    updateCamera();
+
+    int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
+    panel.addMessage(std::string("You enter: ") + biomeVisuals[bi].name + ".");
+}
+
 // ------------------------------------------------------------------ input
 
 void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_QUIT) running = false;
 
+    // Overmap consumes all input while open.
+    if (overmap.visible) {
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_m)
+            overmap.toggle();
+        return;
+    }
+
     if (event.type == SDL_KEYDOWN) {
         if (event.key.keysym.sym == SDLK_o)      ui.toggle();
         if (event.key.keysym.sym == SDLK_b)      bodyPanel.toggle();
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
+        if (event.key.keysym.sym == SDLK_m)      overmap.toggle();
         if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
     }
 
@@ -313,7 +373,11 @@ void updateCamera() {
 int main(int argc, char* argv[]) {
     SDL_Init(SDL_INIT_VIDEO);
     TTF_Init();
-    generateSector(BiomeType::FOREST);
+    srand((unsigned int)time(nullptr));
+    overmap.generate();
+    overmap.reveal(playerSectorX, playerSectorY);
+    generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
+                   playerSectorX, playerSectorY);
     initEnemy();
 
     // Give everyone starting energy so they're ready to act immediately.
@@ -336,6 +400,7 @@ int main(int argc, char* argv[]) {
     SDL_FreeSurface(enemySurface);
 
     initTextures(renderer, font);
+    overmap.initTextures(renderer, font);
     updateVisibility();
     updateCamera();
 
@@ -347,6 +412,7 @@ int main(int argc, char* argv[]) {
             handleInput(event, running);
 
         updatePlayer();
+        checkSectorTransition();
         updatePreviewPath();
         updateVisibility();
         updateCamera();
@@ -364,6 +430,7 @@ int main(int argc, char* argv[]) {
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
         contextMenu.render(renderer, font);
+        overmap.render(renderer, font, playerSectorX, playerSectorY);
 
         if (!player.isAlive()) {
             renderDeathScreen(renderer, font);
@@ -378,6 +445,7 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < T_COUNT; i++) SDL_DestroyTexture(terrainTex[i]);
     for (int i = 0; i < G_COUNT; i++) SDL_DestroyTexture(groundTex[i]);
     for (int i = 0; i < O_COUNT; i++) SDL_DestroyTexture(objectTex[i]);
+    overmap.destroyTextures();
     TTF_CloseFont(font);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

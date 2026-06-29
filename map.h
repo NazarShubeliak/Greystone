@@ -57,6 +57,6 @@ struct Tile {
 
 // ================================================================ Functions
 
-void generateSector(BiomeType biome = BiomeType::FOREST);
+void generateSector(BiomeType biome = BiomeType::FOREST, int seedX = -1, int seedY = -1);
 bool hasLineOfSight(int x0, int y0, int x1, int y1);
 void updateVisibility();
