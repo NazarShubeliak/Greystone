@@ -124,6 +124,7 @@ void onPlayerAct() {
 }
 
 void updateCamera();
+void doTeleport(int newSX, int newSY);
 
 // ------------------------------------------------------------------ sector transition
 
@@ -167,6 +168,29 @@ void checkSectorTransition() {
 
     int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
     panel.addMessage(std::string("You enter: ") + biomeVisuals[bi].name + ".");
+}
+
+void doTeleport(int newSX, int newSY) {
+    playerSectorX = newSX;
+    playerSectorY = newSY;
+    player.x = MAP_WIDTH  / 2;
+    player.y = MAP_HEIGHT / 2;
+
+    generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
+                   playerSectorX, playerSectorY);
+    overmap.reveal(playerSectorX, playerSectorY);
+    enemies.clear();
+    initEnemy();
+    currentPath.clear();
+    pathIndex = 0;
+    previewPath.clear();
+    examinePanel.hide();
+    updateVisibility();
+    updateCamera();
+
+    int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
+    panel.addMessage("Teleported to [" + std::to_string(newSX) + ", "
+                     + std::to_string(newSY) + "] — " + biomeVisuals[bi].name + ".");
 }
 
 // ------------------------------------------------------------------ input
@@ -430,6 +454,11 @@ int main(int argc, char* argv[]) {
     while (running) {
         while (SDL_PollEvent(&event))
             handleInput(event, running);
+
+        if (console.pendingTeleport) {
+            console.pendingTeleport = false;
+            doTeleport(console.tpX, console.tpY);
+        }
 
         updatePlayer();
         checkSectorTransition();

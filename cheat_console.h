@@ -3,6 +3,7 @@
 #include "astar.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <cstdio>
 #include <string>
 
 struct CheatConsole {
@@ -10,6 +11,10 @@ struct CheatConsole {
     std::string input;
     std::string result;
     bool        resultOk = true;   // true = green, false = red
+
+    // Pending teleport — set by execute(), consumed by main.cpp.
+    bool pendingTeleport = false;
+    int  tpX = 0, tpY = 0;
 
     void open() {
         visible = true;
@@ -76,10 +81,24 @@ struct CheatConsole {
             resultOk = true;
 
         } else if (cmd == "help") {
-            result  = "Commands: reveal_map (rm)  hide_map (hm)  help";
+            result  = "Commands: reveal_map (rm)  hide_map (hm)  tp X Y  help";
             resultOk = true;
 
         } else {
+            // tp X Y — teleport to overmap sector
+            int x, y;
+            if (sscanf(cmd.c_str(), "tp %d %d", &x, &y) == 2) {
+                if (x >= 0 && x < OVERMAP_W && y >= 0 && y < OVERMAP_H) {
+                    pendingTeleport = true;
+                    tpX = x; tpY = y;
+                    result   = "Teleporting to [" + std::to_string(x) + ", " + std::to_string(y) + "]...";
+                    resultOk = true;
+                } else {
+                    result   = "Out of range. Valid: 0-" + std::to_string(OVERMAP_W-1) + " / 0-" + std::to_string(OVERMAP_H-1);
+                    resultOk = false;
+                }
+                return;
+            }
             result  = "Unknown: " + cmd;
             resultOk = false;
         }
