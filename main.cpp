@@ -4,6 +4,7 @@
 #include "bottom_panel.h"
 #include "body_panel.h"
 #include "context_menu.h"
+#include "examine_panel.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
@@ -35,6 +36,7 @@ UI ui;
 BottomPanel panel;
 BodyPanel bodyPanel;
 ContextMenu contextMenu;
+ExaminePanel examinePanel;
 
 // ------------------------------------------------------------------ helpers
 
@@ -121,12 +123,19 @@ void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_KEYDOWN) {
         if (event.key.keysym.sym == SDLK_o)      ui.toggle();
         if (event.key.keysym.sym == SDLK_b)      bodyPanel.toggle();
+        if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
         if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
     }
 
     if (event.type == SDL_MOUSEBUTTONDOWN) {
         int mouseX = event.button.x / TILE_SIZE + cameraX;
         int mouseY = event.button.y / TILE_SIZE + cameraY;
+
+        // Any click closes the examine panel.
+        if (examinePanel.visible) {
+            examinePanel.hide();
+            return;
+        }
 
         if (contextMenu.visible) {
             contextMenu.handleClick(event.button.x, event.button.y);
@@ -165,11 +174,27 @@ void handleInput(SDL_Event& event, bool& running) {
                         {"Flee",    []()      {}}
                     });
                 } else {
-                    currentPath.clear();
-                    pathIndex = 0;
-                    previewPath.clear();
-                    lastHoverX = -1;
-                    lastHoverY = -1;
+                    // Non-enemy tile: show context menu if explored
+                    if (map[mouseY][mouseX].explored) {
+                        int mx = mouseX, my = mouseY;
+                        std::vector<MenuItem> items;
+                        if (map[my][mx].walkable()) {
+                            items.push_back({"Move here", [mx, my]() {
+                                currentPath = findPath(player.x, player.y, mx, my);
+                                pathIndex = 1;
+                            }});
+                        }
+                        items.push_back({"Examine", [mx, my]() {
+                            examinePanel.show(mx, my);
+                        }});
+                        contextMenu.show(event.button.x, event.button.y, items);
+                    } else {
+                        currentPath.clear();
+                        pathIndex = 0;
+                        previewPath.clear();
+                        lastHoverX = -1;
+                        lastHoverY = -1;
+                    }
                 }
             }
         }
@@ -336,6 +361,8 @@ int main(int argc, char* argv[]) {
         ui.renderStats(renderer, font);
         panel.render(renderer, font, player);
         bodyPanel.render(renderer, font, player);
+        if (examinePanel.visible)
+            examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
         contextMenu.render(renderer, font);
 
         if (!player.isAlive()) {

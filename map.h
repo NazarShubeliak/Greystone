@@ -11,6 +11,7 @@ struct Tile {
     int  terrainId = T_GRASSLAND;
     int  groundId  = -1;   // -1 = none
     int  objectId  = -1;   // -1 = none
+    int  objectHp  = 0;    // current HP of the object on this tile
     bool visible   = false;
     bool explored  = false;
 

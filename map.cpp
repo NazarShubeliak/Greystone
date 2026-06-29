@@ -92,6 +92,8 @@ static void spawnObject(Tile& t) {
             break;
         default: break;
     }
+    if (t.objectId >= 0)
+        t.objectHp = objectDefs[t.objectId].durability;
 }
 
 // ---------------------------------------------------------------- sector generation
@@ -149,6 +151,7 @@ void generateSector(BiomeType biome) {
             Tile& t = map[y][x];
             t.groundId = -1;
             t.objectId = -1;
+            t.objectHp = 0;
             t.visible  = false;
             t.explored = false;
 
