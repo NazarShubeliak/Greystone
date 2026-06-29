@@ -60,7 +60,7 @@ void initEnemy() {
             x = rand() % (MAP_WIDTH - 2) + 1;
             y = rand() % (MAP_HEIGHT - 2) + 1;
         } while (!map[y][x].walkable);
-        enemies.push_back(Enemy(x, y, "E", red, 75, 50, 10));
+        enemies.push_back(Enemy(x, y, "E", red, 75, Race::HUMAN, 10));
     }
 }
 
