@@ -11,14 +11,6 @@ const int PANEL_HEIGHT    = 150;
 const int MAP_VIEW_HEIGHT = SCREEN_HEIGHT - PANEL_HEIGHT;
 const int VIEW_RADIUS     = 16;
 
-struct Tile {
-    bool walkable;
-    const char* symbol;
-    SDL_Color color;
-    bool visible;
-    bool explored;
-};
-
 struct Node {
     int x, y;
     int g, h, f;

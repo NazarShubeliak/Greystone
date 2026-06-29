@@ -10,16 +10,11 @@
 #include <SDL2/SDL_ttf.h>
 #include <vector>
 
-SDL_Color white  = {255, 255, 255, 255};
-SDL_Color green  = {0,   255,   0, 255};
-SDL_Color orange = {255, 140,   0, 255};
-SDL_Color yellow = {255, 255,   0, 255};
-SDL_Color red    = {255,   0,   0, 255};
+SDL_Color white = {255, 255, 255, 255};
+SDL_Color red   = {255,   0,   0, 255};
 
 Tile map[MAP_HEIGHT][MAP_WIDTH];
 
-SDL_Texture* texWall       = nullptr;
-SDL_Texture* texFloor      = nullptr;
 SDL_Texture* texCursor     = nullptr;
 SDL_Texture* playerTexture = nullptr;
 SDL_Texture* enemyTexture  = nullptr;
@@ -61,7 +56,7 @@ void initEnemy() {
         do {
             x = rand() % (MAP_WIDTH - 2) + 1;
             y = rand() % (MAP_HEIGHT - 2) + 1;
-        } while (!map[y][x].walkable);
+        } while (!map[y][x].walkable());
         enemies.push_back(Enemy(x, y, "E", red, 75, Race::HUMAN, 10));
     }
 }
@@ -147,7 +142,7 @@ void handleInput(SDL_Event& event, bool& running) {
                     panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
                     if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
                     onPlayerAct();
-                } else if (map[mouseY][mouseX].walkable) {
+                } else if (map[mouseY][mouseX].walkable()) {
                     currentPath = findPath(player.x, player.y, mouseX, mouseY);
                     pathIndex = 1;
                 }
@@ -218,7 +213,7 @@ bool updatePlayer() {
     }
 
     // Tile became unwalkable (wall spawned, etc.).
-    if (!map[next.y][next.x].walkable) {
+    if (!map[next.y][next.x].walkable()) {
         currentPath.clear();
         pathIndex = 0;
         return false;
@@ -293,7 +288,7 @@ void updateCamera() {
 int main(int argc, char* argv[]) {
     SDL_Init(SDL_INIT_VIDEO);
     TTF_Init();
-    initMap();
+    generateSector(BiomeType::FOREST);
     initEnemy();
 
     // Give everyone starting energy so they're ready to act immediately.
@@ -351,10 +346,11 @@ int main(int argc, char* argv[]) {
     }
 
     SDL_DestroyTexture(playerTexture);
-    SDL_DestroyTexture(texWall);
-    SDL_DestroyTexture(texFloor);
     SDL_DestroyTexture(texCursor);
     SDL_DestroyTexture(enemyTexture);
+    for (int i = 0; i < T_COUNT; i++) SDL_DestroyTexture(terrainTex[i]);
+    for (int i = 0; i < G_COUNT; i++) SDL_DestroyTexture(groundTex[i]);
+    for (int i = 0; i < O_COUNT; i++) SDL_DestroyTexture(objectTex[i]);
     TTF_CloseFont(font);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
