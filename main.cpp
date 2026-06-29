@@ -8,7 +8,6 @@
 #include "overmap.h"
 #include "cheat_console.h"
 #include "inventory.h"
-#include "item_examine_panel.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
@@ -46,7 +45,6 @@ ExaminePanel examinePanel;
 Overmap overmap;
 CheatConsole console;
 InventoryPanel inventoryPanel;
-ItemExaminePanel itemExaminePanel;
 std::vector<GroundItem> groundItems;
 int playerSectorX = 50;
 int playerSectorY = 50;
@@ -269,13 +267,7 @@ void handleInput(SDL_Event& event, bool& running) {
         int mouseX = event.button.x / TILE_SIZE + cameraX;
         int mouseY = event.button.y / TILE_SIZE + cameraY;
 
-        // Any click closes the item examine panel.
-        if (itemExaminePanel.visible) {
-            itemExaminePanel.hide();
-            return;
-        }
-
-        // Any click closes the tile examine panel.
+        // Any click closes the examine panel.
         if (examinePanel.visible) {
             examinePanel.hide();
             return;
@@ -331,7 +323,7 @@ void handleInput(SDL_Event& event, bool& running) {
                         int mx = mouseX, my = mouseY;
                         std::vector<MenuItem> items;
 
-                        // Ground item options
+                        // Ground item: pick up option
                         GroundItem* gi = getGroundItemAt(mx, my);
                         if (gi && map[my][mx].visible) {
                             items.push_back({"Pick up " + gi->item.name,
@@ -349,11 +341,6 @@ void handleInput(SDL_Event& event, bool& running) {
                                     }
                                 }
                             });
-                            items.push_back({"Examine " + gi->item.name,
-                                [item=gi->item]() {
-                                    itemExaminePanel.show(item);
-                                }
-                            });
                         }
 
                         if (map[my][mx].walkable()) {
@@ -362,9 +349,17 @@ void handleInput(SDL_Event& event, bool& running) {
                                 pathIndex = 1;
                             }});
                         }
-                        items.push_back({"Examine", [mx, my]() {
-                            examinePanel.show(mx, my);
-                        }});
+
+                        // Single "Examine" button — shows item (if any) + tile info together
+                        if (gi && map[my][mx].visible) {
+                            items.push_back({"Examine", [mx, my, item=gi->item]() {
+                                examinePanel.show(mx, my, item);
+                            }});
+                        } else {
+                            items.push_back({"Examine", [mx, my]() {
+                                examinePanel.show(mx, my);
+                            }});
+                        }
                         contextMenu.show(event.button.x, event.button.y, items);
                     } else {
                         currentPath.clear();
@@ -582,7 +577,6 @@ int main(int argc, char* argv[]) {
         bodyPanel.render(renderer, font, player);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
-        itemExaminePanel.render(renderer, font);
         inventoryPanel.render(renderer, font, player);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);

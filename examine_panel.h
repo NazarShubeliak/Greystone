@@ -1,5 +1,6 @@
 #pragma once
 #include "map.h"
+#include "item.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
@@ -7,20 +8,35 @@
 struct ExaminePanel {
     bool visible = false;
     int  tileX = 0, tileY = 0;
+    bool hasItem = false;
+    Item groundItem;
 
-    void show(int x, int y) { tileX = x; tileY = y; visible = true; }
+    void show(int x, int y) {
+        tileX = x; tileY = y;
+        hasItem = false;
+        visible = true;
+    }
+
+    void show(int x, int y, const Item& item) {
+        tileX = x; tileY = y;
+        groundItem = item;
+        hasItem = true;
+        visible = true;
+    }
+
     void hide() { visible = false; }
 
     void render(SDL_Renderer* r, TTF_Font* f, const Tile& tile) {
         if (!visible) return;
 
         const int W  = 480;
-        const int H  = 300;
+        const int H  = hasItem ? 400 : 300;
         const int px = (SCREEN_WIDTH - W) / 2;
         const int py = (MAP_VIEW_HEIGHT - H) / 2;
         const int LX = px + 14;
         int cy = py + 12;
 
+        // ── Helpers ──────────────────────────────────────────────────────
         auto txt = [&](const std::string& text, SDL_Color col) {
             SDL_Surface* s = TTF_RenderText_Solid(f, text.c_str(), col);
             if (!s) return;
@@ -40,14 +56,12 @@ struct ExaminePanel {
             cy += 10;
         };
 
-        // Background
+        // ── Background + border ──────────────────────────────────────────
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(r, 12, 14, 18, 235);
         SDL_Rect bg = {px, py, W, H};
         SDL_RenderFillRect(r, &bg);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-
-        // Border
         SDL_SetRenderDrawColor(r, 120, 100, 50, 255);
         SDL_RenderDrawRect(r, &bg);
 
@@ -57,12 +71,71 @@ struct ExaminePanel {
         SDL_Color objCol = {180, 200,  70, 255};
         SDL_Color gndCol = { 70, 180,  90, 255};
         SDL_Color terCol = { 70, 145, 185, 255};
+        SDL_Color itmCol = {220, 195,  60, 255};
 
-        // Title row
+        // Title
         txt("EXAMINE  [" + std::to_string(tileX) + ", " + std::to_string(tileY) + "]", gold);
         hline();
 
-        // ── Object ──────────────────────────────────────────────────────
+        // ── Item on ground ────────────────────────────────────────────────
+        if (hasItem) {
+            SDL_Color typeCol = typeVisuals[(int)groundItem.type].color;
+
+            // Header: symbol + name
+            txt(std::string("[Item]    ")
+                + groundItem.groundSymbol() + " " + groundItem.name, itmCol);
+
+            // Description
+            txt(std::string("  ") + groundItem.description, dim);
+
+            // Compact stats line 1: vol / weight / value
+            std::string line1 = "  Vol: " + std::to_string(groundItem.volume) + " ml"
+                              + "   Wt: " + std::to_string(groundItem.weight) + " g";
+            if (groundItem.value > 0)
+                line1 += "   Value: " + std::to_string(groundItem.value) + " gold";
+            txt(line1, white);
+
+            // Stats line 2: type-specific
+            std::string line2;
+            switch (groundItem.type) {
+                case ItemType::WEAPON:
+                    line2 = "  Damage: " + std::to_string(groundItem.damage);
+                    if (groundItem.twoHanded) line2 += "   Two-handed";
+                    if (groundItem.slot != EquipSlot::NONE)
+                        line2 += "   Slot: " + std::string(slotNames[(int)groundItem.slot]);
+                    break;
+                case ItemType::ARMOR:
+                    line2 = "  Defense: " + std::to_string(groundItem.defense);
+                    if (groundItem.slot != EquipSlot::NONE)
+                        line2 += "   Slot: " + std::string(slotNames[(int)groundItem.slot]);
+                    break;
+                case ItemType::CONTAINER:
+                    line2 = "  Capacity: " + std::to_string(groundItem.maxVolume) + " ml"
+                          + " / " + std::to_string(groundItem.maxWeight) + " g";
+                    break;
+                case ItemType::FOOD:
+                    line2 = "  Nutrition: " + std::to_string(groundItem.nutrition) + "%";
+                    break;
+                case ItemType::DRINK:
+                    line2 = "  Hydration: " + std::to_string(groundItem.hydration) + "%";
+                    break;
+                case ItemType::JEWELRY: {
+                    std::string bonuses;
+                    if (groundItem.strBonus) bonuses += "STR+" + std::to_string(groundItem.strBonus) + " ";
+                    if (groundItem.dexBonus) bonuses += "DEX+" + std::to_string(groundItem.dexBonus) + " ";
+                    if (groundItem.conBonus) bonuses += "CON+" + std::to_string(groundItem.conBonus) + " ";
+                    if (!bonuses.empty()) line2 = "  Bonuses: " + bonuses;
+                    if (groundItem.slot != EquipSlot::NONE)
+                        line2 += "   Slot: " + std::string(slotNames[(int)groundItem.slot]);
+                    break;
+                }
+                default: break;
+            }
+            if (!line2.empty()) txt(line2, typeCol);
+            hline();
+        }
+
+        // ── Object ───────────────────────────────────────────────────────
         if (tile.objectId >= 0) {
             const ObjectDef& od = objectDefs[tile.objectId];
             txt(std::string("[Object]  ") + od.name, objCol);
@@ -81,7 +154,7 @@ struct ExaminePanel {
             hline();
         }
 
-        // ── Ground cover ─────────────────────────────────────────────────
+        // ── Ground cover ──────────────────────────────────────────────────
         if (tile.groundId >= 0) {
             const GroundDef& gd = groundDefs[tile.groundId];
             txt(std::string("[Ground]  ") + gd.name, gndCol);
@@ -90,7 +163,7 @@ struct ExaminePanel {
             hline();
         }
 
-        // ── Terrain ──────────────────────────────────────────────────────
+        // ── Terrain ───────────────────────────────────────────────────────
         const TerrainDef& td = terrainDefs[tile.terrainId];
         txt(std::string("[Terrain] ") + td.name, terCol);
         txt(std::string("  ") + td.description, dim);
@@ -100,7 +173,7 @@ struct ExaminePanel {
         txt(terrStr, white);
         hline();
 
-        // ── Summary ──────────────────────────────────────────────────────
+        // ── Summary ───────────────────────────────────────────────────────
         std::string total = tile.walkable()
             ? "Total move cost: " + std::to_string(tile.moveCost())
             : "Total: Impassable";
