@@ -17,18 +17,25 @@ struct SectorInfo {
 
 struct BiomeVisual {
     const char* name;
+    const char* description;
     const char* symbol;
     SDL_Color   fg;
     SDL_Color   bg;
 };
 
 static const BiomeVisual biomeVisuals[] = {
-    { "Plains",       ".",  {100, 180,  60, 255}, { 10,  35,   5, 255} },
-    { "Forest",       "%",  { 20, 130,  20, 255}, {  3,  22,   3, 255} },
-    { "Swamp",        "~",  { 70, 120,  40, 255}, { 10,  25,   8, 255} },
-    { "Desert",       ".",  {210, 175,  80, 255}, { 45,  35,   5, 255} },
-    { "Tundra",       ".",  {180, 205, 225, 255}, { 25,  35,  55, 255} },
-    { "Cursed Lands", "&",  {150,  40, 170, 255}, { 25,   5,  35, 255} },
+    { "Plains",       "Open grasslands. Farms and villages are common here.",
+      ".",  {100, 180,  60, 255}, { 10,  35,   5, 255} },
+    { "Forest",       "Dense woodland. Wolves, bandits and worse lurk in the shadows.",
+      "%",  { 20, 130,  20, 255}, {  3,  22,   3, 255} },
+    { "Swamp",        "Murky wetlands thick with fog. The ground is treacherous.",
+      "~",  { 70, 120,  40, 255}, { 10,  25,   8, 255} },
+    { "Desert",       "Scorching sands under a merciless sun. Water is scarce.",
+      ".",  {210, 175,  80, 255}, { 45,  35,   5, 255} },
+    { "Tundra",       "Frozen wastelands swept by bitter winds. Few survive here.",
+      ".",  {180, 205, 225, 255}, { 25,  35,  55, 255} },
+    { "Cursed Lands", "Blighted by dark magic. The very ground writhes with evil.",
+      "&",  {150,  40, 170, 255}, { 25,   5,  35, 255} },
 };
 
 struct Overmap {
@@ -168,6 +175,52 @@ struct Overmap {
         if (pvx >= 0 && pvx < vW && pvy >= 0 && pvy < vH) {
             SDL_Rect pcell = {pvx * CS, pvy * CS, CS, CS};
             SDL_RenderCopy(r, playerTex, nullptr, &pcell);
+        }
+
+        // ── Sector info box (bottom-left, above legend) ─────────────────
+        {
+            const int BW = 320;
+            const int BH = 74;
+            const int BX = 8;
+            const int BY = MAP_VIEW_HEIGHT - 22 - BH - 6;
+            const SectorInfo& sec = sectors[camY][camX];
+            int bi2 = (int)sec.biome;
+
+            SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(r, 10, 12, 16, 218);
+            SDL_Rect box = {BX, BY, BW, BH};
+            SDL_RenderFillRect(r, &box);
+            SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+
+            // Border tinted with biome colour (dimmed)
+            SDL_Color bc = sec.explored ? biomeVisuals[bi2].fg : SDL_Color{55,55,50,255};
+            SDL_SetRenderDrawColor(r, bc.r / 2, bc.g / 2, bc.b / 2, 255);
+            SDL_RenderDrawRect(r, &box);
+
+            int ty = BY + 8;
+            auto line = [&](const char* text, SDL_Color col) {
+                SDL_Surface* s = TTF_RenderText_Solid(f, text, col);
+                if (!s) return;
+                SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
+                SDL_FreeSurface(s);
+                int w, h;
+                SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
+                SDL_Rect d = {BX + 10, ty, w, h};
+                SDL_RenderCopy(r, t, nullptr, &d);
+                SDL_DestroyTexture(t);
+                ty += h + 4;
+            };
+
+            if (!sec.explored) {
+                line("Unknown Region",              {85, 85, 80, 255});
+                line("This area has not been explored yet.", {60, 60, 55, 255});
+                line("Enter the region to reveal it.",       {50, 50, 45, 255});
+            } else {
+                const BiomeVisual& bv = biomeVisuals[bi2];
+                line(bv.name,        bv.fg);
+                line(bv.description, {150, 145, 130, 255});
+                line("Status: Explored", {75, 160, 75, 255});
+            }
         }
 
         // Title bar (semi-transparent strip)
