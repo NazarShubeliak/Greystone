@@ -362,6 +362,45 @@ struct Player : Actor {
     // Which container's contents are shown in the inventory UI (default: BACK).
     int activeContainerSlot = (int)EquipSlot::BACK;
 
+    // ---- Effective stats (base + item bonuses) ----
+
+    int effectiveStr() const {
+        int b = 0;
+        for (int i = 0; i < (int)EquipSlot::SLOT_COUNT; i++)
+            if (worn[i].has_value()) b += worn[i]->strBonus;
+        return strength + b;
+    }
+    int effectiveDex() const {
+        int b = 0;
+        for (int i = 0; i < (int)EquipSlot::SLOT_COUNT; i++)
+            if (worn[i].has_value()) b += worn[i]->dexBonus;
+        return dexterity + b;
+    }
+    int effectiveCon() const {
+        int b = 0;
+        for (int i = 0; i < (int)EquipSlot::SLOT_COUNT; i++)
+            if (worn[i].has_value()) b += worn[i]->conBonus;
+        return constitution + b;
+    }
+    int strItemBonus() const {
+        int b = 0;
+        for (int i = 0; i < (int)EquipSlot::SLOT_COUNT; i++)
+            if (worn[i].has_value()) b += worn[i]->strBonus;
+        return b;
+    }
+    int dexItemBonus() const {
+        int b = 0;
+        for (int i = 0; i < (int)EquipSlot::SLOT_COUNT; i++)
+            if (worn[i].has_value()) b += worn[i]->dexBonus;
+        return b;
+    }
+    int conItemBonus() const {
+        int b = 0;
+        for (int i = 0; i < (int)EquipSlot::SLOT_COUNT; i++)
+            if (worn[i].has_value()) b += worn[i]->conBonus;
+        return b;
+    }
+
     // ---- Inventory helpers ----
 
     // Total carry volume across all worn containers.

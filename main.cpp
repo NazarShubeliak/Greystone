@@ -8,6 +8,7 @@
 #include "overmap.h"
 #include "cheat_console.h"
 #include "inventory.h"
+#include "item_examine_panel.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
@@ -45,6 +46,7 @@ ExaminePanel examinePanel;
 Overmap overmap;
 CheatConsole console;
 InventoryPanel inventoryPanel;
+ItemExaminePanel itemExaminePanel;
 std::vector<GroundItem> groundItems;
 int playerSectorX = 50;
 int playerSectorY = 50;
@@ -115,7 +117,8 @@ void enemyAct(Enemy& enemy) {
 
     SDL_Point next = path[1];
     if (next.x == player.x && next.y == player.y) {
-        int damage = 3 + (enemy.strength - 10) / 2;
+        int rawDmg = 3 + (enemy.strength - 10) / 2;
+        int damage = std::max(1, rawDmg - player.totalDefense());
         player.takeDamage(damage);
         panel.addMessage(enemy.name + " hits you for " + std::to_string(damage) + " damage.");
         if (!player.isAlive())
@@ -267,7 +270,13 @@ void handleInput(SDL_Event& event, bool& running) {
         int mouseX = event.button.x / TILE_SIZE + cameraX;
         int mouseY = event.button.y / TILE_SIZE + cameraY;
 
-        // Any click closes the examine panel.
+        // Any click closes the item examine panel.
+        if (itemExaminePanel.visible) {
+            itemExaminePanel.hide();
+            return;
+        }
+
+        // Any click closes the tile examine panel.
         if (examinePanel.visible) {
             examinePanel.hide();
             return;
@@ -282,7 +291,8 @@ void handleInput(SDL_Event& event, bool& running) {
         // Inventory panel — consumes all clicks while open.
         if (inventoryPanel.visible) {
             inventoryPanel.handleClick(event.button.x, event.button.y,
-                                       player, contextMenu, groundItems);
+                                       player, contextMenu, groundItems,
+                                       &itemExaminePanel);
             return;
         }
 
@@ -290,7 +300,7 @@ void handleInput(SDL_Event& event, bool& running) {
             if (mouseX >= 0 && mouseX < MAP_WIDTH && mouseY >= 0 && mouseY < MAP_HEIGHT) {
                 Enemy* enemy = getEnemyAt(mouseX, mouseY);
                 if (enemy && map[mouseY][mouseX].visible) {
-                    int damage = 5 + (player.strength - 10) / 2 + player.weaponDamage() - 1;
+                    int damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
                     enemy->takeDamage(damage);
                     panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
                     if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
@@ -308,7 +318,7 @@ void handleInput(SDL_Event& event, bool& running) {
                 if (enemy && map[mouseY][mouseX].visible) {
                     contextMenu.show(event.button.x, event.button.y, {
                         {"Attack", [enemy]() {
-                            int damage = 5 + (player.strength - 10) / 2 + player.weaponDamage() - 1;
+                            int damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
                             enemy->takeDamage(damage);
                             panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
                             if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
@@ -400,7 +410,7 @@ bool updatePlayer() {
     // Attack enemy blocking the path instead of moving.
     Enemy* blocker = getEnemyAt(next.x, next.y);
     if (blocker) {
-        int damage = 5 + (player.strength - 10) / 2 + player.weaponDamage() - 1;
+        int damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
         blocker->takeDamage(damage);
         panel.addMessage("You hit " + blocker->name + " for " + std::to_string(damage) + " damage.");
         if (!blocker->isAlive()) panel.addMessage(blocker->name + " dies.");
@@ -577,6 +587,7 @@ int main(int argc, char* argv[]) {
         bodyPanel.render(renderer, font, player);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
+        itemExaminePanel.render(renderer, font);
         inventoryPanel.render(renderer, font, player);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);

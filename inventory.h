@@ -2,6 +2,7 @@
 #include "item.h"
 #include "actor.h"
 #include "context_menu.h"
+#include "item_examine_panel.h"
 #include "astar.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -18,7 +19,8 @@ struct InventoryPanel {
 
     // Returns true if the click was consumed by the panel.
     bool handleClick(int mx, int my, Player& p,
-                     ContextMenu& ctx, std::vector<GroundItem>& ground) {
+                     ContextMenu& ctx, std::vector<GroundItem>& ground,
+                     ItemExaminePanel* examPanel = nullptr) {
         if (!visible) return false;
 
         const int LEFT_W  = 340;
@@ -37,20 +39,25 @@ struct InventoryPanel {
             }
 
             // Show options for this equipped item
-            ctx.show(mx, my, {
-                {"Unequip", [&p, s, &ground]() {
-                    if (!p.worn[s]) return;
-                    Item it = std::move(*p.worn[s]);
-                    p.worn[s].reset();
-                    if (!p.addToContainer(it))
-                        ground.push_back({p.x, p.y, std::move(it)});
-                }},
-                {"Drop", [&p, s, &ground]() {
-                    if (!p.worn[s]) return;
-                    ground.push_back({p.x, p.y, std::move(*p.worn[s])});
-                    p.worn[s].reset();
-                }}
-            });
+            std::vector<MenuItem> eqOpts;
+            eqOpts.push_back({"Unequip", [&p, s, &ground]() {
+                if (!p.worn[s]) return;
+                Item it = std::move(*p.worn[s]);
+                p.worn[s].reset();
+                if (!p.addToContainer(it))
+                    ground.push_back({p.x, p.y, std::move(it)});
+            }});
+            eqOpts.push_back({"Drop", [&p, s, &ground]() {
+                if (!p.worn[s]) return;
+                ground.push_back({p.x, p.y, std::move(*p.worn[s])});
+                p.worn[s].reset();
+            }});
+            if (examPanel) {
+                eqOpts.push_back({"Examine", [ep=examPanel, &p, s]() {
+                    if (p.worn[s].has_value()) ep->show(*p.worn[s]);
+                }});
+            }
+            ctx.show(mx, my, eqOpts);
             return true;
         }
 
@@ -106,6 +113,14 @@ struct InventoryPanel {
             ground.push_back({p.x, p.y, cont[idx]});
             cont.erase(cont.begin() + idx);
         }});
+        if (examPanel) {
+            opts.push_back({"Examine", [ep=examPanel, &p, cs, idx]() {
+                if (!p.worn[cs]) return;
+                auto& cont = p.worn[cs]->contents;
+                if (idx >= (int)cont.size()) return;
+                ep->show(cont[idx]);
+            }});
+        }
 
         ctx.show(mx, my, opts);
         return true;
