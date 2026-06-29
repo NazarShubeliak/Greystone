@@ -352,6 +352,8 @@ struct Actor {
 // ================================================================ Player
 
 struct Player : Actor {
+    int medicineSkill = 0;   // 0 = untrained, 4+ = trained medic
+
     Player(int x, int y,
            int str = 10, int dex = 10, int intel = 10,
            int con = 10, int per = 10, int cha = 10)

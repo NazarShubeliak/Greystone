@@ -2,6 +2,7 @@
 #include "actor.h"
 #include "ui.h"
 #include "bottom_panel.h"
+#include "body_panel.h"
 #include "context_menu.h"
 #include "map.h"
 #include "render.h"
@@ -37,6 +38,7 @@ std::vector<SDL_Point> previewPath;
 int cameraX = 0, cameraY = 0;
 UI ui;
 BottomPanel panel;
+BodyPanel bodyPanel;
 ContextMenu contextMenu;
 
 // ------------------------------------------------------------------ helpers
@@ -83,9 +85,9 @@ void enemyAct(Enemy& enemy) {
     if (next.x == player.x && next.y == player.y) {
         int damage = 3 + (enemy.strength - 10) / 2;
         player.takeDamage(damage);
-        panel.addMessage("The enemy hits you for " + std::to_string(damage) + " damage.");
+        panel.addMessage(enemy.name + " hits you for " + std::to_string(damage) + " damage.");
         if (!player.isAlive())
-            panel.addMessage("You died.");
+            panel.addMessage("You have been slain by " + enemy.name + ".");
     } else if (!isTileOccupied(next.x, next.y)) {
         enemy.x = next.x;
         enemy.y = next.y;
@@ -95,9 +97,11 @@ void enemyAct(Enemy& enemy) {
 // One world tick: give everyone energy, then let enemies spend theirs.
 void tickWorld() {
     player.energy += player.speed;
+    player.tickNeeds();
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
         e.energy += e.speed;
+        e.tickNeeds();
         while (e.energy >= 100) {
             enemyAct(e);
             e.energy -= 100;
@@ -120,8 +124,9 @@ void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_QUIT) running = false;
 
     if (event.type == SDL_KEYDOWN) {
-        if (event.key.keysym.sym == SDLK_o)
-            ui.toggle();
+        if (event.key.keysym.sym == SDLK_o)      ui.toggle();
+        if (event.key.keysym.sym == SDLK_b)      bodyPanel.toggle();
+        if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
     }
 
     if (event.type == SDL_MOUSEBUTTONDOWN) {
@@ -139,8 +144,8 @@ void handleInput(SDL_Event& event, bool& running) {
                 if (enemy && map[mouseY][mouseX].visible) {
                     int damage = 5 + (player.strength - 10) / 2;
                     enemy->takeDamage(damage);
-                    panel.addMessage("You hit the enemy for " + std::to_string(damage) + " damage.");
-                    if (!enemy->isAlive()) panel.addMessage("The enemy dies.");
+                    panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
+                    if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
                     onPlayerAct();
                 } else if (map[mouseY][mouseX].walkable) {
                     currentPath = findPath(player.x, player.y, mouseX, mouseY);
@@ -157,8 +162,8 @@ void handleInput(SDL_Event& event, bool& running) {
                         {"Attack", [enemy]() {
                             int damage = 5 + (player.strength - 10) / 2;
                             enemy->takeDamage(damage);
-                            panel.addMessage("You hit the enemy for " + std::to_string(damage) + " damage.");
-                            if (!enemy->isAlive()) panel.addMessage("The enemy dies.");
+                            panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
+                            if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
                             onPlayerAct();
                         }},
                         {"Examine", [enemy]() {}},
@@ -204,8 +209,8 @@ bool updatePlayer() {
     if (blocker) {
         int damage = 5 + (player.strength - 10) / 2;
         blocker->takeDamage(damage);
-        panel.addMessage("You hit the enemy for " + std::to_string(damage) + " damage.");
-        if (!blocker->isAlive()) panel.addMessage("The enemy dies.");
+        panel.addMessage("You hit " + blocker->name + " for " + std::to_string(damage) + " damage.");
+        if (!blocker->isAlive()) panel.addMessage(blocker->name + " dies.");
         currentPath.clear();
         pathIndex = 0;
         onPlayerAct();
@@ -233,6 +238,43 @@ bool updatePlayer() {
     }
 
     return true;
+}
+
+void renderDeathScreen(SDL_Renderer* renderer, TTF_Font* font) {
+    // Dark overlay
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
+    SDL_Rect overlay = {0, 0, SCREEN_WIDTH, SCREEN_HEIGHT};
+    SDL_RenderFillRect(renderer, &overlay);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+
+    // "YOU DIED" text — rendered twice for a shadow effect
+    TTF_Font* bigFont = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 48);
+    if (bigFont) {
+        auto renderCentered = [&](const char* text, int y, SDL_Color col) {
+            SDL_Surface* s = TTF_RenderText_Solid(bigFont, text, col);
+            SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+            SDL_FreeSurface(s);
+            int w, h;
+            SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
+            SDL_Rect dst = {(SCREEN_WIDTH - w) / 2, y, w, h};
+            SDL_RenderCopy(renderer, t, nullptr, &dst);
+            SDL_DestroyTexture(t);
+        };
+        renderCentered("YOU DIED", MAP_VIEW_HEIGHT / 2 - 60, {80, 0, 0, 255});
+        renderCentered("YOU DIED", MAP_VIEW_HEIGHT / 2 - 62, {200, 0, 0, 255});
+        TTF_CloseFont(bigFont);
+    }
+
+    // Subtitle
+    SDL_Surface* s = TTF_RenderText_Solid(font, "Press Escape to quit", {150, 150, 150, 255});
+    SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+    SDL_FreeSurface(s);
+    int w, h;
+    SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
+    SDL_Rect dst = {(SCREEN_WIDTH - w) / 2, MAP_VIEW_HEIGHT / 2, w, h};
+    SDL_RenderCopy(renderer, t, nullptr, &dst);
+    SDL_DestroyTexture(t);
 }
 
 void updateCamera() {
@@ -298,7 +340,12 @@ int main(int argc, char* argv[]) {
         renderEnemies(renderer);
         ui.renderStats(renderer, font);
         panel.render(renderer, font, player);
+        bodyPanel.render(renderer, font, player);
         contextMenu.render(renderer, font);
+
+        if (!player.isAlive()) {
+            renderDeathScreen(renderer, font);
+        }
 
         SDL_RenderPresent(renderer);
     }
