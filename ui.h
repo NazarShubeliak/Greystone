@@ -47,6 +47,7 @@ struct UI {
         renderStat(renderer, font, "Charisma",     player.charisma,     70, 300);
     }
 
+
 private:
     void renderText(SDL_Renderer* renderer, TTF_Font* font,
                     const char* text, int x, int y, SDL_Color color) {

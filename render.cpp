@@ -37,8 +37,8 @@ void initTextures(SDL_Renderer* renderer, TTF_Font* font) {
 }
 
 void renderMap(SDL_Renderer* renderer) {
-    int tilesX = SCREEN_WIDTH / TILE_SIZE;
-    int tilesY = SCREEN_HEIGHT / TILE_SIZE;
+    int tilesX = SCREEN_WIDTH    / TILE_SIZE;
+    int tilesY = MAP_VIEW_HEIGHT / TILE_SIZE;
 
     for (int y = 0; y < tilesY; y++) {
         for (int x = 0; x < tilesX; x++) {
