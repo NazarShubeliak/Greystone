@@ -1,7 +1,9 @@
 #pragma once
+#include "item.h"
 #include <SDL2/SDL.h>
 #include <string>
 #include <algorithm>
+#include <optional>
 #include <cstdlib>
 
 // ================================================================ Race
@@ -352,7 +354,72 @@ struct Actor {
 // ================================================================ Player
 
 struct Player : Actor {
-    int medicineSkill = 0;   // 0 = untrained, 4+ = trained medic
+    int medicineSkill = 0;
+
+    // Equipment slots — optional so empty slots cost nothing.
+    std::optional<Item> worn[(int)EquipSlot::SLOT_COUNT];
+
+    // Which container's contents are shown in the inventory UI (default: BACK).
+    int activeContainerSlot = (int)EquipSlot::BACK;
+
+    // ---- Inventory helpers ----
+
+    // Total carry volume across all worn containers.
+    int totalCarryVolume() const {
+        int v = 500; // bare hands / pockets
+        for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++)
+            if (worn[s].has_value() && worn[s]->isContainer())
+                v += worn[s]->maxVolume;
+        return v;
+    }
+
+    int usedCarryVolume() const {
+        int v = 0;
+        for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++)
+            if (worn[s].has_value() && worn[s]->isContainer())
+                v += worn[s]->usedVolume();
+        return v;
+    }
+
+    // Total armor defense from all worn armor pieces.
+    int totalDefense() const {
+        int d = 0;
+        for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++)
+            if (worn[s].has_value()) d += worn[s]->defense;
+        return d;
+    }
+
+    // Weapon damage (HAND_R, or HAND_L as fallback, or base 1).
+    int weaponDamage() const {
+        if (worn[(int)EquipSlot::HAND_R].has_value())
+            return worn[(int)EquipSlot::HAND_R]->damage;
+        if (worn[(int)EquipSlot::HAND_L].has_value())
+            return worn[(int)EquipSlot::HAND_L]->damage;
+        return 1; // unarmed
+    }
+
+    // Try to add item to the best available container (BACK first, then WAIST, etc.).
+    // Returns true on success.
+    bool addToContainer(Item item) {
+        int order[] = {
+            (int)EquipSlot::BACK,  (int)EquipSlot::WAIST,
+            (int)EquipSlot::HANDS, (int)EquipSlot::HAND_L
+        };
+        for (int s : order) {
+            if (worn[s].has_value() && worn[s]->canFit(item)) {
+                worn[s]->contents.push_back(std::move(item));
+                return true;
+            }
+        }
+        // Try any remaining container slot
+        for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++) {
+            if (worn[s].has_value() && worn[s]->canFit(item)) {
+                worn[s]->contents.push_back(std::move(item));
+                return true;
+            }
+        }
+        return false;
+    }
 
     Player(int x, int y,
            int str = 10, int dex = 10, int intel = 10,
@@ -361,9 +428,9 @@ struct Player : Actor {
                 100 + (dex - 10) * 2,
                 Race::HUMAN, str, dex, intel, con, per, cha)
     {
-        name  = "Player";
-        age   = 25;
-        body  = Body(35, 70, 45, 55);
+        name = "Player";
+        age  = 25;
+        body = Body(35, 70, 45, 55);
         sync();
     }
 };

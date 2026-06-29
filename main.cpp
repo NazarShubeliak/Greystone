@@ -7,6 +7,7 @@
 #include "examine_panel.h"
 #include "overmap.h"
 #include "cheat_console.h"
+#include "inventory.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
@@ -43,6 +44,8 @@ ContextMenu contextMenu;
 ExaminePanel examinePanel;
 Overmap overmap;
 CheatConsole console;
+InventoryPanel inventoryPanel;
+std::vector<GroundItem> groundItems;
 int playerSectorX = 50;
 int playerSectorY = 50;
 
@@ -52,6 +55,30 @@ Enemy* getEnemyAt(int x, int y) {
     for (Enemy& e : enemies)
         if (e.isAlive() && e.x == x && e.y == y) return &e;
     return nullptr;
+}
+
+// Returns the first ground item at (x, y), or nullptr if none.
+GroundItem* getGroundItemAt(int x, int y) {
+    for (GroundItem& gi : groundItems)
+        if (gi.x == x && gi.y == y) return &gi;
+    return nullptr;
+}
+
+// Pick up all items at player's position, put them in best container.
+void pickUpAtPlayer() {
+    bool any = false;
+    for (int i = (int)groundItems.size() - 1; i >= 0; i--) {
+        if (groundItems[i].x != player.x || groundItems[i].y != player.y) continue;
+        std::string name = groundItems[i].item.name;
+        if (player.addToContainer(groundItems[i].item)) {
+            panel.addMessage("You pick up the " + name + ".");
+            groundItems.erase(groundItems.begin() + i);
+            any = true;
+        } else {
+            panel.addMessage("No room for the " + name + ".");
+        }
+    }
+    if (!any) panel.addMessage("Nothing to pick up here.");
 }
 
 bool isTileOccupied(int x, int y) {
@@ -228,7 +255,12 @@ void handleInput(SDL_Event& event, bool& running) {
         if (event.key.keysym.sym == SDLK_b)      bodyPanel.toggle();
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
         if (event.key.keysym.sym == SDLK_m)      overmap.open(playerSectorX, playerSectorY);
-        if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
+        if (event.key.keysym.sym == SDLK_i)      inventoryPanel.toggle();
+        if (event.key.keysym.sym == SDLK_g)      pickUpAtPlayer();
+        if (event.key.keysym.sym == SDLK_ESCAPE) {
+            if (inventoryPanel.visible) inventoryPanel.close();
+            else                        running = false;
+        }
     }
 
     if (event.type == SDL_MOUSEBUTTONDOWN) {
@@ -241,8 +273,16 @@ void handleInput(SDL_Event& event, bool& running) {
             return;
         }
 
+        // Context menu has priority — handles menu items from inventory too.
         if (contextMenu.visible) {
             contextMenu.handleClick(event.button.x, event.button.y);
+            return;
+        }
+
+        // Inventory panel — consumes all clicks while open.
+        if (inventoryPanel.visible) {
+            inventoryPanel.handleClick(event.button.x, event.button.y,
+                                       player, contextMenu, groundItems);
             return;
         }
 
@@ -250,7 +290,7 @@ void handleInput(SDL_Event& event, bool& running) {
             if (mouseX >= 0 && mouseX < MAP_WIDTH && mouseY >= 0 && mouseY < MAP_HEIGHT) {
                 Enemy* enemy = getEnemyAt(mouseX, mouseY);
                 if (enemy && map[mouseY][mouseX].visible) {
-                    int damage = 5 + (player.strength - 10) / 2;
+                    int damage = 5 + (player.strength - 10) / 2 + player.weaponDamage() - 1;
                     enemy->takeDamage(damage);
                     panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
                     if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
@@ -268,7 +308,7 @@ void handleInput(SDL_Event& event, bool& running) {
                 if (enemy && map[mouseY][mouseX].visible) {
                     contextMenu.show(event.button.x, event.button.y, {
                         {"Attack", [enemy]() {
-                            int damage = 5 + (player.strength - 10) / 2;
+                            int damage = 5 + (player.strength - 10) / 2 + player.weaponDamage() - 1;
                             enemy->takeDamage(damage);
                             panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
                             if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
@@ -282,6 +322,27 @@ void handleInput(SDL_Event& event, bool& running) {
                     if (map[mouseY][mouseX].explored) {
                         int mx = mouseX, my = mouseY;
                         std::vector<MenuItem> items;
+
+                        // Ground item option
+                        GroundItem* gi = getGroundItemAt(mx, my);
+                        if (gi && map[my][mx].visible) {
+                            items.push_back({"Pick up " + gi->item.name,
+                                [gx=mx, gy=my]() {
+                                    for (int i = (int)groundItems.size()-1; i >= 0; i--) {
+                                        if (groundItems[i].x != gx || groundItems[i].y != gy) continue;
+                                        std::string n = groundItems[i].item.name;
+                                        if (player.addToContainer(groundItems[i].item)) {
+                                            panel.addMessage("You pick up the " + n + ".");
+                                            groundItems.erase(groundItems.begin() + i);
+                                        } else {
+                                            panel.addMessage("No room for the " + n + ".");
+                                        }
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+
                         if (map[my][mx].walkable()) {
                             items.push_back({"Move here", [mx, my]() {
                                 currentPath = findPath(player.x, player.y, mx, my);
@@ -331,7 +392,7 @@ bool updatePlayer() {
     // Attack enemy blocking the path instead of moving.
     Enemy* blocker = getEnemyAt(next.x, next.y);
     if (blocker) {
-        int damage = 5 + (player.strength - 10) / 2;
+        int damage = 5 + (player.strength - 10) / 2 + player.weaponDamage() - 1;
         blocker->takeDamage(damage);
         panel.addMessage("You hit " + blocker->name + " for " + std::to_string(damage) + " damage.");
         if (!blocker->isAlive()) panel.addMessage(blocker->name + " dies.");
@@ -424,6 +485,19 @@ int main(int argc, char* argv[]) {
                    playerSectorX, playerSectorY);
     initEnemy();
 
+    // Starting equipment
+    player.worn[(int)EquipSlot::BACK]  = Items::backpack();
+    player.worn[(int)EquipSlot::WAIST] = Items::beltPouch();
+    player.addToContainer(Items::bread());
+    player.addToContainer(Items::waterFlask());
+
+    // Scatter a few items on the ground near the player for testing
+    groundItems.push_back({player.x + 2, player.y,     Items::ironSword()});
+    groundItems.push_back({player.x - 2, player.y,     Items::goldRing()});
+    groundItems.push_back({player.x,     player.y + 2, Items::ironHelmet()});
+    groundItems.push_back({player.x + 1, player.y + 1, Items::leatherVest()});
+    groundItems.push_back({player.x - 1, player.y - 1, Items::leatherBoots()});
+
     // Give everyone starting energy so they're ready to act immediately.
     player.energy = player.speed;
     for (Enemy& e : enemies) e.energy = e.speed;
@@ -470,6 +544,23 @@ int main(int argc, char* argv[]) {
         SDL_RenderClear(renderer);
 
         renderMap(renderer);
+
+        // Ground items on top of map tiles
+        for (const auto& gi : groundItems) {
+            if (!map[gi.y][gi.x].visible) continue;
+            int sx = (gi.x - cameraX) * TILE_SIZE;
+            int sy = (gi.y - cameraY) * TILE_SIZE;
+            if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+            SDL_Surface* gs = TTF_RenderText_Solid(font, gi.item.groundSymbol(), gi.item.groundColor());
+            if (gs) {
+                SDL_Texture* gt = SDL_CreateTextureFromSurface(renderer, gs);
+                SDL_FreeSurface(gs);
+                SDL_Rect dst = {sx, sy, TILE_SIZE, TILE_SIZE};
+                SDL_RenderCopy(renderer, gt, nullptr, &dst);
+                SDL_DestroyTexture(gt);
+            }
+        }
+
         renderPath(renderer);
         renderPlayer(renderer);
         renderEnemies(renderer);
@@ -478,6 +569,7 @@ int main(int argc, char* argv[]) {
         bodyPanel.render(renderer, font, player);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
+        inventoryPanel.render(renderer, font, player);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);
         console.render(renderer, font);
