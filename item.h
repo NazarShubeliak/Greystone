@@ -75,6 +75,9 @@ struct Item {
     int dexBonus = 0;
     int conBonus = 0;
 
+    // Economy
+    int value = 0;   // approximate worth in gold coins
+
     // ---- Helpers ----
     const char* groundSymbol() const { return typeVisuals[(int)type].symbol; }
     SDL_Color   groundColor()  const { return typeVisuals[(int)type].color;  }
@@ -112,6 +115,7 @@ inline Item ironSword() {
     i.type        = ItemType::WEAPON;
     i.volume      = 1500; i.weight = 1200;
     i.damage      = 8;    i.slot   = EquipSlot::HAND_R;
+    i.value       = 25;
     return i;
 }
 
@@ -122,6 +126,7 @@ inline Item woodenClub() {
     i.type        = ItemType::WEAPON;
     i.volume      = 1200; i.weight = 800;
     i.damage      = 4;    i.slot   = EquipSlot::HAND_R;
+    i.value       = 5;
     return i;
 }
 
@@ -132,6 +137,7 @@ inline Item ironHelmet() {
     i.type        = ItemType::ARMOR;
     i.volume      = 1500; i.weight = 1000;
     i.defense     = 3;    i.slot   = EquipSlot::HEAD;
+    i.value       = 20;
     return i;
 }
 
@@ -142,6 +148,7 @@ inline Item leatherVest() {
     i.type        = ItemType::ARMOR;
     i.volume      = 2000; i.weight = 800;
     i.defense     = 2;    i.slot   = EquipSlot::TORSO;
+    i.value       = 12;
     return i;
 }
 
@@ -152,6 +159,7 @@ inline Item leatherBoots() {
     i.type        = ItemType::ARMOR;
     i.volume      = 800;  i.weight = 500;
     i.defense     = 1;    i.slot   = EquipSlot::FEET;
+    i.value       = 8;
     return i;
 }
 
@@ -163,6 +171,7 @@ inline Item backpack() {
     i.volume      = 500;   i.weight    = 400;
     i.slot        = EquipSlot::BACK;
     i.maxVolume   = 15000; i.maxWeight = 12000;
+    i.value       = 15;
     return i;
 }
 
@@ -174,6 +183,7 @@ inline Item beltPouch() {
     i.volume      = 150;  i.weight    = 80;
     i.slot        = EquipSlot::WAIST;
     i.maxVolume   = 2000; i.maxWeight = 2000;
+    i.value       = 5;
     return i;
 }
 
@@ -182,8 +192,8 @@ inline Item bread() {
     i.name        = "Bread";
     i.description = "A loaf of bread. Filling.";
     i.type        = ItemType::FOOD;
-    i.volume      = 500; i.weight    = 300;
-    i.nutrition   = 35;
+    i.volume      = 500; i.weight  = 300;
+    i.nutrition   = 35;  i.value   = 1;
     return i;
 }
 
@@ -192,8 +202,8 @@ inline Item waterFlask() {
     i.name        = "Water Flask";
     i.description = "A flask of clean water.";
     i.type        = ItemType::DRINK;
-    i.volume      = 400; i.weight    = 500;
-    i.hydration   = 40;
+    i.volume      = 400; i.weight  = 500;
+    i.hydration   = 40;  i.value   = 2;
     return i;
 }
 
@@ -202,9 +212,9 @@ inline Item goldRing() {
     i.name        = "Gold Ring";
     i.description = "A simple gold ring. Carries a faint enchantment.";
     i.type        = ItemType::JEWELRY;
-    i.volume      = 10;  i.weight = 15;
+    i.volume      = 10;   i.weight   = 15;
     i.slot        = EquipSlot::RING_R;
-    i.strBonus    = 1;
+    i.strBonus    = 1;    i.value    = 50;
     return i;
 }
 
@@ -213,9 +223,9 @@ inline Item silverAmulet() {
     i.name        = "Silver Amulet";
     i.description = "A silver amulet on a thin chain.";
     i.type        = ItemType::JEWELRY;
-    i.volume      = 20;  i.weight = 30;
+    i.volume      = 20;   i.weight   = 30;
     i.slot        = EquipSlot::NECK;
-    i.conBonus    = 1;
+    i.conBonus    = 1;    i.value    = 35;
     return i;
 }
 

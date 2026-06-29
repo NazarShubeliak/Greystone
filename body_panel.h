@@ -12,7 +12,7 @@ struct BodyPanel {
     void render(SDL_Renderer* r, TTF_Font* f, const Player& p) {
         if (!visible) return;
 
-        const int W  = 380, H = 310;
+        const int W  = 380, H = 390;
         const int X  = (SCREEN_WIDTH  - W) / 2;
         const int Y  = (MAP_VIEW_HEIGHT - H) / 2;
         const int LH = 18;
@@ -72,6 +72,23 @@ struct BodyPanel {
         sy += LH * 1;
         partRow(r, f, "LEG L", p.body.legL, p.medicineSkill, SX, sy); sy += LH;
         partRow(r, f, "LEG R", p.body.legR, p.medicineSkill, SX, sy);
+
+        // ---- Needs section ----
+        hline(r, X, Y + H - 100, W);
+        int ny = Y + H - 94;
+        txt(r, f, "NEEDS", X + 163, ny, {200, 200, 200, 255});
+        ny += LH + 2;
+
+        needsBar(r, f, "Hunger", p.hunger,
+                 {210, 80,  30, 255},  // full→empty: orange-red
+                 {70,  150, 50, 255},  // full color (low hunger = good = green)
+                 X + 20, ny, W - 40);
+        ny += 22;
+        needsBar(r, f, "Thirst", p.thirst,
+                 {200, 60,  60, 255},  // full→empty: red
+                 {60,  120, 220, 255}, // full color (low thirst = good = blue)
+                 X + 20, ny, W - 40);
+        ny += 22;
 
         // Footer: medicine skill notice
         hline(r, X, Y + H - 28, W);
@@ -149,6 +166,72 @@ private:
         SDL_Rect dst = {x, y, w, h};
         SDL_RenderCopy(r, t, nullptr, &dst);
         SDL_DestroyTexture(t);
+    }
+
+    // Draws a labeled horizontal bar for hunger/thirst.
+    // value: 0=satisfied → 1=critical
+    // critCol: color at maximum (dangerous), goodCol: color at zero (fine)
+    void needsBar(SDL_Renderer* r, TTF_Font* f,
+                  const char* label, float value,
+                  SDL_Color critCol, SDL_Color goodCol,
+                  int x, int y, int barW) {
+        const int BAR_H  = 12;
+        const int LABEL_W = 58;
+
+        // Label
+        txt(r, f, label, x, y, {120, 120, 115, 255});
+
+        int bx = x + LABEL_W;
+        int bw = barW - LABEL_W;
+
+        // Background
+        SDL_SetRenderDrawColor(r, 35, 35, 35, 255);
+        SDL_Rect bg = {bx, y + 1, bw, BAR_H};
+        SDL_RenderFillRect(r, &bg);
+
+        // Fill — lerp from goodCol (value=0) to critCol (value=1)
+        float v = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+        SDL_Color fc = {
+            (Uint8)(goodCol.r + (int)((critCol.r - goodCol.r) * v)),
+            (Uint8)(goodCol.g + (int)((critCol.g - goodCol.g) * v)),
+            (Uint8)(goodCol.b + (int)((critCol.b - goodCol.b) * v)),
+            255
+        };
+        int fillW = (int)(bw * v);
+        if (fillW > 0) {
+            SDL_Rect fill = {bx, y + 1, fillW, BAR_H};
+            SDL_SetRenderDrawColor(r, fc.r, fc.g, fc.b, 255);
+            SDL_RenderFillRect(r, &fill);
+        }
+
+        // Border
+        SDL_SetRenderDrawColor(r, 80, 80, 80, 255);
+        SDL_RenderDrawRect(r, &bg);
+
+        // Percentage text inside bar
+        std::string pct = std::to_string((int)(v * 100)) + "%";
+        SDL_Surface* ps = TTF_RenderText_Solid(f, pct.c_str(), {220, 220, 215, 200});
+        if (ps) {
+            SDL_Texture* pt = SDL_CreateTextureFromSurface(r, ps);
+            SDL_FreeSurface(ps);
+            int pw, ph;
+            SDL_QueryTexture(pt, nullptr, nullptr, &pw, &ph);
+            SDL_Rect pdst = {bx + bw - pw - 4, y + (BAR_H - ph) / 2 + 1, pw, ph};
+            SDL_RenderCopy(r, pt, nullptr, &pdst);
+            SDL_DestroyTexture(pt);
+        }
+
+        // State label
+        const char* stateStr =
+            v < 0.10f ? "Fine" :
+            v < 0.30f ? "Peckish" :
+            v < 0.55f ? "Hungry" :
+            v < 0.80f ? "Very hungry" : "Starving!";
+        SDL_Color sc = v < 0.30f ? SDL_Color{90,175,65,255}
+                     : v < 0.55f ? SDL_Color{210,185,60,255}
+                     : v < 0.80f ? SDL_Color{225,130,45,255}
+                                 : SDL_Color{220, 50, 50,255};
+        txt(r, f, stateStr, bx + 4, y + (BAR_H - 14) / 2 + 1, sc);
     }
 
     void hline(SDL_Renderer* r, int x, int y, int w) {
