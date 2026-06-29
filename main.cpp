@@ -155,6 +155,7 @@ void onPlayerAct() {
 
 void updateCamera();
 void doTeleport(int newSX, int newSY);
+void interactWithObject(int tx, int ty);
 
 // ------------------------------------------------------------------ sector transition
 
@@ -198,6 +199,66 @@ void checkSectorTransition() {
 
     int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
     panel.addMessage(std::string("You enter: ") + biomeVisuals[bi].name + ".");
+}
+
+// ------------------------------------------------------------------ world interaction
+
+void interactWithObject(int tx, int ty) {
+    Tile& tile = map[ty][tx];
+    if (tile.objectId < 0) return;
+
+    const ObjectDef& od = objectDefs[tile.objectId];
+    int hitDmg = 20 + std::max(0, (player.effectiveStr() - 10) * 2);
+    tile.objectHp -= hitDmg;
+
+    if (tile.objectHp <= 0) {
+        int oid = tile.objectId;
+        tile.objectId = -1;
+        tile.objectHp = 0;
+
+        auto drop = [&](Item item) {
+            groundItems.push_back({tx, ty, std::move(item)});
+        };
+
+        switch (oid) {
+            case O_TREE:
+                for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::woodLog());
+                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::branch());
+                panel.addMessage("The tree falls with a crash!");
+                break;
+            case O_DEAD_TREE:
+                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::woodLog());
+                drop(Items::branch());
+                panel.addMessage("The dead tree splinters and collapses.");
+                break;
+            case O_BUSH:
+                drop(Items::berries());
+                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::branch());
+                panel.addMessage("You strip the bush clean.");
+                break;
+            case O_ROCK:
+                for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::stonePiece());
+                panel.addMessage("The rock breaks apart.");
+                break;
+            case O_BOULDER:
+                for (int k = 0; k < rand() % 3 + 4; k++) drop(Items::stonePiece());
+                panel.addMessage("The boulder finally shatters!");
+                break;
+            case O_FALLEN_LOG:
+                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::woodLog());
+                panel.addMessage("You chop the log into sections.");
+                break;
+        }
+
+        currentPath.clear(); pathIndex = 0; previewPath.clear();
+        updateVisibility();
+    } else {
+        panel.addMessage("You strike the " + std::string(od.name)
+                       + ". (" + std::to_string(tile.objectHp)
+                       + "/" + std::to_string(od.durability) + " HP)");
+    }
+
+    onPlayerAct();
 }
 
 void doTeleport(int newSX, int newSY) {
@@ -358,6 +419,28 @@ void handleInput(SDL_Event& event, bool& running) {
                                 currentPath = findPath(player.x, player.y, mx, my);
                                 pathIndex = 1;
                             }});
+                        }
+
+                        // World interaction for adjacent destructible objects
+                        {
+                            int oid = map[my][mx].objectId;
+                            int dist = std::max(std::abs(mx - player.x),
+                                                std::abs(my - player.y));
+                            if (oid >= 0 && dist <= 1 &&
+                                objectDefs[oid].durability > 0 &&
+                                map[my][mx].visible) {
+                                const char* verb =
+                                    (oid == O_BUSH)                        ? "Harvest" :
+                                    (oid == O_ROCK || oid == O_BOULDER)    ? "Mine"    : "Chop";
+                                std::string label = std::string(verb)
+                                                  + " " + objectDefs[oid].name
+                                                  + " (" + std::to_string(map[my][mx].objectHp)
+                                                  + "/" + std::to_string(objectDefs[oid].durability)
+                                                  + ")";
+                                items.push_back({label, [mx, my]() {
+                                    interactWithObject(mx, my);
+                                }});
+                            }
                         }
 
                         // Single "Examine" button — shows item (if any) + tile info together
@@ -587,8 +670,8 @@ int main(int argc, char* argv[]) {
         bodyPanel.render(renderer, font, player);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
-        itemExaminePanel.render(renderer, font);
         inventoryPanel.render(renderer, font, player);
+        itemExaminePanel.render(renderer, font);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);
         console.render(renderer, font);

@@ -229,4 +229,40 @@ inline Item silverAmulet() {
     return i;
 }
 
+inline Item woodLog() {
+    Item i;
+    i.name        = "Log";
+    i.description = "A solid section of tree trunk. Useful for building or fuel.";
+    i.type        = ItemType::MISC;
+    i.volume      = 8000; i.weight = 5000; i.value = 3;
+    return i;
+}
+
+inline Item branch() {
+    Item i;
+    i.name        = "Branch";
+    i.description = "A sturdy wooden branch. Could serve as a crude weapon.";
+    i.type        = ItemType::MISC;
+    i.volume      = 1500; i.weight = 600; i.value = 1;
+    return i;
+}
+
+inline Item stonePiece() {
+    Item i;
+    i.name        = "Stone";
+    i.description = "A chunk of rough stone. Heavy and hard.";
+    i.type        = ItemType::MISC;
+    i.volume      = 600; i.weight = 1200; i.value = 1;
+    return i;
+}
+
+inline Item berries() {
+    Item i;
+    i.name        = "Berries";
+    i.description = "A handful of wild berries. Tart but nourishing.";
+    i.type        = ItemType::FOOD;
+    i.volume      = 200; i.weight = 100; i.nutrition = 10; i.value = 1;
+    return i;
+}
+
 } // namespace Items
