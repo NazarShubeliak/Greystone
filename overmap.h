@@ -4,6 +4,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <cstdlib>
+#include <algorithm>
 #include <string>
 
 const int OVERMAP_W = 100;
@@ -33,6 +34,7 @@ static const BiomeVisual biomeVisuals[] = {
 struct Overmap {
     SectorInfo sectors[OVERMAP_H][OVERMAP_W];
     bool       visible = false;
+    int        camX = 50, camY = 50;   // overmap camera (independent of player)
 
     SDL_Texture* biomeTex[6] = {};
     SDL_Texture* unknownTex  = nullptr;
@@ -79,7 +81,18 @@ struct Overmap {
             }
     }
 
-    void toggle() { visible = !visible; }
+    // Open overmap and snap camera to player position.
+    void open(int playerSX, int playerSY) {
+        visible = true;
+        camX = playerSX;
+        camY = playerSY;
+    }
+    void close() { visible = false; }
+
+    void moveCam(int dx, int dy) {
+        camX = std::max(0, std::min(OVERMAP_W - 1, camX + dx));
+        camY = std::max(0, std::min(OVERMAP_H - 1, camY + dy));
+    }
 
     // ---------------------------------------------------------------- textures
 
@@ -107,11 +120,11 @@ struct Overmap {
     void render(SDL_Renderer* r, TTF_Font* f, int playerSX, int playerSY) {
         if (!visible) return;
 
-        const int CS  = TILE_SIZE;
-        const int vW  = SCREEN_WIDTH    / CS;
-        const int vH  = MAP_VIEW_HEIGHT / CS;
-        const int offX = playerSX - vW / 2;
-        const int offY = playerSY - vH / 2;
+        const int CS   = TILE_SIZE;
+        const int vW   = SCREEN_WIDTH    / CS;
+        const int vH   = MAP_VIEW_HEIGHT / CS;
+        const int offX = camX - vW / 2;    // viewport centered on camera, not player
+        const int offY = camY - vH / 2;
 
         // Clear map view area
         SDL_SetRenderDrawColor(r, 5, 5, 8, 255);
@@ -144,7 +157,12 @@ struct Overmap {
             }
         }
 
-        // Player marker
+        // Camera crosshair — gold rectangle around the center cell.
+        SDL_SetRenderDrawColor(r, 180, 150, 55, 255);
+        SDL_Rect crosshair = {(vW / 2) * CS, (vH / 2) * CS, CS, CS};
+        SDL_RenderDrawRect(r, &crosshair);
+
+        // Player marker (@) at actual player sector position.
         int pvx = playerSX - offX;
         int pvy = playerSY - offY;
         if (pvx >= 0 && pvx < vW && pvy >= 0 && pvy < vH) {
@@ -154,16 +172,19 @@ struct Overmap {
 
         // Title bar (semi-transparent strip)
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 0, 0, 0, 160);
+        SDL_SetRenderDrawColor(r, 0, 0, 0, 165);
         SDL_Rect titleBar = {0, 0, SCREEN_WIDTH, 26};
         SDL_RenderFillRect(r, &titleBar);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
-        int bi = (int)sectors[playerSY][playerSX].biome;
-        std::string title = std::string("OVERMAP  [")
-            + std::to_string(playerSX) + ", " + std::to_string(playerSY) + "]"
-            + "   " + biomeVisuals[bi].name
-            + "   |   M to close";
+        // Show camera coords + biome at camera + player coords.
+        int bi = (int)sectors[camY][camX].biome;
+        std::string camInfo = std::string("[") + std::to_string(camX) + "," + std::to_string(camY) + "] "
+                            + biomeVisuals[bi].name;
+        std::string playerInfo = std::string("@:[") + std::to_string(playerSX) + ","
+                               + std::to_string(playerSY) + "]";
+        std::string title = "OVERMAP  " + camInfo + "   " + playerInfo
+                          + "   |   Arrows: pan   M: close";
         SDL_Surface* ts = TTF_RenderText_Solid(f, title.c_str(), {175, 150, 65, 255});
         SDL_Texture* tt = SDL_CreateTextureFromSurface(r, ts);
         SDL_FreeSurface(ts);

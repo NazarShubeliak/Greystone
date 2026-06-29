@@ -6,6 +6,7 @@
 #include "context_menu.h"
 #include "examine_panel.h"
 #include "overmap.h"
+#include "cheat_console.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
@@ -41,6 +42,7 @@ BodyPanel bodyPanel;
 ContextMenu contextMenu;
 ExaminePanel examinePanel;
 Overmap overmap;
+CheatConsole console;
 int playerSectorX = 50;
 int playerSectorY = 50;
 
@@ -172,10 +174,28 @@ void checkSectorTransition() {
 void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_QUIT) running = false;
 
-    // Overmap consumes all input while open.
+    // Backtick (~) opens/closes the cheat console from anywhere.
+    if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_BACKQUOTE) {
+        if (console.visible) console.close();
+        else                 console.open();
+        return;
+    }
+
+    // Console intercepts all input while open (except the backtick above).
+    if (console.handleEvent(event, overmap)) return;
+
+    // Overmap handles arrow keys and M while open.
     if (overmap.visible) {
-        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_m)
-            overmap.toggle();
+        if (event.type == SDL_KEYDOWN) {
+            switch (event.key.keysym.sym) {
+                case SDLK_m:     overmap.close(); break;
+                case SDLK_UP:    overmap.moveCam( 0, -1); break;
+                case SDLK_DOWN:  overmap.moveCam( 0,  1); break;
+                case SDLK_LEFT:  overmap.moveCam(-1,  0); break;
+                case SDLK_RIGHT: overmap.moveCam( 1,  0); break;
+                default: break;
+            }
+        }
         return;
     }
 
@@ -183,7 +203,7 @@ void handleInput(SDL_Event& event, bool& running) {
         if (event.key.keysym.sym == SDLK_o)      ui.toggle();
         if (event.key.keysym.sym == SDLK_b)      bodyPanel.toggle();
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
-        if (event.key.keysym.sym == SDLK_m)      overmap.toggle();
+        if (event.key.keysym.sym == SDLK_m)      overmap.open(playerSectorX, playerSectorY);
         if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
     }
 
@@ -431,6 +451,7 @@ int main(int argc, char* argv[]) {
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);
+        console.render(renderer, font);
 
         if (!player.isAlive()) {
             renderDeathScreen(renderer, font);
