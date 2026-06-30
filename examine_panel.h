@@ -4,23 +4,28 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
+#include <vector>
 
 struct ExaminePanel {
     bool visible = false;
     int  tileX = 0, tileY = 0;
-    bool hasItem = false;
-    Item groundItem;
+    std::vector<Item> items;
+
+    bool        hasCorpse   = false;
+    std::string corpseName;
+    bool        corpseFresh = false;
 
     void show(int x, int y) {
         tileX = x; tileY = y;
-        hasItem = false;
+        items.clear();
+        hasCorpse = false;
         visible = true;
     }
 
-    void show(int x, int y, const Item& item) {
+    void show(int x, int y, std::vector<Item> groundItems) {
         tileX = x; tileY = y;
-        groundItem = item;
-        hasItem = true;
+        items = std::move(groundItems);
+        hasCorpse = false;
         visible = true;
     }
 
@@ -30,7 +35,7 @@ struct ExaminePanel {
         if (!visible) return;
 
         const int W  = 480;
-        const int H  = hasItem ? 400 : 300;
+        const int H  = 300 + (int)items.size() * 100 + (hasCorpse ? 50 : 0);
         const int px = (SCREEN_WIDTH - W) / 2;
         const int py = (MAP_VIEW_HEIGHT - H) / 2;
         const int LX = px + 14;
@@ -77,61 +82,65 @@ struct ExaminePanel {
         txt("EXAMINE  [" + std::to_string(tileX) + ", " + std::to_string(tileY) + "]", gold);
         hline();
 
-        // ── Item on ground ────────────────────────────────────────────────
-        if (hasItem) {
-            SDL_Color typeCol = typeVisuals[(int)groundItem.type].color;
+        // ── Items on ground ───────────────────────────────────────────────
+        for (const Item& it : items) {
+            SDL_Color typeCol = typeVisuals[(int)it.type].color;
 
-            // Header: symbol + name
-            txt(std::string("[Item]    ")
-                + groundItem.groundSymbol() + " " + groundItem.name, itmCol);
+            txt(std::string("[Item]    ") + it.groundSymbol() + " " + it.name, itmCol);
+            txt(std::string("  ") + it.description, dim);
 
-            // Description
-            txt(std::string("  ") + groundItem.description, dim);
-
-            // Compact stats line 1: vol / weight / value
-            std::string line1 = "  Vol: " + std::to_string(groundItem.volume) + " ml"
-                              + "   Wt: " + std::to_string(groundItem.weight) + " g";
-            if (groundItem.value > 0)
-                line1 += "   Value: " + std::to_string(groundItem.value) + " gold";
+            std::string line1 = "  Vol: " + std::to_string(it.volume) + " ml"
+                              + "   Wt: " + std::to_string(it.weight) + " g";
+            if (it.value > 0) line1 += "   Value: " + std::to_string(it.value) + " gold";
             txt(line1, white);
 
-            // Stats line 2: type-specific
             std::string line2;
-            switch (groundItem.type) {
+            switch (it.type) {
                 case ItemType::WEAPON:
-                    line2 = "  Damage: " + std::to_string(groundItem.damage);
-                    if (groundItem.twoHanded) line2 += "   Two-handed";
-                    if (groundItem.slot != EquipSlot::NONE)
-                        line2 += "   Slot: " + std::string(slotNames[(int)groundItem.slot]);
+                    line2 = "  Damage: " + std::to_string(it.damage);
+                    if (it.twoHanded) line2 += "   Two-handed";
+                    if (it.slot != EquipSlot::NONE)
+                        line2 += "   Slot: " + std::string(slotNames[(int)it.slot]);
                     break;
                 case ItemType::ARMOR:
-                    line2 = "  Defense: " + std::to_string(groundItem.defense);
-                    if (groundItem.slot != EquipSlot::NONE)
-                        line2 += "   Slot: " + std::string(slotNames[(int)groundItem.slot]);
+                    line2 = "  Defense: " + std::to_string(it.defense);
+                    if (it.slot != EquipSlot::NONE)
+                        line2 += "   Slot: " + std::string(slotNames[(int)it.slot]);
                     break;
                 case ItemType::CONTAINER:
-                    line2 = "  Capacity: " + std::to_string(groundItem.maxVolume) + " ml"
-                          + " / " + std::to_string(groundItem.maxWeight) + " g";
+                    line2 = "  Capacity: " + std::to_string(it.maxVolume) + " ml"
+                          + " / " + std::to_string(it.maxWeight) + " g";
                     break;
                 case ItemType::FOOD:
-                    line2 = "  Nutrition: " + std::to_string(groundItem.nutrition) + "%";
+                    line2 = "  Nutrition: " + std::to_string(it.nutrition) + "%";
                     break;
                 case ItemType::DRINK:
-                    line2 = "  Hydration: " + std::to_string(groundItem.hydration) + "%";
+                    line2 = "  Hydration: " + std::to_string(it.hydration) + "%";
                     break;
                 case ItemType::JEWELRY: {
                     std::string bonuses;
-                    if (groundItem.strBonus) bonuses += "STR+" + std::to_string(groundItem.strBonus) + " ";
-                    if (groundItem.dexBonus) bonuses += "DEX+" + std::to_string(groundItem.dexBonus) + " ";
-                    if (groundItem.conBonus) bonuses += "CON+" + std::to_string(groundItem.conBonus) + " ";
+                    if (it.strBonus) bonuses += "STR+" + std::to_string(it.strBonus) + " ";
+                    if (it.dexBonus) bonuses += "DEX+" + std::to_string(it.dexBonus) + " ";
+                    if (it.conBonus) bonuses += "CON+" + std::to_string(it.conBonus) + " ";
                     if (!bonuses.empty()) line2 = "  Bonuses: " + bonuses;
-                    if (groundItem.slot != EquipSlot::NONE)
-                        line2 += "   Slot: " + std::string(slotNames[(int)groundItem.slot]);
+                    if (it.slot != EquipSlot::NONE)
+                        line2 += "   Slot: " + std::string(slotNames[(int)it.slot]);
                     break;
                 }
                 default: break;
             }
             if (!line2.empty()) txt(line2, typeCol);
+            hline();
+        }
+
+        // ── Corpse ────────────────────────────────────────────────────────
+        if (hasCorpse) {
+            SDL_Color cCol = {160, 90, 90, 255};
+            txt(std::string("[Corpse]  ") + corpseName, cCol);
+            std::string state = corpseFresh
+                ? "  Fresh remains. A necromancer could animate this."
+                : "  Decomposing remains.";
+            txt(state, dim);
             hline();
         }
 

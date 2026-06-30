@@ -1,10 +1,12 @@
 #pragma once
 #include "overmap.h"
 #include "astar.h"
+#include "time_system.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <cstdio>
 #include <string>
+#include <cstring>
 
 struct CheatConsole {
     bool        visible = false;
@@ -15,6 +17,13 @@ struct CheatConsole {
     // Pending teleport — set by execute(), consumed by main.cpp.
     bool pendingTeleport = false;
     int  tpX = 0, tpY = 0;
+
+    // Pending enemy spawn — set by execute(), consumed by main.cpp.
+    std::string pendingSpawn;
+    int         pendingSpawnCount = 1;
+
+    // Pending give — item name set by execute(), consumed by main.cpp.
+    std::string pendingGive;
 
     void open() {
         visible = true;
@@ -29,7 +38,7 @@ struct CheatConsole {
     }
 
     // Returns true if the event was consumed.
-    bool handleEvent(SDL_Event& e, Overmap& overmap) {
+    bool handleEvent(SDL_Event& e, Overmap& overmap, WorldTime& wt) {
         if (!visible) return false;
 
         if (e.type == SDL_KEYDOWN) {
@@ -39,10 +48,14 @@ struct CheatConsole {
                     return true;
                 case SDLK_RETURN:
                 case SDLK_KP_ENTER:
-                    execute(overmap);
+                    execute(overmap, wt);
                     return true;
                 case SDLK_BACKSPACE:
                     if (!input.empty()) input.pop_back();
+                    result.clear();
+                    return true;
+                case SDLK_TAB:
+                    tabComplete();
                     result.clear();
                     return true;
                 default:
@@ -59,7 +72,7 @@ struct CheatConsole {
         return false;
     }
 
-    void execute(Overmap& overmap) {
+    void execute(Overmap& overmap, WorldTime& wt) {
         std::string cmd = input;
         input.clear();
 
@@ -81,11 +94,11 @@ struct CheatConsole {
             resultOk = true;
 
         } else if (cmd == "help") {
-            result  = "Commands: reveal_map (rm)  hide_map (hm)  tp X Y  help";
+            result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  help";
             resultOk = true;
 
         } else {
-            // tp X Y — teleport to overmap sector
+            // tp X Y
             int x, y;
             if (sscanf(cmd.c_str(), "tp %d %d", &x, &y) == 2) {
                 if (x >= 0 && x < OVERMAP_W && y >= 0 && y < OVERMAP_H) {
@@ -99,8 +112,174 @@ struct CheatConsole {
                 }
                 return;
             }
-            result  = "Unknown: " + cmd;
+
+            // time HH:MM  or  time HH MM
+            int th, tm;
+            if (sscanf(cmd.c_str(), "time %d:%d", &th, &tm) == 2 ||
+                sscanf(cmd.c_str(), "time %d %d", &th, &tm) == 2) {
+                if (th >= 0 && th < 24 && tm >= 0 && tm < 60) {
+                    int dayBase = (wt.minutes / (60 * 24)) * (60 * 24);
+                    wt.minutes  = dayBase + th * 60 + tm;
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "%02d:%02d", th, tm);
+                    result   = std::string("Time set to ") + buf + ".";
+                    resultOk = true;
+                } else {
+                    result   = "Invalid time. Use: time HH:MM  (0-23 : 0-59)";
+                    resultOk = false;
+                }
+                return;
+            }
+
+            // season <name>
+            char sname[32];
+            if (sscanf(cmd.c_str(), "season %31s", sname) == 1) {
+                // Lowercase comparison
+                for (int i = 0; sname[i]; i++)
+                    sname[i] = (char)tolower((unsigned char)sname[i]);
+
+                int targetSeason = -1;
+                if (strcmp(sname, "spring") == 0) targetSeason = 0;
+                else if (strcmp(sname, "summer") == 0) targetSeason = 1;
+                else if (strcmp(sname, "autumn") == 0 || strcmp(sname, "fall") == 0) targetSeason = 2;
+                else if (strcmp(sname, "winter") == 0) targetSeason = 3;
+
+                if (targetSeason >= 0) {
+                    int timeOfDay = wt.minutes % (60 * 24);
+                    int targetMonth = targetSeason * 3; // first month of the season
+                    wt.minutes = targetMonth * 30 * 24 * 60 + timeOfDay;
+                    result   = std::string("Season set to ") + wt.seasonName() + " (" + wt.monthName() + ", Day 1).";
+                    resultOk = true;
+                } else {
+                    result   = "Unknown season. Use: spring  summer  autumn  winter";
+                    resultOk = false;
+                }
+                return;
+            }
+
+            // spawn <type> [count]
+            char etype[32]; int count = 1;
+            if (sscanf(cmd.c_str(), "spawn %31s %d", etype, &count) >= 1) {
+                for (int i = 0; etype[i]; i++)
+                    etype[i] = (char)tolower((unsigned char)etype[i]);
+                count = std::max(1, std::min(count, 20));
+
+                static const char* valid[] = {
+                    "goblin","orc","skeleton","wolf","bandit", nullptr
+                };
+                bool ok = false;
+                for (int i = 0; valid[i]; i++) if (strcmp(etype, valid[i]) == 0) { ok = true; break; }
+
+                if (ok) {
+                    pendingSpawn      = etype;
+                    pendingSpawnCount = count;
+                    result   = "Spawning " + std::to_string(count) + "x " + etype + ".";
+                    resultOk = true;
+                } else {
+                    result   = "Unknown type. Use: goblin  orc  skeleton  wolf  bandit";
+                    resultOk = false;
+                }
+                return;
+            }
+
+            // give <item>
+            char gitem[32];
+            if (sscanf(cmd.c_str(), "give %31s", gitem) == 1) {
+                for (int i = 0; gitem[i]; i++) gitem[i] = (char)tolower((unsigned char)gitem[i]);
+                static const char* validItems[] = {
+                    "sword","dagger","axe","club","boneclub",
+                    "helmet","vest","boots","backpack","pouch",
+                    "hatchet","pickaxe",
+                    "torch","lantern","bread","water",
+                    "ring","amulet","log","stone","branch", nullptr
+                };
+                bool ok = false;
+                for (int i = 0; validItems[i]; i++) if (strcmp(gitem, validItems[i]) == 0) { ok = true; break; }
+                if (ok) {
+                    pendingGive = gitem;
+                    result   = std::string("Added ") + gitem + " to inventory.";
+                    resultOk = true;
+                } else {
+                    result   = "Unknown item. Tab-complete or type 'give' for list.";
+                    resultOk = false;
+                }
+                return;
+            }
+
+            result  = "Unknown: " + cmd + "   (type 'help')";
             resultOk = false;
+        }
+    }
+
+    // Returns contextual hint text based on what's been typed so far.
+    std::string getHints() const {
+        auto starts = [&](const char* prefix) {
+            return input.rfind(prefix, 0) == 0;
+        };
+        if (input.empty())
+            return "Commands: rm  hm  tp  time  season  spawn  give  help    (Tab autocompletes)";
+        if (input == "spawn" || starts("spawn "))
+            return "spawn: goblin  orc  skeleton  wolf  bandit   e.g. spawn goblin 3";
+        if (input == "give" || starts("give "))
+            return "give: sword  dagger  axe  club  boneclub  helmet  vest  boots  backpack  pouch  hatchet  pickaxe  torch  lantern  bread  water  ring  amulet  log  stone  branch";
+        if (input == "season" || starts("season "))
+            return "season: spring  summer  autumn  winter";
+        if (input == "time" || starts("time "))
+            return "time HH:MM   e.g. time 14:30";
+        if (input == "tp" || starts("tp "))
+            return "tp X Y   (sector coords 0-99)";
+        // Partial command suggestions
+        static const char* cmds[] = {
+            "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give","help", nullptr
+        };
+        std::string sugg;
+        for (int i = 0; cmds[i]; i++) {
+            if (std::string(cmds[i]).rfind(input, 0) == 0) {
+                if (!sugg.empty()) sugg += "  ";
+                sugg += cmds[i];
+            }
+        }
+        return sugg.empty() ? "" : "  " + sugg;
+    }
+
+    void tabComplete() {
+        // Complete top-level command
+        static const char* cmds[] = {
+            "reveal_map","hide_map","tp","time","season","spawn","give","help", nullptr
+        };
+        if (input.find(' ') == std::string::npos) {
+            for (int i = 0; cmds[i]; i++) {
+                if (!input.empty() && std::string(cmds[i]).rfind(input, 0) == 0) {
+                    input = std::string(cmds[i]) + " ";
+                    return;
+                }
+            }
+            return;
+        }
+        // Complete spawn argument
+        if (input.rfind("spawn ", 0) == 0) {
+            std::string arg = input.substr(6);
+            static const char* types[] = {"goblin","orc","skeleton","wolf","bandit", nullptr};
+            for (int i = 0; types[i]; i++)
+                if (std::string(types[i]).rfind(arg, 0) == 0) { input = "spawn " + std::string(types[i]); return; }
+        }
+        // Complete give argument
+        if (input.rfind("give ", 0) == 0) {
+            std::string arg = input.substr(5);
+            static const char* items[] = {
+                "sword","dagger","axe","club","boneclub","helmet","vest","boots",
+                "backpack","pouch","hatchet","pickaxe","torch","lantern","bread","water",
+                "ring","amulet","log","stone","branch", nullptr
+            };
+            for (int i = 0; items[i]; i++)
+                if (std::string(items[i]).rfind(arg, 0) == 0) { input = "give " + std::string(items[i]); return; }
+        }
+        // Complete season argument
+        if (input.rfind("season ", 0) == 0) {
+            std::string arg = input.substr(7);
+            static const char* seasons[] = {"spring","summer","autumn","winter", nullptr};
+            for (int i = 0; seasons[i]; i++)
+                if (std::string(seasons[i]).rfind(arg, 0) == 0) { input = "season " + std::string(seasons[i]); return; }
         }
     }
 
@@ -134,35 +313,29 @@ struct CheatConsole {
             SDL_DestroyTexture(t);
         }
 
-        // Hint (right side)
-        SDL_Surface* hs = TTF_RenderText_Solid(f, "Enter: run   Esc: close   type 'help'", {55, 55, 50, 255});
-        if (hs) {
-            SDL_Texture* ht = SDL_CreateTextureFromSurface(r, hs);
-            SDL_FreeSurface(hs);
-            int hw, hh;
-            SDL_QueryTexture(ht, nullptr, nullptr, &hw, &hh);
-            SDL_Rect hd = {SCREEN_WIDTH - hw - 8, Y + (H - hh) / 2, hw, hh};
-            SDL_RenderCopy(r, ht, nullptr, &hd);
-            SDL_DestroyTexture(ht);
-        }
+        // Above the input bar: result (after Enter) OR dynamic hints (while typing)
+        {
+            std::string aboveText = result.empty() ? getHints() : result;
+            SDL_Color aboveCol = result.empty()
+                ? SDL_Color{65, 62, 48, 255}
+                : (resultOk ? SDL_Color{90, 200, 90, 255} : SDL_Color{220, 80, 80, 255});
 
-        // Result line (above the input bar)
-        if (!result.empty()) {
-            SDL_Color rc = resultOk ? SDL_Color{90, 200, 90, 255} : SDL_Color{220, 80, 80, 255};
-            SDL_Surface* rs = TTF_RenderText_Solid(f, result.c_str(), rc);
-            if (rs) {
-                SDL_Texture* rt = SDL_CreateTextureFromSurface(r, rs);
-                SDL_FreeSurface(rs);
-                int rw, rh;
-                SDL_QueryTexture(rt, nullptr, nullptr, &rw, &rh);
-                SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-                SDL_SetRenderDrawColor(r, 0, 0, 0, 160);
-                SDL_Rect rbg = {0, Y - rh - 6, SCREEN_WIDTH, rh + 6};
-                SDL_RenderFillRect(r, &rbg);
-                SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-                SDL_Rect rd = {8, Y - rh - 3, rw, rh};
-                SDL_RenderCopy(r, rt, nullptr, &rd);
-                SDL_DestroyTexture(rt);
+            if (!aboveText.empty()) {
+                SDL_Surface* as = TTF_RenderText_Solid(f, aboveText.c_str(), aboveCol);
+                if (as) {
+                    SDL_Texture* at = SDL_CreateTextureFromSurface(r, as);
+                    SDL_FreeSurface(as);
+                    int aw, ah;
+                    SDL_QueryTexture(at, nullptr, nullptr, &aw, &ah);
+                    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+                    SDL_SetRenderDrawColor(r, 0, 0, 0, 160);
+                    SDL_Rect abg = {0, Y - ah - 6, SCREEN_WIDTH, ah + 6};
+                    SDL_RenderFillRect(r, &abg);
+                    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+                    SDL_Rect ad = {8, Y - ah - 3, aw, ah};
+                    SDL_RenderCopy(r, at, nullptr, &ad);
+                    SDL_DestroyTexture(at);
+                }
             }
         }
     }

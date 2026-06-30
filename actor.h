@@ -364,11 +364,46 @@ struct Player : Actor {
 
     // ---- Effective stats (base + item bonuses) ----
 
+    // hunger/thirst: 0=full/hydrated, 1=starving/dying
+    // Returns 0-3 severity level for each need.
+    int hungerLevel() const {
+        if (hunger >= 1.0f) return 4; // dead
+        if (hunger >= 0.75f) return 3;
+        if (hunger >= 0.50f) return 2;
+        if (hunger >= 0.25f) return 1;
+        return 0;
+    }
+    int thirstLevel() const {
+        if (thirst >= 1.0f) return 4;
+        if (thirst >= 0.75f) return 3;
+        if (thirst >= 0.50f) return 2;
+        if (thirst >= 0.25f) return 1;
+        return 0;
+    }
+
+    // Speed penalty from hunger/thirst (subtracted from speed in tickWorld).
+    int needsSpeedPenalty() const {
+        static const int hPen[] = {0, 5, 15, 30, 40};
+        static const int tPen[] = {0, 8, 20, 38, 50};
+        int hl = std::min(hungerLevel(), 3);
+        int tl = std::min(thirstLevel(), 3);
+        return hPen[hl] + tPen[tl];
+    }
+
+    // STR penalty from hunger/thirst.
+    int needsStrPenalty() const {
+        static const int hPen[] = {0, 1, 2, 4, 6};
+        static const int tPen[] = {0, 1, 3, 5, 7};
+        int hl = std::min(hungerLevel(), 3);
+        int tl = std::min(thirstLevel(), 3);
+        return hPen[hl] + tPen[tl];
+    }
+
     int effectiveStr() const {
         int b = 0;
         for (int i = 0; i < (int)EquipSlot::SLOT_COUNT; i++)
             if (worn[i].has_value()) b += worn[i]->strBonus;
-        return strength + b;
+        return std::max(1, strength + b - needsStrPenalty());
     }
     int effectiveDex() const {
         int b = 0;
@@ -428,6 +463,14 @@ struct Player : Actor {
         return d;
     }
 
+    // Light radius from any equipped item (torch, lantern, etc.).
+    int totalLightRadius() const {
+        int best = 0;
+        for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++)
+            if (worn[s].has_value()) best = std::max(best, worn[s]->lightRadius);
+        return best;
+    }
+
     // Weapon damage (HAND_R, or HAND_L as fallback, or base 1).
     int weaponDamage() const {
         if (worn[(int)EquipSlot::HAND_R].has_value())
@@ -435,6 +478,20 @@ struct Player : Actor {
         if (worn[(int)EquipSlot::HAND_L].has_value())
             return worn[(int)EquipSlot::HAND_L]->damage;
         return 1; // unarmed
+    }
+
+    bool hasChopTool() const {
+        int hands[] = {(int)EquipSlot::HAND_R, (int)EquipSlot::HAND_L};
+        for (int s : hands)
+            if (worn[s].has_value() && worn[s]->canChop) return true;
+        return false;
+    }
+
+    bool hasMineTool() const {
+        int hands[] = {(int)EquipSlot::HAND_R, (int)EquipSlot::HAND_L};
+        for (int s : hands)
+            if (worn[s].has_value() && worn[s]->canMine) return true;
+        return false;
     }
 
     // Try to add item to the best available container (BACK first, then WAIST, etc.).
@@ -478,7 +535,16 @@ struct Player : Actor {
 // Temporary class — will be merged into NPC when the full NPC/AI system is built.
 
 struct Enemy : Actor {
-    int aggroRange;
+    int   aggroRange;
+    bool  flees     = false;
+    float fleeHpPct = 0.0f;   // flee when hp/maxHp drops below this fraction
+    std::vector<Item> carried; // Items dropped on death
+
+    int weaponDmg() const {
+        for (const Item& item : carried)
+            if (item.type == ItemType::WEAPON) return item.damage;
+        return 0;
+    }
 
     Enemy(int x, int y, const char* sym, SDL_Color col,
           int speed, Race race, int aggroRange,
@@ -487,8 +553,12 @@ struct Enemy : Actor {
           aggroRange(aggroRange)
     {
         body        = Body(headHp, torsoHp, armHp, legHp);
-        disposition = -80;   // hostile on sight by default
+        disposition = -80;
         sync();
+    }
+
+    bool wantsToFlee() const {
+        return flees && maxHp > 0 && (float)hp / maxHp < fleeHpPct;
     }
 };
 

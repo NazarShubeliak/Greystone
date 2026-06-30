@@ -78,6 +78,13 @@ struct Item {
     // Economy
     int value = 0;   // approximate worth in gold coins
 
+    // Light source (equipped item illuminates surroundings at night)
+    int lightRadius = 0;
+
+    // Tool capabilities
+    bool canChop = false;  // can chop trees / fallen logs
+    bool canMine = false;  // can mine rocks / boulders
+
     // ---- Helpers ----
     const char* groundSymbol() const { return typeVisuals[(int)type].symbol; }
     SDL_Color   groundColor()  const { return typeVisuals[(int)type].color;  }
@@ -253,6 +260,83 @@ inline Item stonePiece() {
     i.description = "A chunk of rough stone. Heavy and hard.";
     i.type        = ItemType::MISC;
     i.volume      = 600; i.weight = 1200; i.value = 1;
+    return i;
+}
+
+inline Item torch() {
+    Item i;
+    i.name        = "Torch";
+    i.description = "A wooden stick wrapped in oil-soaked cloth. Burns for hours.";
+    i.type        = ItemType::TOOL;
+    i.volume      = 500;  i.weight      = 200;
+    i.slot        = EquipSlot::HAND_L;
+    i.lightRadius = 10;
+    i.value       = 4;
+    return i;
+}
+
+inline Item lantern() {
+    Item i;
+    i.name        = "Lantern";
+    i.description = "An oil lantern with a glass shield. Bright and wind-resistant.";
+    i.type        = ItemType::TOOL;
+    i.volume      = 800;  i.weight      = 600;
+    i.slot        = EquipSlot::HAND_L;
+    i.lightRadius = 14;
+    i.value       = 30;
+    return i;
+}
+
+inline Item crudeDagger() {
+    Item i;
+    i.name        = "Crude Dagger";
+    i.description = "A rough-edged blade, crudely made from scrap metal.";
+    i.type        = ItemType::WEAPON;
+    i.slot        = EquipSlot::HAND_R;
+    i.damage      = 3; i.volume = 150; i.weight = 180; i.value = 2;
+    return i;
+}
+
+inline Item warAxe() {
+    Item i;
+    i.name        = "War Axe";
+    i.description = "A heavy axe favoured by orcish warriors. Brutal.";
+    i.type        = ItemType::WEAPON;
+    i.slot        = EquipSlot::HAND_R;
+    i.damage      = 12; i.volume = 2000; i.weight = 2100; i.value = 40;
+    i.canChop     = true;
+    return i;
+}
+
+inline Item hatchet() {
+    Item i;
+    i.name        = "Hatchet";
+    i.description = "A small axe for chopping wood. Decent in a pinch.";
+    i.type        = ItemType::TOOL;
+    i.slot        = EquipSlot::HAND_R;
+    i.damage      = 5; i.volume = 600; i.weight = 700; i.value = 12;
+    i.canChop     = true;
+    return i;
+}
+
+inline Item pickaxe() {
+    Item i;
+    i.name        = "Pickaxe";
+    i.description = "A sturdy iron pickaxe for breaking stone.";
+    i.type        = ItemType::TOOL;
+    i.slot        = EquipSlot::HAND_R;
+    i.damage      = 6; i.volume = 1400; i.weight = 1800; i.value = 18;
+    i.canMine     = true;
+    return i;
+}
+
+inline Item boneClub() {
+    Item i;
+    i.name        = "Bone Club";
+    i.description = "A large bone repurposed as a bludgeoning weapon.";
+    i.type        = ItemType::WEAPON;
+    i.slot        = EquipSlot::HAND_R;
+    i.damage      = 4; i.volume = 500; i.weight = 450; i.value = 1;
     return i;
 }
 

@@ -5,6 +5,7 @@
 #include <string>
 #include "astar.h"
 #include "actor.h"
+#include "time_system.h"
 
 enum class PanelMode { LOG, DIALOGUE };
 
@@ -21,7 +22,7 @@ struct BottomPanel {
     }
 
     // --- Render ---
-    void render(SDL_Renderer* renderer, TTF_Font* font, const Player& player) {
+    void render(SDL_Renderer* renderer, TTF_Font* font, const Player& player, const WorldTime& wt) {
         const int TOP = MAP_VIEW_HEIGHT;
         const int HUD_H = 32;
         const int LOG_H = PANEL_HEIGHT - HUD_H - 1;
@@ -43,7 +44,7 @@ struct BottomPanel {
             case PanelMode::DIALOGUE: renderLog(renderer, font, TOP, LOG_H);   break;
         }
 
-        renderHUD(renderer, font, player);
+        renderHUD(renderer, font, player, wt);
     }
 
 private:
@@ -64,7 +65,7 @@ private:
     }
 
     // ---- HUD ----------------------------------------------------------------
-    void renderHUD(SDL_Renderer* r, TTF_Font* f, const Player& p) {
+    void renderHUD(SDL_Renderer* r, TTF_Font* f, const Player& p, const WorldTime& wt) {
         const int Y      = SCREEN_HEIGHT - 28;
         const int BAR_X  = 85;
         const int BAR_W  = 130;
@@ -74,12 +75,10 @@ private:
         std::string hpStr = "HP: " + std::to_string(p.hp) + "/" + std::to_string(p.maxHp);
         renderText(r, f, hpStr.c_str(), 8, Y, {255, 80, 80, 255});
 
-        // HP bar background
+        // HP bar
         SDL_Rect barBg = {BAR_X, Y + 1, BAR_W, BAR_H};
         SDL_SetRenderDrawColor(r, 60, 0, 0, 255);
         SDL_RenderFillRect(r, &barBg);
-
-        // HP bar fill
         float ratio = (float)p.hp / p.maxHp;
         SDL_Color fillCol = ratio > 0.5f ? SDL_Color{0, 200, 0, 255} :
                             ratio > 0.25f ? SDL_Color{255, 165, 0, 255} :
@@ -87,18 +86,38 @@ private:
         SDL_Rect barFill = {BAR_X, Y + 1, (int)(BAR_W * ratio), BAR_H};
         SDL_SetRenderDrawColor(r, fillCol.r, fillCol.g, fillCol.b, 255);
         SDL_RenderFillRect(r, &barFill);
-
-        // HP bar border
         SDL_SetRenderDrawColor(r, 120, 120, 120, 255);
         SDL_RenderDrawRect(r, &barBg);
 
-        // Speed
-        std::string spdStr = "SPD: " + std::to_string(p.speed);
-        renderText(r, f, spdStr.c_str(), 230, Y, {180, 180, 180, 255});
+        // Speed / Energy
+        renderText(r, f, ("SPD: " + std::to_string(p.speed)).c_str(), 230, Y, {180, 180, 180, 255});
+        renderText(r, f, ("NRG: " + std::to_string(p.energy)).c_str(), 320, Y, {80, 180, 255, 255});
 
-        // Energy
-        std::string nrgStr = "NRG: " + std::to_string(p.energy);
-        renderText(r, f, nrgStr.c_str(), 320, Y, {80, 180, 255, 255});
+        // Time + date
+        int h = wt.hour();
+        SDL_Color timeCol =
+            (h >= 7 && h < 19)  ? SDL_Color{220, 200,  70, 255} :
+            (h >= 5 && h < 7)   ? SDL_Color{210, 150,  60, 255} :
+            (h >= 19 && h < 21) ? SDL_Color{200, 110,  50, 255} :
+                                   SDL_Color{ 80, 110, 200, 255};
+        renderText(r, f, wt.timeStr().c_str(), SCREEN_WIDTH - 340, Y, timeCol);
+        renderText(r, f, wt.dateStr().c_str(), SCREEN_WIDTH - 290, Y, {150, 145, 130, 255});
+
+        // Light indicator — only show when dark enough to matter
+        float dark = wt.darkness();
+        if (dark > 0.1f) {
+            int light = p.totalLightRadius();
+            std::string lightStr;
+            SDL_Color   lightCol;
+            if (light == 0) {
+                lightStr = "[Dark]";
+                lightCol = {180, 80, 80, 255};
+            } else {
+                lightStr = "[Light " + std::to_string(light) + "]";
+                lightCol = {220, 200, 100, 255};
+            }
+            renderText(r, f, lightStr.c_str(), SCREEN_WIDTH - 90, Y, lightCol);
+        }
     }
 
     // ---- util ---------------------------------------------------------------

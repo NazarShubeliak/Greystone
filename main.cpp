@@ -1,4 +1,4 @@
-#include "astar.h"
+﻿#include "astar.h"
 #include "actor.h"
 #include "ui.h"
 #include "bottom_panel.h"
@@ -9,11 +9,19 @@
 #include "cheat_console.h"
 #include "inventory.h"
 #include "item_examine_panel.h"
+#include "enemy_examine_panel.h"
+#include "pickup_panel.h"
+#include "time_system.h"
+#include "enemy_types.h"
+#include "corpse.h"
 #include "map.h"
 #include "render.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <vector>
+#include <map>
+#include <set>
+#include <functional>
 #include <ctime>
 #include <algorithm>
 
@@ -27,11 +35,20 @@ SDL_Texture* playerTexture = nullptr;
 SDL_Texture* enemyTexture  = nullptr;
 
 Player player(20, 15);
-std::vector<Enemy> enemies;
+std::vector<Enemy>  enemies;
+std::vector<Corpse> corpses;
 
 std::vector<SDL_Point> currentPath;
 int pathIndex = 0;
 Uint32 lastMoveTime = 0;
+
+// Deferred action executed when the player finishes walking to a destination.
+enum class PendingAct { NONE, PICKUP_ONE, PICKUP_PANEL, INTERACT };
+PendingAct pendingAct  = PendingAct::NONE;
+int        pendingActX = -1, pendingActY = -1;
+
+// When chasing an enemy, store a pointer so path can be recalculated each step.
+Enemy* attackTarget = nullptr;
 
 int hoverX = 0, hoverY = 0;
 int lastHoverX = -1, lastHoverY = -1;
@@ -46,12 +63,38 @@ ExaminePanel examinePanel;
 Overmap overmap;
 CheatConsole console;
 InventoryPanel inventoryPanel;
-ItemExaminePanel itemExaminePanel;
+ItemExaminePanel  itemExaminePanel;
+EnemyExaminePanel enemyExaminePanel;
+PickupPanel pickupPanel;
 std::vector<GroundItem> groundItems;
+WorldTime worldTime;
 int playerSectorX = 50;
 int playerSectorY = 50;
 
 // ------------------------------------------------------------------ helpers
+
+// Weighted random body part hit (CDDA-style distribution).
+PartTarget randomHitPart() {
+    int r = rand() % 100;
+    if (r < 10) return PartTarget::HEAD;
+    if (r < 55) return PartTarget::TORSO;
+    if (r < 67) return PartTarget::ARM_L;
+    if (r < 79) return PartTarget::ARM_R;
+    if (r < 89) return PartTarget::LEG_L;
+                return PartTarget::LEG_R;
+}
+
+const char* partName(PartTarget t) {
+    switch (t) {
+        case PartTarget::HEAD:  return "head";
+        case PartTarget::TORSO: return "torso";
+        case PartTarget::ARM_L: return "left arm";
+        case PartTarget::ARM_R: return "right arm";
+        case PartTarget::LEG_L: return "left leg";
+        case PartTarget::LEG_R: return "right leg";
+    }
+    return "body";
+}
 
 Enemy* getEnemyAt(int x, int y) {
     for (Enemy& e : enemies)
@@ -66,21 +109,57 @@ GroundItem* getGroundItemAt(int x, int y) {
     return nullptr;
 }
 
-// Pick up all items at player's position, put them in best container.
-void pickUpAtPlayer() {
-    bool any = false;
+// Returns copies of all items at (x, y) in groundItems order.
+std::vector<Item> getGroundItemsAt(int x, int y) {
+    std::vector<Item> result;
+    for (const GroundItem& gi : groundItems)
+        if (gi.x == x && gi.y == y) result.push_back(gi.item);
+    return result;
+}
+
+// Pick up items at (gx, gy) according to selection mask (parallel to groundItems order at that tile).
+void doPickup(int gx, int gy, const std::vector<bool>& sel) {
+    int selIdx = 0;
     for (int i = (int)groundItems.size() - 1; i >= 0; i--) {
-        if (groundItems[i].x != player.x || groundItems[i].y != player.y) continue;
-        std::string name = groundItems[i].item.name;
-        if (player.addToContainer(groundItems[i].item)) {
-            panel.addMessage("You pick up the " + name + ".");
-            groundItems.erase(groundItems.begin() + i);
-            any = true;
+        if (groundItems[i].x != gx || groundItems[i].y != gy) continue;
+        // sel is in forward order; we iterate backward, so map accordingly
+        // Build forward list first to align indices
+        (void)selIdx;
+        // We'll do it in a forward pass below
+    }
+    // Forward pass to align with sel[]
+    std::vector<int> atTile;
+    for (int i = 0; i < (int)groundItems.size(); i++)
+        if (groundItems[i].x == gx && groundItems[i].y == gy) atTile.push_back(i);
+
+    // Erase selected in reverse order to preserve indices
+    for (int j = (int)atTile.size() - 1; j >= 0; j--) {
+        if (j >= (int)sel.size() || !sel[j]) continue;
+        int idx = atTile[j];
+        std::string n = groundItems[idx].item.name;
+        if (player.addToContainer(groundItems[idx].item)) {
+            panel.addMessage("You pick up the " + n + ".");
+            groundItems.erase(groundItems.begin() + idx);
         } else {
-            panel.addMessage("No room for the " + name + ".");
+            panel.addMessage("No room for the " + n + ".");
         }
     }
-    if (!any) panel.addMessage("Nothing to pick up here.");
+}
+
+// Pick up all items at player's position вЂ” shows selection panel if multiple.
+void pickUpAtPlayer() {
+    std::vector<Item> here = getGroundItemsAt(player.x, player.y);
+    if (here.empty()) { panel.addMessage("Nothing to pick up here."); return; }
+    if (here.size() == 1) {
+        std::vector<bool> sel = {true};
+        doPickup(player.x, player.y, sel);
+        return;
+    }
+    // Multiple items вЂ” show selection panel
+    pickupPanel.show(player.x, player.y, std::move(here));
+    pickupPanel.onConfirm = [px=player.x, py=player.y](const std::vector<bool>& sel) {
+        doPickup(px, py, sel);
+    };
 }
 
 bool isTileOccupied(int x, int y) {
@@ -89,15 +168,69 @@ bool isTileOccupied(int x, int y) {
     return false;
 }
 
-void initEnemy() {
-    for (int i = 0; i < 10; i++) {
-        int x, y;
-        do {
-            x = rand() % (MAP_WIDTH - 2) + 1;
-            y = rand() % (MAP_HEIGHT - 2) + 1;
-        } while (!map[y][x].walkable());
-        enemies.push_back(Enemy(x, y, "E", red, 75, Race::HUMAN, 10));
+void spawnEnemy(std::function<Enemy(int,int)> factory) {
+    for (int attempt = 0; attempt < 50; attempt++) {
+        int x = rand() % (MAP_WIDTH  - 4) + 2;
+        int y = rand() % (MAP_HEIGHT - 4) + 2;
+        if (!map[y][x].walkable()) continue;
+        if (isTileOccupied(x, y))  continue;
+        // Don't spawn too close to player.
+        int dx = x - player.x, dy = y - player.y;
+        if (dx*dx + dy*dy < 12*12) continue;
+        enemies.push_back(factory(x, y));
+        return;
     }
+}
+
+void initEnemy() {
+    enemies.clear();
+    BiomeType biome = overmap.sectors[playerSectorY][playerSectorX].biome;
+
+    switch (biome) {
+        case BiomeType::PLAINS:
+            for (int i = 0; i < 3; i++) spawnEnemy(EnemyTypes::bandit);
+            for (int i = 0; i < 4; i++) spawnEnemy(EnemyTypes::wolf);
+            for (int i = 0; i < 2; i++) spawnEnemy(EnemyTypes::goblin);
+            break;
+
+        case BiomeType::FOREST:
+            for (int i = 0; i < 5; i++) spawnEnemy(EnemyTypes::goblin);
+            for (int i = 0; i < 3; i++) spawnEnemy(EnemyTypes::wolf);
+            for (int i = 0; i < 1; i++) spawnEnemy(EnemyTypes::skeleton);
+            break;
+
+        case BiomeType::SWAMP:
+            for (int i = 0; i < 4; i++) spawnEnemy(EnemyTypes::skeleton);
+            for (int i = 0; i < 3; i++) spawnEnemy(EnemyTypes::goblin);
+            break;
+
+        case BiomeType::DESERT:
+            for (int i = 0; i < 3; i++) spawnEnemy(EnemyTypes::bandit);
+            for (int i = 0; i < 2; i++) spawnEnemy(EnemyTypes::orcWarrior);
+            break;
+
+        case BiomeType::TUNDRA:
+            for (int i = 0; i < 5; i++) spawnEnemy(EnemyTypes::wolf);
+            for (int i = 0; i < 2; i++) spawnEnemy(EnemyTypes::orcWarrior);
+            break;
+
+        case BiomeType::CURSED_LANDS:
+            for (int i = 0; i < 5; i++) spawnEnemy(EnemyTypes::skeleton);
+            for (int i = 0; i < 2; i++) spawnEnemy(EnemyTypes::orcWarrior);
+            for (int i = 0; i < 2; i++) spawnEnemy(EnemyTypes::goblin);
+            break;
+
+        default:
+            for (int i = 0; i < 5; i++) spawnEnemy(EnemyTypes::goblin);
+            break;
+    }
+}
+
+// Drop all carried items from enemy and leave a corpse.
+void dropEnemyLoot(const Enemy& enemy) {
+    for (const Item& item : enemy.carried)
+        groundItems.push_back({enemy.x, enemy.y, item});
+    corpses.push_back(makeCorpse(enemy, worldTime.minutes));
 }
 
 // ------------------------------------------------------------------ turn system
@@ -105,52 +238,178 @@ void initEnemy() {
 // One "world tick" = everyone gains speed energy; enemies spend theirs acting.
 // The world only ticks when the player chooses to act (world freezes while idle).
 // Fast actors (speed > 100) accumulate energy and act multiple times per cycle.
-// Slow actors (speed < 100) act less often — multiple ticks pass per their action.
+// Slow actors (speed < 100) act less often вЂ” multiple ticks pass per their action.
 
 void enemyAct(Enemy& enemy) {
     int dx = player.x - enemy.x;
     int dy = player.y - enemy.y;
-    if (dx * dx + dy * dy > enemy.aggroRange * enemy.aggroRange) return;
+    int dist2 = dx * dx + dy * dy;
+
+    // Flee: move away from player when wounded.
+    if (enemy.wantsToFlee()) {
+        int fx = enemy.x - (dx != 0 ? (dx > 0 ? 1 : -1) : 0);
+        int fy = enemy.y - (dy != 0 ? (dy > 0 ? 1 : -1) : 0);
+        fx = std::max(1, std::min(MAP_WIDTH  - 2, fx));
+        fy = std::max(1, std::min(MAP_HEIGHT - 2, fy));
+        if (map[fy][fx].walkable() && !isTileOccupied(fx, fy)) {
+            enemy.x = fx; enemy.y = fy;
+        }
+        return;
+    }
+
+    if (dist2 > enemy.aggroRange * enemy.aggroRange) return;
 
     std::vector<SDL_Point> path = findPath(enemy.x, enemy.y, player.x, player.y);
     if ((int)path.size() < 2) return;
 
     SDL_Point next = path[1];
     if (next.x == player.x && next.y == player.y) {
-        int rawDmg = 3 + (enemy.strength - 10) / 2;
+        PartTarget part   = randomHitPart();
+        int        rawDmg = 3 + (enemy.strength - 10) / 2 + enemy.weaponDmg();
+        if (part == PartTarget::HEAD) rawDmg = (int)(rawDmg * 1.5f);
         int damage = std::max(1, rawDmg - player.totalDefense());
-        player.takeDamage(damage);
-        panel.addMessage(enemy.name + " hits you for " + std::to_string(damage) + " damage.");
+        player.takeDamage(damage, part);
+        std::string withWeapon;
+        for (const Item& item : enemy.carried)
+            if (item.type == ItemType::WEAPON) { withWeapon = " with " + item.name; break; }
+        panel.addMessage(enemy.name + " hits your " + partName(part)
+                         + withWeapon + " for " + std::to_string(damage) + " damage.");
         if (!player.isAlive())
             panel.addMessage("You have been slain by " + enemy.name + ".");
     } else if (!isTileOccupied(next.x, next.y)) {
         enemy.x = next.x;
         enemy.y = next.y;
+    } else {
+        // Planned step is blocked by another enemy — try adjacent tiles that
+        // bring us closer to the player so enemies don't pile up and freeze.
+        static const int dirs[8][2] = {
+            {0,-1},{0,1},{-1,0},{1,0},{-1,-1},{1,-1},{-1,1},{1,1}
+        };
+        int bestDist = dx*dx + dy*dy;
+        int bestX = -1, bestY = -1;
+        int start = rand() % 8;
+        for (int d = 0; d < 8; d++) {
+            int nd = (start + d) % 8;
+            int nx = enemy.x + dirs[nd][0];
+            int ny = enemy.y + dirs[nd][1];
+            if (nx <= 0 || nx >= MAP_WIDTH-1 || ny <= 0 || ny >= MAP_HEIGHT-1) continue;
+            if (!map[ny][nx].walkable()) continue;
+            if (isTileOccupied(nx, ny)) continue;
+            int ndx = player.x - nx, ndy = player.y - ny;
+            int newDist = ndx*ndx + ndy*ndy;
+            if (newDist < bestDist) { bestDist = newDist; bestX = nx; bestY = ny; }
+        }
+        if (bestX >= 0) { enemy.x = bestX; enemy.y = bestY; }
     }
 }
 
 // One world tick: give everyone energy, then let enemies spend theirs.
 void tickWorld() {
-    player.energy += player.speed;
+    int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty());
+    player.energy += effSpeed;
     player.tickNeeds();
+
+    // Starvation / dehydration damage
+    if (player.hunger >= 1.0f) {
+        player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
+        player.sync();
+    }
+    if (player.thirst >= 1.0f) {
+        player.body.torso.hp = std::max(0, player.body.torso.hp - 2);
+        player.sync();
+    }
+
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
         e.energy += e.speed;
         e.tickNeeds();
+        if (!e.alive) {
+            // Died from bleeding or starvation — drop loot now.
+            panel.addMessage(e.name + " bleeds to death.");
+            dropEnemyLoot(e);
+            continue;
+        }
         while (e.energy >= 100) {
             enemyAct(e);
             e.energy -= 100;
         }
     }
+
+    // Corpse decay
+    corpses.erase(
+        std::remove_if(corpses.begin(), corpses.end(),
+                       [](const Corpse& c){ return c.decayed(worldTime.minutes); }),
+        corpses.end());
+
+    // Drop attack target if it's dead, then remove all dead enemies.
+    if (attackTarget && !attackTarget->alive) attackTarget = nullptr;
+    enemies.erase(
+        std::remove_if(enemies.begin(), enemies.end(),
+                       [](const Enemy& e){ return !e.alive; }),
+        enemies.end());
 }
 
 // Called after every player action.
 // Spends 100 energy, then ticks the world until the player can act again.
 // Result: player.energy >= 100 when this returns.
 void onPlayerAct() {
+    int prevMinutes = worldTime.minutes;
+    int prevSeason  = worldTime.season();
+    worldTime.advance();
+
+    // Seasonal sunrise/sunset events
+    int rise    = (int)worldTime.sunriseHour();
+    int set_    = (int)worldTime.sunsetHour();
+    int dawnBeg = rise - 1;
+    if (worldTime.crossedHour(dawnBeg, prevMinutes))
+        panel.addMessage("The sky begins to lighten in the east.");
+    if (worldTime.crossedHour(rise, prevMinutes))
+        panel.addMessage("The sun rises over the horizon.");
+    if (worldTime.crossedHour(12, prevMinutes))
+        panel.addMessage("The sun stands high overhead.");
+    if (worldTime.crossedHour(set_, prevMinutes))
+        panel.addMessage("The sun sinks toward the horizon.");
+    if (worldTime.crossedHour(set_ + 1, prevMinutes)) {
+        panel.addMessage("Darkness falls across the land.");
+        if (player.totalLightRadius() == 0)
+            panel.addMessage("It is pitch dark. You need a light source!");
+    }
+
+    if (worldTime.season() != prevSeason)
+        panel.addMessage(std::string("The season changes: ") + worldTime.seasonName() + " begins.");
+
+    int prevHungerLv = player.hungerLevel();
+    int prevThirstLv = player.thirstLevel();
+
     player.energy -= 100;
     while (player.energy < 100)
         tickWorld();
+
+    // Notify player when crossing hunger/thirst thresholds
+    int newHungerLv = player.hungerLevel();
+    int newThirstLv = player.thirstLevel();
+
+    if (newHungerLv > prevHungerLv) {
+        const char* msgs[] = {
+            "", "You feel hungry.",
+            "You are very hungry. Your strength wanes.",
+            "You are starving! Your body is failing.",
+            "You are dying of starvation!"
+        };
+        if (newHungerLv <= 4) panel.addMessage(msgs[newHungerLv]);
+    }
+    if (newThirstLv > prevThirstLv) {
+        const char* msgs[] = {
+            "", "You feel thirsty.",
+            "You are very thirsty. Your body weakens.",
+            "You are dying of thirst! Your vision blurs.",
+            "You are dying of dehydration!"
+        };
+        if (newThirstLv <= 4) panel.addMessage(msgs[newThirstLv]);
+    }
+
+    if (!player.isAlive())
+        panel.addMessage("You have died.");
 }
 
 void updateCamera();
@@ -172,7 +431,7 @@ void checkSectorTransition() {
     else if (player.y == 0)             { newSY--; newPY = MAP_HEIGHT - 2; }
     else if (player.y == MAP_HEIGHT -1) { newSY++; newPY = 1;              }
 
-    // Clamp at world boundary — push player back inside.
+    // Clamp at world boundary вЂ” push player back inside.
     if (newSX < 0 || newSX >= OVERMAP_W || newSY < 0 || newSY >= OVERMAP_H) {
         player.x = std::max(1, std::min(MAP_WIDTH  - 2, player.x));
         player.y = std::max(1, std::min(MAP_HEIGHT - 2, player.y));
@@ -189,12 +448,13 @@ void checkSectorTransition() {
     overmap.reveal(playerSectorX, playerSectorY);
 
     enemies.clear();
+    corpses.clear();
     initEnemy();
     currentPath.clear();
     pathIndex = 0;
     previewPath.clear();
     examinePanel.hide();
-    updateVisibility();
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
     updateCamera();
 
     int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
@@ -203,16 +463,50 @@ void checkSectorTransition() {
 
 // ------------------------------------------------------------------ world interaction
 
+// Walk to an adjacent walkable tile next to (tx,ty), then fire INTERACT pending action.
+void walkAdjacentTo(int tx, int ty) {
+    static const int dirs[8][2] = {
+        {0,-1},{0,1},{-1,0},{1,0},{-1,-1},{1,-1},{-1,1},{1,1}
+    };
+    int bestDist = INT_MAX, bestX = -1, bestY = -1;
+    for (auto& d : dirs) {
+        int nx = tx + d[0], ny = ty + d[1];
+        if (nx < 1 || nx >= MAP_WIDTH-1 || ny < 1 || ny >= MAP_HEIGHT-1) continue;
+        if (!map[ny][nx].walkable()) continue;
+        int dist = (nx - player.x)*(nx - player.x) + (ny - player.y)*(ny - player.y);
+        if (dist < bestDist) { bestDist = dist; bestX = nx; bestY = ny; }
+    }
+    if (bestX < 0) return;
+    pendingAct  = PendingAct::INTERACT;
+    pendingActX = tx; pendingActY = ty;
+    currentPath = findPath(player.x, player.y, bestX, bestY);
+    pathIndex   = 1;
+}
+
 void interactWithObject(int tx, int ty) {
     Tile& tile = map[ty][tx];
     if (tile.objectId < 0) return;
+
+    int oid = tile.objectId;
+
+    // Tool requirement checks
+    bool needsAxe  = (oid == O_TREE || oid == O_DEAD_TREE || oid == O_FALLEN_LOG);
+    bool needsPick = (oid == O_ROCK || oid == O_BOULDER);
+
+    if (needsAxe && !player.hasChopTool()) {
+        panel.addMessage("You need an axe to chop this.");
+        return;
+    }
+    if (needsPick && !player.hasMineTool()) {
+        panel.addMessage("You need a pickaxe to mine this.");
+        return;
+    }
 
     const ObjectDef& od = objectDefs[tile.objectId];
     int hitDmg = 20 + std::max(0, (player.effectiveStr() - 10) * 2);
     tile.objectHp -= hitDmg;
 
     if (tile.objectHp <= 0) {
-        int oid = tile.objectId;
         tile.objectId = -1;
         tile.objectHp = 0;
 
@@ -251,7 +545,7 @@ void interactWithObject(int tx, int ty) {
         }
 
         currentPath.clear(); pathIndex = 0; previewPath.clear();
-        updateVisibility();
+        updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
     } else {
         panel.addMessage("You strike the " + std::string(od.name)
                        + ". (" + std::to_string(tile.objectHp)
@@ -271,17 +565,18 @@ void doTeleport(int newSX, int newSY) {
                    playerSectorX, playerSectorY);
     overmap.reveal(playerSectorX, playerSectorY);
     enemies.clear();
+    corpses.clear();
     initEnemy();
     currentPath.clear();
     pathIndex = 0;
     previewPath.clear();
     examinePanel.hide();
-    updateVisibility();
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
     updateCamera();
 
     int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
     panel.addMessage("Teleported to [" + std::to_string(newSX) + ", "
-                     + std::to_string(newSY) + "] — " + biomeVisuals[bi].name + ".");
+                     + std::to_string(newSY) + "] вЂ” " + biomeVisuals[bi].name + ".");
 }
 
 // ------------------------------------------------------------------ input
@@ -297,7 +592,14 @@ void handleInput(SDL_Event& event, bool& running) {
     }
 
     // Console intercepts all input while open (except the backtick above).
-    if (console.handleEvent(event, overmap)) return;
+    if (console.handleEvent(event, overmap, worldTime)) return;
+
+    // Pickup panel intercepts keyboard while visible.
+    if (pickupPanel.visible) {
+        if (event.type == SDL_KEYDOWN)
+            pickupPanel.handleKey(event.key.keysym.sym);
+        return;
+    }
 
     // Overmap handles arrow keys and M while open.
     if (overmap.visible) {
@@ -321,6 +623,9 @@ void handleInput(SDL_Event& event, bool& running) {
         if (event.key.keysym.sym == SDLK_m)      overmap.open(playerSectorX, playerSectorY);
         if (event.key.keysym.sym == SDLK_i)      inventoryPanel.toggle();
         if (event.key.keysym.sym == SDLK_g)      pickUpAtPlayer();
+        if (event.key.keysym.sym == SDLK_SPACE &&
+            !pickupPanel.visible && !contextMenu.visible)
+            onPlayerAct();  // wait one turn
         if (event.key.keysym.sym == SDLK_ESCAPE) {
             if (inventoryPanel.visible) inventoryPanel.close();
             else                        running = false;
@@ -331,9 +636,19 @@ void handleInput(SDL_Event& event, bool& running) {
         int mouseX = event.button.x / TILE_SIZE + cameraX;
         int mouseY = event.button.y / TILE_SIZE + cameraY;
 
-        // Any click closes the item examine panel.
+        // Any click closes examine panels.
         if (itemExaminePanel.visible) {
             itemExaminePanel.hide();
+            return;
+        }
+        if (enemyExaminePanel.visible) {
+            enemyExaminePanel.hide();
+            return;
+        }
+
+        // Pickup panel handles its own clicks (item toggle, button, outside-close).
+        if (pickupPanel.visible) {
+            pickupPanel.handleMouseClick(event.button.x, event.button.y);
             return;
         }
 
@@ -343,13 +658,13 @@ void handleInput(SDL_Event& event, bool& running) {
             return;
         }
 
-        // Context menu has priority — handles menu items from inventory too.
+        // Context menu has priority вЂ” handles menu items from inventory too.
         if (contextMenu.visible) {
             contextMenu.handleClick(event.button.x, event.button.y);
             return;
         }
 
-        // Inventory panel — consumes all clicks while open.
+        // Inventory panel вЂ” consumes all clicks while open.
         if (inventoryPanel.visible) {
             inventoryPanel.handleClick(event.button.x, event.button.y,
                                        player, contextMenu, groundItems,
@@ -360,12 +675,28 @@ void handleInput(SDL_Event& event, bool& running) {
         if (event.button.button == SDL_BUTTON_LEFT) {
             if (mouseX >= 0 && mouseX < MAP_WIDTH && mouseY >= 0 && mouseY < MAP_HEIGHT) {
                 Enemy* enemy = getEnemyAt(mouseX, mouseY);
+                int attackDist = std::max(std::abs(mouseX - player.x),
+                                          std::abs(mouseY - player.y));
                 if (enemy && map[mouseY][mouseX].visible) {
-                    int damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-                    enemy->takeDamage(damage);
-                    panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
-                    if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
-                    onPlayerAct();
+                    if (attackDist <= 1) {
+                        PartTarget part   = randomHitPart();
+                        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
+                        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
+                        enemy->takeDamage(damage, part);
+                        panel.addMessage("You hit " + enemy->name + "'s " + partName(part)
+                                         + " for " + std::to_string(damage) + " damage.");
+                        if (!enemy->isAlive()) {
+                            panel.addMessage(enemy->name + " dies.");
+                            dropEnemyLoot(*enemy);
+                        }
+                        onPlayerAct();
+                    } else {
+                        // Walk toward enemy — path recalculates each step via attackTarget
+                        attackTarget = enemy;
+                        pendingAct   = PendingAct::NONE;
+                        currentPath  = findPath(player.x, player.y, mouseX, mouseY);
+                        pathIndex    = 1;
+                    }
                 } else if (map[mouseY][mouseX].walkable()) {
                     currentPath = findPath(player.x, player.y, mouseX, mouseY);
                     pathIndex = 1;
@@ -377,16 +708,33 @@ void handleInput(SDL_Event& event, bool& running) {
             if (mouseX >= 0 && mouseX < MAP_WIDTH && mouseY >= 0 && mouseY < MAP_HEIGHT) {
                 Enemy* enemy = getEnemyAt(mouseX, mouseY);
                 if (enemy && map[mouseY][mouseX].visible) {
+                    int ex = mouseX, ey = mouseY;
                     contextMenu.show(event.button.x, event.button.y, {
-                        {"Attack", [enemy]() {
-                            int damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-                            enemy->takeDamage(damage);
-                            panel.addMessage("You hit " + enemy->name + " for " + std::to_string(damage) + " damage.");
-                            if (!enemy->isAlive()) panel.addMessage(enemy->name + " dies.");
-                            onPlayerAct();
+                        {"Attack", [enemy, ex, ey]() {
+                            int dist = std::max(std::abs(ex - player.x),
+                                                std::abs(ey - player.y));
+                            if (dist <= 1) {
+                                PartTarget part   = randomHitPart();
+                                int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
+                                if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
+                                enemy->takeDamage(damage, part);
+                                panel.addMessage("You hit " + enemy->name + "'s " + partName(part)
+                                                 + " for " + std::to_string(damage) + " damage.");
+                                if (!enemy->isAlive()) {
+                                    panel.addMessage(enemy->name + " dies.");
+                                    dropEnemyLoot(*enemy);
+                                }
+                                onPlayerAct();
+                            } else {
+                                attackTarget = enemy;
+                                pendingAct   = PendingAct::NONE;
+                                currentPath  = findPath(player.x, player.y, ex, ey);
+                                pathIndex    = 1;
+                            }
                         }},
-                        {"Examine", [enemy]() {}},
-                        {"Flee",    []()      {}}
+                        {"Examine", [enemy]() {
+                            enemyExaminePanel.show(*enemy);
+                        }}
                     });
                 } else {
                     // Non-enemy tile: show context menu if explored
@@ -394,41 +742,73 @@ void handleInput(SDL_Event& event, bool& running) {
                         int mx = mouseX, my = mouseY;
                         std::vector<MenuItem> items;
 
-                        // Ground item: pick up option
+                        // Gather corpse info for Examine (captured by value — safe if vector reallocates)
+                        std::string corpseNameHere;
+                        bool        corpseFreshHere = false;
+                        bool        hasCorpseHere   = false;
+                        for (const Corpse& c : corpses) {
+                            if (c.x == mx && c.y == my && map[my][mx].visible) {
+                                corpseNameHere  = c.name;
+                                corpseFreshHere = c.isFresh(worldTime.minutes);
+                                hasCorpseHere   = true;
+                                break;
+                            }
+                        }
+
+                        // Ground item(s): pick up option (walk to item if needed)
                         GroundItem* gi = getGroundItemAt(mx, my);
                         if (gi && map[my][mx].visible) {
-                            items.push_back({"Pick up " + gi->item.name,
-                                [gx=mx, gy=my]() {
-                                    for (int i = (int)groundItems.size()-1; i >= 0; i--) {
-                                        if (groundItems[i].x != gx || groundItems[i].y != gy) continue;
-                                        std::string n = groundItems[i].item.name;
-                                        if (player.addToContainer(groundItems[i].item)) {
-                                            panel.addMessage("You pick up the " + n + ".");
-                                            groundItems.erase(groundItems.begin() + i);
+                            std::vector<Item> here = getGroundItemsAt(mx, my);
+                            int dist = std::max(std::abs(mx - player.x),
+                                                std::abs(my - player.y));
+                            if (here.size() == 1) {
+                                items.push_back({"Pick up " + gi->item.name,
+                                    [gx=mx, gy=my, dist]() {
+                                        if (dist <= 1) {
+                                            std::vector<bool> sel = {true};
+                                            doPickup(gx, gy, sel);
                                         } else {
-                                            panel.addMessage("No room for the " + n + ".");
+                                            pendingAct  = PendingAct::PICKUP_ONE;
+                                            pendingActX = gx; pendingActY = gy;
+                                            currentPath = findPath(player.x, player.y, gx, gy);
+                                            pathIndex   = 1;
                                         }
-                                        break;
                                     }
-                                }
-                            });
+                                });
+                            } else {
+                                std::string label = "Pick up items... (" + std::to_string(here.size()) + ")";
+                                items.push_back({label,
+                                    [gx=mx, gy=my, dist]() {
+                                        if (dist <= 1) {
+                                            auto h = getGroundItemsAt(gx, gy);
+                                            pickupPanel.show(gx, gy, std::move(h));
+                                            pickupPanel.onConfirm = [gx, gy](const std::vector<bool>& sel) {
+                                                doPickup(gx, gy, sel);
+                                            };
+                                        } else {
+                                            pendingAct  = PendingAct::PICKUP_PANEL;
+                                            pendingActX = gx; pendingActY = gy;
+                                            currentPath = findPath(player.x, player.y, gx, gy);
+                                            pathIndex   = 1;
+                                        }
+                                    }
+                                });
+                            }
                         }
 
                         if (map[my][mx].walkable()) {
                             items.push_back({"Move here", [mx, my]() {
-                                currentPath = findPath(player.x, player.y, mx, my);
-                                pathIndex = 1;
+                                pendingAct   = PendingAct::NONE;
+                                attackTarget = nullptr;
+                                currentPath  = findPath(player.x, player.y, mx, my);
+                                pathIndex    = 1;
                             }});
                         }
 
-                        // World interaction for adjacent destructible objects
+                        // World interaction — walk to object first if needed
                         {
                             int oid = map[my][mx].objectId;
-                            int dist = std::max(std::abs(mx - player.x),
-                                                std::abs(my - player.y));
-                            if (oid >= 0 && dist <= 1 &&
-                                objectDefs[oid].durability > 0 &&
-                                map[my][mx].visible) {
+                            if (oid >= 0 && objectDefs[oid].durability > 0 && map[my][mx].visible) {
                                 const char* verb =
                                     (oid == O_BUSH)                        ? "Harvest" :
                                     (oid == O_ROCK || oid == O_BOULDER)    ? "Mine"    : "Chop";
@@ -438,20 +818,35 @@ void handleInput(SDL_Event& event, bool& running) {
                                                   + "/" + std::to_string(objectDefs[oid].durability)
                                                   + ")";
                                 items.push_back({label, [mx, my]() {
-                                    interactWithObject(mx, my);
+                                    int dist = std::max(std::abs(mx - player.x),
+                                                        std::abs(my - player.y));
+                                    if (dist <= 1)
+                                        interactWithObject(mx, my);
+                                    else
+                                        walkAdjacentTo(mx, my);
                                 }});
                             }
                         }
 
-                        // Single "Examine" button — shows item (if any) + tile info together
-                        if (gi && map[my][mx].visible) {
-                            items.push_back({"Examine", [mx, my, item=gi->item]() {
-                                examinePanel.show(mx, my, item);
-                            }});
-                        } else {
-                            items.push_back({"Examine", [mx, my]() {
-                                examinePanel.show(mx, my);
-                            }});
+                        // Examine — tile info + items + corpse if present
+                        {
+                            bool hasCN = hasCorpseHere;
+                            std::string cn = corpseNameHere;
+                            bool cf = corpseFreshHere;
+                            bool hasGI = (gi && map[my][mx].visible);
+                            MenuItem examItem;
+                            static const char examLbl[] = {'E','x','a','m','i','n','e','\0'};
+                            examItem.label = examLbl;
+                            examItem.action = [mx, my, hasCN, cn, cf, hasGI]() {
+                                if (hasGI)
+                                    examinePanel.show(mx, my, getGroundItemsAt(mx, my));
+                                else
+                                    examinePanel.show(mx, my);
+                                examinePanel.hasCorpse   = hasCN;
+                                examinePanel.corpseName  = cn;
+                                examinePanel.corpseFresh = cf;
+                            };
+                            items.push_back(std::move(examItem));
                         }
                         contextMenu.show(event.button.x, event.button.y, items);
                     } else {
@@ -469,6 +864,8 @@ void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_MOUSEMOTION) {
         hoverX = event.motion.x / TILE_SIZE + cameraX;
         hoverY = event.motion.y / TILE_SIZE + cameraY;
+        if (pickupPanel.visible)
+            pickupPanel.handleMouseMotion(event.motion.x, event.motion.y);
     }
 }
 
@@ -476,7 +873,7 @@ void handleInput(SDL_Event& event, bool& running) {
 
 // Advances the player one step along currentPath (with visual pacing).
 // If the player has extra energy (speed > 100), the next call will act again
-// before the world gets another tick — producing CDDA-style multi-actions.
+// before the world gets another tick вЂ” producing CDDA-style multi-actions.
 bool updatePlayer() {
     if (pathIndex >= (int)currentPath.size()) return false;
 
@@ -492,13 +889,21 @@ bool updatePlayer() {
 
     // Attack enemy blocking the path instead of moving.
     Enemy* blocker = getEnemyAt(next.x, next.y);
-    if (blocker) {
-        int damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-        blocker->takeDamage(damage);
-        panel.addMessage("You hit " + blocker->name + " for " + std::to_string(damage) + " damage.");
-        if (!blocker->isAlive()) panel.addMessage(blocker->name + " dies.");
+    if (blocker && blocker->alive) {
+        PartTarget part   = randomHitPart();
+        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
+        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
+        blocker->takeDamage(damage, part);
+        panel.addMessage("You hit " + blocker->name + "'s " + partName(part)
+                         + " for " + std::to_string(damage) + " damage.");
+        if (!blocker->isAlive()) {
+            panel.addMessage(blocker->name + " dies.");
+            dropEnemyLoot(*blocker);
+        }
         currentPath.clear();
         pathIndex = 0;
+        pendingAct   = PendingAct::NONE;
+        attackTarget = nullptr;
         onPlayerAct();
         return true;
     }
@@ -515,12 +920,55 @@ bool updatePlayer() {
     pathIndex++;
     onPlayerAct();
 
+    // If chasing an enemy, recalculate path to their current position each step.
+    if (attackTarget) {
+        if (!attackTarget->alive) {
+            attackTarget = nullptr;
+        } else {
+            currentPath = findPath(player.x, player.y,
+                                   attackTarget->x, attackTarget->y);
+            pathIndex = (currentPath.size() >= 2) ? 1 : (int)currentPath.size();
+        }
+    }
+
     if (pathIndex >= (int)currentPath.size()) {
         currentPath.clear();
         pathIndex = 0;
         lastHoverX = -1;
         lastHoverY = -1;
         previewPath.clear();
+
+        attackTarget = nullptr;
+        if (pendingAct != PendingAct::NONE) {
+            int dist = std::max(std::abs(player.x - pendingActX),
+                                std::abs(player.y - pendingActY));
+            if (dist <= 1) {
+                switch (pendingAct) {
+                    case PendingAct::PICKUP_ONE: {
+                        std::vector<bool> sel = {true};
+                        doPickup(pendingActX, pendingActY, sel);
+                        break;
+                    }
+                    case PendingAct::PICKUP_PANEL: {
+                        auto here = getGroundItemsAt(pendingActX, pendingActY);
+                        if (!here.empty()) {
+                            int px = pendingActX, py = pendingActY;
+                            pickupPanel.show(px, py, std::move(here));
+                            pickupPanel.onConfirm = [px, py](const std::vector<bool>& sel) {
+                                doPickup(px, py, sel);
+                            };
+                        }
+                        break;
+                    }
+                    case PendingAct::INTERACT:
+                        interactWithObject(pendingActX, pendingActY);
+                        break;
+                    default: break;
+                }
+            }
+            pendingAct  = PendingAct::NONE;
+            pendingActX = pendingActY = -1;
+        }
     }
 
     return true;
@@ -534,7 +982,7 @@ void renderDeathScreen(SDL_Renderer* renderer, TTF_Font* font) {
     SDL_RenderFillRect(renderer, &overlay);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
-    // "YOU DIED" text — rendered twice for a shadow effect
+    // "YOU DIED" text вЂ” rendered twice for a shadow effect
     TTF_Font* bigFont = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 48);
     if (bigFont) {
         auto renderCentered = [&](const char* text, int y, SDL_Color col) {
@@ -598,10 +1046,16 @@ int main(int argc, char* argv[]) {
     groundItems.push_back({player.x,     player.y + 2, Items::ironHelmet()});
     groundItems.push_back({player.x + 1, player.y + 1, Items::leatherVest()});
     groundItems.push_back({player.x - 1, player.y - 1, Items::leatherBoots()});
+    groundItems.push_back({player.x + 1, player.y,     Items::torch()});
+    groundItems.push_back({player.x - 1, player.y,     Items::lantern()});
 
     // Give everyone starting energy so they're ready to act immediately.
     player.energy = player.speed;
     for (Enemy& e : enemies) e.energy = e.speed;
+
+    // Wire up inventory callbacks.
+    inventoryPanel.onMessage = [](const std::string& msg) { panel.addMessage(msg); };
+    inventoryPanel.onAct     = []() { onPlayerAct(); };
 
     SDL_Window* window = SDL_CreateWindow("Greystone",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -620,7 +1074,7 @@ int main(int argc, char* argv[]) {
 
     initTextures(renderer, font);
     overmap.initTextures(renderer, font);
-    updateVisibility();
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
     updateCamera();
 
     bool running = true;
@@ -635,10 +1089,74 @@ int main(int argc, char* argv[]) {
             doTeleport(console.tpX, console.tpY);
         }
 
+        if (!console.pendingSpawn.empty()) {
+            std::string type  = console.pendingSpawn;
+            int         count = console.pendingSpawnCount;
+            console.pendingSpawn.clear();
+
+            std::function<Enemy(int,int)> factory;
+            if      (type == "goblin")   factory = EnemyTypes::goblin;
+            else if (type == "orc")      factory = EnemyTypes::orcWarrior;
+            else if (type == "skeleton") factory = EnemyTypes::skeleton;
+            else if (type == "wolf")     factory = EnemyTypes::wolf;
+            else if (type == "bandit")   factory = EnemyTypes::bandit;
+
+            if (factory) {
+                int spawned = 0;
+                for (int n = 0; n < count; n++) {
+                    for (int attempt = 0; attempt < 60; attempt++) {
+                        int x = player.x + (rand() % 11) - 5;
+                        int y = player.y + (rand() % 11) - 5;
+                        if (x <= 0 || x >= MAP_WIDTH-1 || y <= 0 || y >= MAP_HEIGHT-1) continue;
+                        if (!map[y][x].walkable()) continue;
+                        if (isTileOccupied(x, y)) continue;
+                        if (x == player.x && y == player.y) continue;
+                        enemies.push_back(factory(x, y));
+                        spawned++;
+                        break;
+                    }
+                }
+                if (spawned < count)
+                    panel.addMessage("Spawned " + std::to_string(spawned) + "/" + std::to_string(count) + " (no room for rest).");
+            }
+        }
+
+        if (!console.pendingGive.empty()) {
+            const std::string& gn = console.pendingGive;
+            Item gi;
+            bool gok = true;
+            if      (gn == "sword")    gi = Items::ironSword();
+            else if (gn == "dagger")   gi = Items::crudeDagger();
+            else if (gn == "axe")      gi = Items::warAxe();
+            else if (gn == "club")     gi = Items::woodenClub();
+            else if (gn == "boneclub") gi = Items::boneClub();
+            else if (gn == "helmet")   gi = Items::ironHelmet();
+            else if (gn == "vest")     gi = Items::leatherVest();
+            else if (gn == "boots")    gi = Items::leatherBoots();
+            else if (gn == "backpack") gi = Items::backpack();
+            else if (gn == "pouch")    gi = Items::beltPouch();
+            else if (gn == "hatchet")  gi = Items::hatchet();
+            else if (gn == "pickaxe")  gi = Items::pickaxe();
+            else if (gn == "torch")    gi = Items::torch();
+            else if (gn == "lantern")  gi = Items::lantern();
+            else if (gn == "bread")    gi = Items::bread();
+            else if (gn == "water")    gi = Items::waterFlask();
+            else if (gn == "ring")     gi = Items::goldRing();
+            else if (gn == "amulet")   gi = Items::silverAmulet();
+            else if (gn == "log")      gi = Items::woodLog();
+            else if (gn == "stone")    gi = Items::stonePiece();
+            else if (gn == "branch")   gi = Items::branch();
+            else gok = false;
+
+            if (gok && !player.addToContainer(gi))
+                groundItems.push_back({player.x, player.y, gi});
+            console.pendingGive.clear();
+        }
+
         updatePlayer();
         checkSectorTransition();
         updatePreviewPath();
-        updateVisibility();
+        updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
         updateCamera();
 
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
@@ -646,32 +1164,80 @@ int main(int argc, char* argv[]) {
 
         renderMap(renderer);
 
-        // Ground items on top of map tiles
-        for (const auto& gi : groundItems) {
-            if (!map[gi.y][gi.x].visible) continue;
-            int sx = (gi.x - cameraX) * TILE_SIZE;
-            int sy = (gi.y - cameraY) * TILE_SIZE;
+        // Corpses render first — ground items and actors draw on top.
+        for (const Corpse& c : corpses) {
+            if (!map[c.y][c.x].visible) continue;
+            int sx = (c.x - cameraX) * TILE_SIZE;
+            int sy = (c.y - cameraY) * TILE_SIZE;
             if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
-            SDL_Surface* gs = TTF_RenderText_Solid(font, gi.item.groundSymbol(), gi.item.groundColor());
-            if (gs) {
-                SDL_Texture* gt = SDL_CreateTextureFromSurface(renderer, gs);
-                SDL_FreeSurface(gs);
+            static const char cSym[2] = {'%', 0};
+            SDL_Surface* s = TTF_RenderText_Solid(font, cSym, c.color);
+            if (s) {
+                SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
+                SDL_FreeSurface(s);
                 SDL_Rect dst = {sx, sy, TILE_SIZE, TILE_SIZE};
-                SDL_RenderCopy(renderer, gt, nullptr, &dst);
-                SDL_DestroyTexture(gt);
+                SDL_RenderCopy(renderer, t, nullptr, &dst);
+                SDL_DestroyTexture(t);
+            }
+        }
+
+        // Ground items on top of map tiles вЂ” show $ for piles, item symbol for single
+        {
+            // Count items per tile
+            std::map<std::pair<int,int>, int> tileCount;
+            for (const auto& gi : groundItems)
+                if (map[gi.y][gi.x].visible) tileCount[{gi.x, gi.y}]++;
+
+            std::set<std::pair<int,int>> rendered;
+            for (const auto& gi : groundItems) {
+                if (!map[gi.y][gi.x].visible) continue;
+                auto key = std::make_pair(gi.x, gi.y);
+                if (!rendered.insert(key).second) continue; // already rendered this tile
+
+                int sx = (gi.x - cameraX) * TILE_SIZE;
+                int sy = (gi.y - cameraY) * TILE_SIZE;
+                if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+
+                int cnt = tileCount[key];
+                const char* sym = (cnt > 1) ? "$" : gi.item.groundSymbol();
+                SDL_Color col   = (cnt > 1) ? SDL_Color{220, 200, 60, 255} : gi.item.groundColor();
+
+                SDL_Surface* gs = TTF_RenderText_Solid(font, sym, col);
+                if (gs) {
+                    SDL_Texture* gt = SDL_CreateTextureFromSurface(renderer, gs);
+                    SDL_FreeSurface(gs);
+                    SDL_Rect dst = {sx, sy, TILE_SIZE, TILE_SIZE};
+                    SDL_RenderCopy(renderer, gt, nullptr, &dst);
+                    SDL_DestroyTexture(gt);
+                }
             }
         }
 
         renderPath(renderer);
         renderPlayer(renderer);
-        renderEnemies(renderer);
+        renderEnemies(renderer, font);
+
+        // Night/dusk darkness overlay over the map view
+        {
+            float dark = worldTime.darkness();
+            if (dark > 0.0f) {
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 20, (Uint8)(dark * 150));
+                SDL_Rect overlay = {0, 0, SCREEN_WIDTH, MAP_VIEW_HEIGHT};
+                SDL_RenderFillRect(renderer, &overlay);
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+            }
+        }
+
         ui.renderStats(renderer, font);
-        panel.render(renderer, font, player);
+        panel.render(renderer, font, player, worldTime);
         bodyPanel.render(renderer, font, player);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
         inventoryPanel.render(renderer, font, player);
         itemExaminePanel.render(renderer, font);
+        enemyExaminePanel.render(renderer, font);
+        pickupPanel.render(renderer, font);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);
         console.render(renderer, font);

@@ -12,6 +12,10 @@
 struct InventoryPanel {
     bool visible = false;
 
+    // Set from main.cpp after init so Use/Eat can print messages and advance time.
+    std::function<void(const std::string&)> onMessage;
+    std::function<void()>                   onAct;
+
     void toggle() { visible = !visible; }
     void close()  { visible = false; }
 
@@ -95,14 +99,29 @@ struct InventoryPanel {
 
         // Use — food / drink
         if (it.type == ItemType::FOOD || it.type == ItemType::DRINK) {
-            opts.push_back({"Use", [&p, cs, idx]() {
+            opts.push_back({"Use", [this, &p, cs, idx]() {
                 if (!p.worn[cs]) return;
                 auto& cont = p.worn[cs]->contents;
                 if (idx >= (int)cont.size()) return;
-                Item& item = cont[idx];
+                Item item = cont[idx];
+                float oldH = p.hunger, oldT = p.thirst;
                 p.hunger = std::max(0.0f, p.hunger - item.nutrition / 100.0f);
                 p.thirst = std::max(0.0f, p.thirst - item.hydration / 100.0f);
                 cont.erase(cont.begin() + idx);
+                if (onMessage) {
+                    std::string verb = (item.type == ItemType::FOOD) ? "eat" : "drink";
+                    std::string msg  = "You " + verb + " the " + item.name + ".";
+                    if (oldH - p.hunger > 0.01f) {
+                        int pct = (int)((oldH - p.hunger) * 100);
+                        msg += " [hunger -" + std::to_string(pct) + "%]";
+                    }
+                    if (oldT - p.thirst > 0.01f) {
+                        int pct = (int)((oldT - p.thirst) * 100);
+                        msg += " [thirst -" + std::to_string(pct) + "%]";
+                    }
+                    onMessage(msg);
+                }
+                if (onAct) onAct();
             }});
         }
 

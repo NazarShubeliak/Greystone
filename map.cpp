@@ -207,17 +207,17 @@ bool hasLineOfSight(int x0, int y0, int x1, int y1) {
     }
 }
 
-void updateVisibility() {
+void updateVisibility(int radius) {
     for (int y = 0; y < MAP_HEIGHT; y++)
         for (int x = 0; x < MAP_WIDTH; x++)
             map[y][x].visible = false;
 
-    for (int dy = -VIEW_RADIUS; dy <= VIEW_RADIUS; dy++) {
-        for (int dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
             int tx = player.x + dx;
             int ty = player.y + dy;
             if (tx < 0 || tx >= MAP_WIDTH || ty < 0 || ty >= MAP_HEIGHT) continue;
-            if (dx * dx + dy * dy <= VIEW_RADIUS * VIEW_RADIUS) {
+            if (dx * dx + dy * dy <= radius * radius) {
                 if (hasLineOfSight(player.x, player.y, tx, ty)) {
                     map[ty][tx].visible  = true;
                     map[ty][tx].explored = true;

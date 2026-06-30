@@ -87,15 +87,20 @@ void renderPlayer(SDL_Renderer* r) {
     SDL_RenderCopy(r, playerTexture, nullptr, &dst);
 }
 
-void renderEnemies(SDL_Renderer* r) {
+void renderEnemies(SDL_Renderer* r, TTF_Font* font) {
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
         if (!map[e.y][e.x].visible) continue;
-        int w, h;
-        SDL_QueryTexture(enemyTexture, nullptr, nullptr, &w, &h);
-        SDL_Rect dst = {(e.x - cameraX) * TILE_SIZE,
-                        (e.y - cameraY) * TILE_SIZE, w, h};
-        SDL_RenderCopy(r, enemyTexture, nullptr, &dst);
+        int sx = (e.x - cameraX) * TILE_SIZE;
+        int sy = (e.y - cameraY) * TILE_SIZE;
+        if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+        SDL_Surface* s = TTF_RenderText_Solid(font, e.symbol, e.color);
+        if (!s) continue;
+        SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
+        SDL_FreeSurface(s);
+        SDL_Rect dst = {sx, sy, TILE_SIZE, TILE_SIZE};
+        SDL_RenderCopy(r, t, nullptr, &dst);
+        SDL_DestroyTexture(t);
     }
 }
 

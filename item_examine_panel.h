@@ -134,6 +134,12 @@ struct ItemExaminePanel {
                 }
                 break;
             }
+            case ItemType::TOOL:
+                if (item.lightRadius > 0) {
+                    stat(r, f, "Light radius:", std::to_string(item.lightRadius) + " tiles", X+PAD, ty, label, {220, 200, 100, 255});
+                    ty += LH;
+                }
+                break;
             default: break;
         }
 
