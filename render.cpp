@@ -1,10 +1,12 @@
 #include "render.h"
 #include "map.h"
+#include "npc.h"
 #include <vector>
 
 extern Tile   map[MAP_HEIGHT][MAP_WIDTH];
 extern Player player;
-extern std::vector<Enemy> enemies;
+extern std::vector<Enemy>    enemies;
+extern std::vector<Villager> villagers;
 extern SDL_Texture* texCursor;
 extern SDL_Texture* playerTexture;
 extern SDL_Texture* enemyTexture;
@@ -19,6 +21,7 @@ extern int lastHoverX, lastHoverY;
 SDL_Texture* terrainTex[T_COUNT];
 SDL_Texture* groundTex [G_COUNT];
 SDL_Texture* objectTex [O_COUNT];
+SDL_Texture* sproutTex = nullptr;
 
 // ---------------------------------------------------------------- helpers
 
@@ -40,8 +43,10 @@ void initTextures(SDL_Renderer* r, TTF_Font* f) {
     for (int i = 0; i < O_COUNT; i++)
         objectTex[i]  = makeCharTex(r, f, objectDefs[i].symbol,  objectDefs[i].color);
 
-    SDL_Color yellow = {255, 255, 0, 255};
-    texCursor = makeCharTex(r, f, "X", yellow);
+    SDL_Color yellow      = {255, 255, 0, 255};
+    SDL_Color sproutColor = { 80, 160, 60, 255};
+    texCursor  = makeCharTex(r, f, "X", yellow);
+    sproutTex  = makeCharTex(r, f, ",", sproutColor);
 }
 
 // ---------------------------------------------------------------- map
@@ -61,15 +66,36 @@ void renderMap(SDL_Renderer* r) {
 
             // Pick the right texture: object > ground > terrain
             SDL_Texture* tex;
-            if      (t.objectId >= 0) tex = objectTex [t.objectId];
-            else if (t.groundId  >= 0) tex = groundTex [t.groundId];
-            else                       tex = terrainTex[t.terrainId];
+            bool isPlantSprout = false;
 
-            // Dim explored-but-not-visible tiles
-            if (t.visible)
-                SDL_SetTextureColorMod(tex, 255, 255, 255);
-            else
+            if (t.objectId >= 0) {
+                bool isPlant = objectDefs[t.objectId].isPlant;
+                if (isPlant && t.plantAge < 85) {
+                    tex = sproutTex;
+                    isPlantSprout = true;
+                } else {
+                    tex = objectTex[t.objectId];
+                }
+            } else if (t.groundId >= 0) {
+                tex = groundTex[t.groundId];
+            } else {
+                tex = terrainTex[t.terrainId];
+            }
+
+            // Color mod: visible = full color (plants get stage tint), not visible = dim
+            if (t.visible) {
+                if (isPlantSprout) {
+                    SDL_SetTextureColorMod(tex, 255, 255, 255); // sprout uses its own color
+                } else if (t.objectId >= 0 && objectDefs[t.objectId].isPlant) {
+                    // Growing (85-169): 70% brightness; Mature (170+): full
+                    uint8_t mod = (t.plantAge < 170) ? 178 : 255;
+                    SDL_SetTextureColorMod(tex, mod, mod, mod);
+                } else {
+                    SDL_SetTextureColorMod(tex, 255, 255, 255);
+                }
+            } else {
                 SDL_SetTextureColorMod(tex, 70, 70, 70);
+            }
 
             SDL_Rect dst = {x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE};
             SDL_RenderCopy(r, tex, nullptr, &dst);
@@ -95,6 +121,25 @@ void renderEnemies(SDL_Renderer* r, TTF_Font* font) {
         int sy = (e.y - cameraY) * TILE_SIZE;
         if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
         SDL_Surface* s = TTF_RenderText_Solid(font, e.symbol, e.color);
+        if (!s) continue;
+        SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
+        SDL_FreeSurface(s);
+        SDL_Rect dst = {sx, sy, TILE_SIZE, TILE_SIZE};
+        SDL_RenderCopy(r, t, nullptr, &dst);
+        SDL_DestroyTexture(t);
+    }
+}
+
+// ---------------------------------------------------------------- villagers
+
+void renderVillagers(SDL_Renderer* r, TTF_Font* font) {
+    for (const Villager& v : villagers) {
+        if (!v.alive) continue;
+        if (!map[v.y][v.x].visible) continue;
+        int sx = (v.x - cameraX) * TILE_SIZE;
+        int sy = (v.y - cameraY) * TILE_SIZE;
+        if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+        SDL_Surface* s = TTF_RenderText_Solid(font, "@", v.color);
         if (!s) continue;
         SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
         SDL_FreeSurface(s);

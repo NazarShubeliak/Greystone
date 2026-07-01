@@ -129,11 +129,11 @@ inline Item ironSword() {
 inline Item woodenClub() {
     Item i;
     i.name        = "Wooden Club";
-    i.description = "A thick wooden club. Crude but effective.";
+    i.description = "A heavy length of wood shaped into a bludgeon.";
     i.type        = ItemType::WEAPON;
-    i.volume      = 1200; i.weight = 800;
-    i.damage      = 4;    i.slot   = EquipSlot::HAND_R;
-    i.value       = 5;
+    i.volume      = 2000; i.weight = 1800;
+    i.damage      = 18;   i.slot   = EquipSlot::HAND_R;
+    i.value       = 4;
     return i;
 }
 
@@ -346,6 +346,101 @@ inline Item berries() {
     i.description = "A handful of wild berries. Tart but nourishing.";
     i.type        = ItemType::FOOD;
     i.volume      = 200; i.weight = 100; i.nutrition = 10; i.value = 1;
+    return i;
+}
+
+inline Item grain() {
+    Item i;
+    i.name        = "Grain";
+    i.description = "A bundle of wheat grain. Can be ground into flour.";
+    i.type        = ItemType::MISC;
+    i.volume      = 300; i.weight = 250; i.value = 2;
+    return i;
+}
+
+inline Item herb() {
+    Item i;
+    i.name        = "Herb";
+    i.description = "Dried medicinal herbs with a sharp scent. Useful in potions.";
+    i.type        = ItemType::MISC;
+    i.volume      = 150; i.weight = 50; i.value = 3;
+    return i;
+}
+
+inline Item mushroom() {
+    Item i;
+    i.name        = "Mushroom";
+    i.description = "A cluster of autumn mushrooms. Earthy and somewhat nourishing.";
+    i.type        = ItemType::FOOD;
+    i.volume      = 100; i.weight = 80; i.nutrition = 8; i.value = 2;
+    return i;
+}
+
+// ── Crafted items ────────────────────────────────────────────────────────────
+
+inline Item stoneKnife() {
+    Item i;
+    i.name        = "Stone Knife";
+    i.description = "A sharp flake of stone lashed to a short handle.";
+    i.type        = ItemType::WEAPON;
+    i.slot        = EquipSlot::HAND_R;
+    i.volume      = 400; i.weight = 320; i.damage = 14; i.value = 5;
+    return i;
+}
+
+inline Item crudeAxe() {
+    Item i;
+    i.name        = "Crude Axe";
+    i.description = "A stone head tied to a branch handle. Chops wood and cracks skulls.";
+    i.type        = ItemType::WEAPON;
+    i.slot        = EquipSlot::HAND_R;
+    i.volume      = 1800; i.weight = 1500; i.damage = 22; i.value = 8;
+    i.canChop     = true;
+    return i;
+}
+
+inline Item ropeItem() {
+    Item i;
+    i.name        = "Rope";
+    i.description = "Braided from thin branches. Useful for binding or climbing.";
+    i.type        = ItemType::MISC;
+    i.volume      = 600; i.weight = 400; i.value = 6;
+    return i;
+}
+
+inline Item herbalPoultice() {
+    Item i;
+    i.name        = "Herbal Poultice";
+    i.description = "Crushed herbs wrapped in bark. Helps wounds stop bleeding and begin healing.";
+    i.type        = ItemType::MISC;
+    i.volume      = 150; i.weight = 80; i.value = 8;
+    return i;
+}
+
+inline Item mushroomStew() {
+    Item i;
+    i.name        = "Mushroom Stew";
+    i.description = "Slow-cooked mushrooms in their own juices. Hearty and filling.";
+    i.type        = ItemType::FOOD;
+    i.volume      = 400; i.weight = 350; i.nutrition = 24; i.value = 5;
+    return i;
+}
+
+inline Item flatbread() {
+    Item i;
+    i.name        = "Flatbread";
+    i.description = "Grain pressed and sun-baked on a hot stone. Simple and filling.";
+    i.type        = ItemType::FOOD;
+    i.volume      = 300; i.weight = 200; i.nutrition = 20; i.value = 4;
+    return i;
+}
+
+inline Item roastedBerries() {
+    Item i;
+    i.name        = "Roasted Berries";
+    i.description = "Berries dried and caramelised over embers. Sweet and sustaining.";
+    i.type        = ItemType::FOOD;
+    i.volume      = 150; i.weight = 100; i.nutrition = 10; i.value = 3;
     return i;
 }
 

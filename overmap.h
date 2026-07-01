@@ -11,8 +11,9 @@ const int OVERMAP_W = 100;
 const int OVERMAP_H = 100;
 
 struct SectorInfo {
-    BiomeType biome    = BiomeType::PLAINS;
-    bool      explored = false;
+    BiomeType biome      = BiomeType::PLAINS;
+    bool      explored   = false;
+    bool      hasVillage = false;
 };
 
 struct BiomeVisual {
@@ -46,6 +47,7 @@ struct Overmap {
     SDL_Texture* biomeTex[6] = {};
     SDL_Texture* unknownTex  = nullptr;
     SDL_Texture* playerTex   = nullptr;
+    SDL_Texture* villageTex  = nullptr;
 
     // ---------------------------------------------------------------- generate
 
@@ -75,6 +77,23 @@ struct Overmap {
                             sectors[ny][nx].biome = s.biome;
                     }
             }
+        }
+
+        // Scatter ~15 villages in plains sectors, spaced at least 5 sectors apart.
+        int placed = 0, tries = 0;
+        while (placed < 15 && tries < 1000) {
+            tries++;
+            int vx = 3 + rand() % (OVERMAP_W - 6);
+            int vy = 3 + rand() % (OVERMAP_H - 6);
+            if (sectors[vy][vx].biome != BiomeType::PLAINS) continue;
+            bool tooClose = false;
+            for (int dy = -5; dy <= 5 && !tooClose; dy++)
+                for (int dx = -5; dx <= 5 && !tooClose; dx++) {
+                    int nx = vx+dx, ny = vy+dy;
+                    if (nx >= 0 && nx < OVERMAP_W && ny >= 0 && ny < OVERMAP_H)
+                        if (sectors[ny][nx].hasVillage) tooClose = true;
+                }
+            if (!tooClose) { sectors[vy][vx].hasVillage = true; placed++; }
         }
     }
 
@@ -112,14 +131,16 @@ struct Overmap {
         };
         for (int i = 0; i < 6; i++)
             biomeTex[i] = make(biomeVisuals[i].symbol, biomeVisuals[i].fg);
-        unknownTex = make("?", {38, 38, 35, 255});
-        playerTex  = make("@", {255, 255, 180, 255});
+        unknownTex  = make("?",  {38,  38,  35, 255});
+        playerTex   = make("@",  {255, 255, 180, 255});
+        villageTex  = make("#",  {255, 210,  60, 255});
     }
 
     void destroyTextures() {
         for (auto& t : biomeTex) { SDL_DestroyTexture(t); t = nullptr; }
-        SDL_DestroyTexture(unknownTex); unknownTex = nullptr;
-        SDL_DestroyTexture(playerTex);  playerTex  = nullptr;
+        SDL_DestroyTexture(unknownTex);  unknownTex  = nullptr;
+        SDL_DestroyTexture(playerTex);   playerTex   = nullptr;
+        SDL_DestroyTexture(villageTex);  villageTex  = nullptr;
     }
 
     // ---------------------------------------------------------------- render
@@ -160,7 +181,7 @@ struct Overmap {
                 SDL_Color bgc = biomeVisuals[bi].bg;
                 SDL_SetRenderDrawColor(r, bgc.r, bgc.g, bgc.b, 255);
                 SDL_RenderFillRect(r, &cell);
-                SDL_RenderCopy(r, biomeTex[bi], nullptr, &cell);
+                SDL_RenderCopy(r, sec.hasVillage ? villageTex : biomeTex[bi], nullptr, &cell);
             }
         }
 

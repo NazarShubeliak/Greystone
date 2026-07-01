@@ -15,6 +15,9 @@
 #include "enemy_types.h"
 #include "corpse.h"
 #include "map.h"
+#include "npc.h"
+#include "villager_examine_panel.h"
+#include "craft_panel.h"
 #include "render.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -35,8 +38,9 @@ SDL_Texture* playerTexture = nullptr;
 SDL_Texture* enemyTexture  = nullptr;
 
 Player player(20, 15);
-std::vector<Enemy>  enemies;
-std::vector<Corpse> corpses;
+std::vector<Enemy>    enemies;
+std::vector<Corpse>   corpses;
+std::vector<Villager> villagers;
 
 std::vector<SDL_Point> currentPath;
 int pathIndex = 0;
@@ -64,8 +68,15 @@ Overmap overmap;
 CheatConsole console;
 InventoryPanel inventoryPanel;
 ItemExaminePanel  itemExaminePanel;
-EnemyExaminePanel enemyExaminePanel;
+EnemyExaminePanel   enemyExaminePanel;
+VillagerExaminePanel villagerExaminePanel;
+CraftPanel craftPanel;
 PickupPanel pickupPanel;
+
+// ── Crafting state ──────────────────────────────────────────────────────────
+bool isCrafting       = false;
+int  craftMinutesLeft = 0;
+Item craftPendingItem;
 std::vector<GroundItem> groundItems;
 WorldTime worldTime;
 int playerSectorX = 50;
@@ -146,7 +157,7 @@ void doPickup(int gx, int gy, const std::vector<bool>& sel) {
     }
 }
 
-// Pick up all items at player's position вЂ” shows selection panel if multiple.
+// Pick up all items at player's position вЂ" shows selection panel if multiple.
 void pickUpAtPlayer() {
     std::vector<Item> here = getGroundItemsAt(player.x, player.y);
     if (here.empty()) { panel.addMessage("Nothing to pick up here."); return; }
@@ -155,7 +166,7 @@ void pickUpAtPlayer() {
         doPickup(player.x, player.y, sel);
         return;
     }
-    // Multiple items вЂ” show selection panel
+    // Multiple items вЂ" show selection panel
     pickupPanel.show(player.x, player.y, std::move(here));
     pickupPanel.onConfirm = [px=player.x, py=player.y](const std::vector<bool>& sel) {
         doPickup(px, py, sel);
@@ -238,7 +249,7 @@ void dropEnemyLoot(const Enemy& enemy) {
 // One "world tick" = everyone gains speed energy; enemies spend theirs acting.
 // The world only ticks when the player chooses to act (world freezes while idle).
 // Fast actors (speed > 100) accumulate energy and act multiple times per cycle.
-// Slow actors (speed < 100) act less often вЂ” multiple ticks pass per their action.
+// Slow actors (speed < 100) act less often вЂ" multiple ticks pass per their action.
 
 void enemyAct(Enemy& enemy) {
     int dx = player.x - enemy.x;
@@ -303,6 +314,8 @@ void enemyAct(Enemy& enemy) {
     }
 }
 
+void updateVillagers(); // forward declaration — defined after checkSectorTransition
+
 // One world tick: give everyone energy, then let enemies spend theirs.
 void tickWorld() {
     int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty());
@@ -334,6 +347,8 @@ void tickWorld() {
             e.energy -= 100;
         }
     }
+
+    updateVillagers();
 
     // Corpse decay
     corpses.erase(
@@ -385,6 +400,25 @@ void onPlayerAct() {
     while (player.energy < 100)
         tickWorld();
 
+    // Crafting tick — one game-minute per player action
+    if (isCrafting) {
+        craftMinutesLeft--;
+        updateVisibility(6, 0); // narrow focus while crafting
+        if (craftMinutesLeft <= 0) {
+            isCrafting = false;
+            if (player.addToContainer(craftPendingItem))
+                panel.addMessage("You finish crafting " + craftPendingItem.name + ".");
+            else {
+                // No room — drop at feet
+                groundItems.push_back({player.x, player.y, craftPendingItem});
+                panel.addMessage("You finish crafting " + craftPendingItem.name
+                                 + " but have no room — it drops at your feet.");
+            }
+            updateVisibility(worldTime.viewRadius(player.totalLightRadius()),
+                             (int)(worldTime.darkness() * 7.0f));
+        }
+    }
+
     // Notify player when crossing hunger/thirst thresholds
     int newHungerLv = player.hungerLevel();
     int newThirstLv = player.thirstLevel();
@@ -415,6 +449,238 @@ void onPlayerAct() {
 void updateCamera();
 void doTeleport(int newSX, int newSY);
 void interactWithObject(int tx, int ty);
+void spawnVillagers(bool isVillage);
+void updateVillagers();
+
+// ------------------------------------------------------------------ villagers
+
+static const char* GREETINGS_DAY[] = {
+    "Fine weather today, traveler.",
+    "Welcome to our village.",
+    "Have you come far?",
+    "Mind the road at night — it's not safe.",
+    "Good day to you.",
+    nullptr
+};
+static const char* GREETINGS_NIGHT[] = {
+    "Mmph... let me sleep.",
+    "Zz...",
+    "Come back in the morning.",
+    nullptr
+};
+
+static int countStrings(const char** arr) {
+    int n = 0; while (arr[n]) n++; return n;
+}
+
+void spawnVillagers(bool isVillage) {
+    villagers.clear();
+    if (!isVillage) return;
+
+    // Collect all bed positions
+    struct BedPos { int x, y; };
+    std::vector<BedPos> beds;
+    for (int y = 0; y < MAP_HEIGHT; y++)
+        for (int x = 0; x < MAP_WIDTH; x++)
+            if (map[y][x].objectId == O_BED)
+                beds.push_back({x, y});
+
+    if (beds.empty()) return;
+
+    // Pair nearby beds → same surname (same household, ≤ 8 tiles apart)
+    int nSurnames = countStrings(NPC_SURNAMES);
+    std::vector<int> surnameIdx(beds.size(), -1);
+    int nextSurnameSlot = 0;
+    for (int i = 0; i < (int)beds.size(); i++) {
+        if (surnameIdx[i] >= 0) continue;
+        surnameIdx[i] = nextSurnameSlot;
+        for (int j = i + 1; j < (int)beds.size(); j++) {
+            if (surnameIdx[j] >= 0) continue;
+            int dist = std::max(std::abs(beds[i].x - beds[j].x),
+                                std::abs(beds[i].y - beds[j].y));
+            if (dist <= 8) { surnameIdx[j] = nextSurnameSlot; break; }
+        }
+        nextSurnameSlot++;
+    }
+
+    int nFirstNames = countStrings(NPC_FIRST_NAMES);
+    // Track which first names were used per surname group
+    std::map<int,std::vector<int>> usedFirst;
+
+    for (int i = 0; i < (int)beds.size(); i++) {
+        Villager v;
+        v.bedX = beds[i].x;
+        v.bedY = beds[i].y;
+
+        // Find a walkable tile adjacent to the bed (bed itself blocksMove=true).
+        v.sleepX = beds[i].x;
+        v.sleepY = beds[i].y;
+        {
+            const int DIRS[4][2] = {{0,-1},{0,1},{-1,0},{1,0}};
+            for (auto& d : DIRS) {
+                int nx = beds[i].x + d[0], ny = beds[i].y + d[1];
+                if (nx < 1 || nx >= MAP_WIDTH-1 || ny < 1 || ny >= MAP_HEIGHT-1) continue;
+                Tile& t = map[ny][nx];
+                // Count closed doors as passable (NPC will open them)
+                bool passable = t.walkable() || t.objectId == O_DOOR_CLOSED;
+                if (passable) { v.sleepX = nx; v.sleepY = ny; break; }
+            }
+        }
+
+        v.x = v.sleepX;
+        v.y = v.sleepY;
+
+        // Pick unique first name per household
+        int fnIdx;
+        do { fnIdx = rand() % nFirstNames; }
+        while (std::count(usedFirst[surnameIdx[i]].begin(),
+                          usedFirst[surnameIdx[i]].end(), fnIdx) > 0
+               && (int)usedFirst[surnameIdx[i]].size() < nFirstNames);
+        usedFirst[surnameIdx[i]].push_back(fnIdx);
+
+        int snIdx = surnameIdx[i] % nSurnames;
+        v.name      = std::string(NPC_FIRST_NAMES[fnIdx]) + " " + NPC_SURNAMES[snIdx];
+        v.color     = VILLAGER_COLORS[i % VILLAGER_COLOR_COUNT];
+        v.greetIdx  = i % countStrings(GREETINGS_DAY);
+
+        // Start sleeping if it's night, else place them near their bed
+        if (worldTime.darkness() > 0.5f) {
+            v.state = Villager::State::SLEEP;
+        } else {
+            v.state = Villager::State::WANDER;
+            // Start a few tiles away so they look like they're already about their day
+            for (int tries = 0; tries < 20; tries++) {
+                int ox = beds[i].x + (rand() % 7) - 3;
+                int oy = beds[i].y + (rand() % 7) - 3;
+                if (ox >= 1 && ox < MAP_WIDTH-1 && oy >= 1 && oy < MAP_HEIGHT-1
+                    && map[oy][ox].walkable()) {
+                    v.x = ox; v.y = oy; break;
+                }
+            }
+        }
+
+        villagers.push_back(v);
+    }
+}
+
+// Build a home path using A*, treating closed doors as passable.
+// Targets sleepX/sleepY (walkable tile beside the bed) — NOT bedX/bedY (blocksMove=true).
+static void buildHomePath(Villager& v) {
+    // Temporarily open all closed doors so A* can route through them.
+    std::vector<SDL_Point> closedDoors;
+    for (int y = 0; y < MAP_HEIGHT; y++)
+        for (int x = 0; x < MAP_WIDTH; x++)
+            if (map[y][x].objectId == O_DOOR_CLOSED) {
+                closedDoors.push_back({x, y});
+                map[y][x].objectId = O_DOOR;
+            }
+
+    v.homePath    = findPath(v.x, v.y, v.sleepX, v.sleepY);
+    v.homePathIdx = 1;
+
+    // Restore closed doors.
+    for (const SDL_Point& p : closedDoors)
+        map[p.y][p.x].objectId = O_DOOR_CLOSED;
+}
+
+void updateVillagers() {
+    float dark     = worldTime.darkness();
+    float sunriseH = worldTime.sunriseHour();
+    float curH     = (float)worldTime.hour() + worldTime.minute() / 60.0f;
+
+    for (Villager& v : villagers) {
+        if (!v.alive) continue;
+        v.energy += v.speed;
+        if (v.energy < 100) continue;
+        v.energy -= 100;
+
+        // State transitions
+        if (v.state == Villager::State::WANDER && dark > 0.5f) {
+            v.state = Villager::State::WALK_HOME;
+            v.homePath.clear(); // force path rebuild
+        }
+        if (v.state == Villager::State::SLEEP && curH >= sunriseH && dark <= 0.0f) {
+            v.state = Villager::State::WANDER;
+            v.x = v.sleepX; v.y = v.sleepY; // step off the bed tile
+        }
+
+        switch (v.state) {
+            case Villager::State::WANDER: {
+                // 40% chance to stay put (makes movement look natural)
+                if (rand() % 10 < 4) break;
+                int dx = (rand() % 3) - 1;
+                int dy = (rand() % 3) - 1;
+                if (dx == 0 && dy == 0) break;
+                int nx = v.x + dx, ny = v.y + dy;
+                // Stay within 18 tiles of home bed
+                int homeDist = std::max(std::abs(nx - v.bedX), std::abs(ny - v.bedY));
+                if (homeDist > 18) break;
+                if (nx < 1 || nx >= MAP_WIDTH-1 || ny < 1 || ny >= MAP_HEIGHT-1) break;
+                // Don't walk into player
+                if (nx == player.x && ny == player.y) break;
+                // Open doors the villager wanders into during the day
+                if (map[ny][nx].objectId == O_DOOR_CLOSED)
+                    map[ny][nx].objectId = O_DOOR;
+                if (map[ny][nx].walkable()) { v.x = nx; v.y = ny; }
+                break;
+            }
+            case Villager::State::WALK_HOME: {
+                if (v.x == v.sleepX && v.y == v.sleepY) {
+                    // Close any door we opened on the way in
+                    if (v.lastDoorX >= 0) {
+                        map[v.lastDoorY][v.lastDoorX].objectId = O_DOOR_CLOSED;
+                        v.lastDoorX = v.lastDoorY = -1;
+                    }
+                    v.x = v.bedX; v.y = v.bedY; // lie down on the bed
+                    v.state = Villager::State::SLEEP;
+                    break;
+                }
+                // Cooldown prevents rebuilding a failed path every tick.
+                if (v.pathRetryCool > 0) { v.pathRetryCool--; break; }
+
+                // Build path if we don't have one or exhausted it without arriving.
+                if (v.homePath.empty() || v.homePathIdx >= (int)v.homePath.size()) {
+                    buildHomePath(v);
+                    if (v.homePath.empty()) {
+                        v.pathRetryCool = 30; // wait 30 ticks before retrying
+                        break;
+                    }
+                }
+
+                if (v.homePathIdx < (int)v.homePath.size()) {
+                    SDL_Point next = v.homePath[v.homePathIdx];
+                    Tile& t = map[next.y][next.x];
+
+                    // Close any previously opened door once we've moved away from it
+                    if (v.lastDoorX >= 0 && (v.x != v.lastDoorX || v.y != v.lastDoorY)) {
+                        map[v.lastDoorY][v.lastDoorX].objectId = O_DOOR_CLOSED;
+                        v.lastDoorX = v.lastDoorY = -1;
+                    }
+
+                    // Open a closed door and remember it to close later
+                    if (t.objectId == O_DOOR_CLOSED) {
+                        t.objectId  = O_DOOR;
+                        v.lastDoorX = next.x;
+                        v.lastDoorY = next.y;
+                    }
+
+                    if (t.walkable()) {
+                        v.x = next.x;
+                        v.y = next.y;
+                        v.homePathIdx++;
+                    } else {
+                        // Tile became impassable — recompute next tick.
+                        v.homePath.clear();
+                    }
+                }
+                break;
+            }
+            case Villager::State::SLEEP:
+                v.x = v.bedX; v.y = v.bedY; // stay on the bed
+                break;
+        }
+    }
+}
 
 // ------------------------------------------------------------------ sector transition
 
@@ -431,7 +697,7 @@ void checkSectorTransition() {
     else if (player.y == 0)             { newSY--; newPY = MAP_HEIGHT - 2; }
     else if (player.y == MAP_HEIGHT -1) { newSY++; newPY = 1;              }
 
-    // Clamp at world boundary вЂ” push player back inside.
+    // Clamp at world boundary вЂ" push player back inside.
     if (newSX < 0 || newSX >= OVERMAP_W || newSY < 0 || newSY >= OVERMAP_H) {
         player.x = std::max(1, std::min(MAP_WIDTH  - 2, player.x));
         player.y = std::max(1, std::min(MAP_HEIGHT - 2, player.y));
@@ -444,17 +710,19 @@ void checkSectorTransition() {
     player.y = newPY;
 
     generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
-                   playerSectorX, playerSectorY);
+                   playerSectorX, playerSectorY,
+                   overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     overmap.reveal(playerSectorX, playerSectorY);
 
     enemies.clear();
     corpses.clear();
     initEnemy();
+    spawnVillagers(overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     currentPath.clear();
     pathIndex = 0;
     previewPath.clear();
     examinePanel.hide();
-    updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
     updateCamera();
 
     int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
@@ -489,9 +757,76 @@ void interactWithObject(int tx, int ty) {
 
     int oid = tile.objectId;
 
+    // Door toggle
+    if (oid == O_DOOR || oid == O_DOOR_CLOSED) {
+        bool opening = (oid == O_DOOR_CLOSED);
+        tile.objectId = opening ? O_DOOR : O_DOOR_CLOSED;
+        panel.addMessage(opening ? "You open the door." : "You close the door.");
+        updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
+        onPlayerAct();
+        return;
+    }
+
+    // Well — drink
+    if (oid == O_WELL) {
+        float before = player.thirst;
+        player.thirst = std::max(0.0f, player.thirst - 0.7f);
+        if (before > 0.0f)
+            panel.addMessage("You drink deeply from the well. Refreshing!");
+        else
+            panel.addMessage("You are not thirsty.");
+        onPlayerAct();
+        return;
+    }
+
+    // Plants — instant harvest if mature, otherwise reject
+    if (objectDefs[oid].isPlant) {
+        if (tile.plantAge < 170) {
+            panel.addMessage("The " + std::string(objectDefs[oid].name) + " is still growing.");
+            return;
+        }
+        tile.objectId = -1;
+        tile.objectHp = 0;
+        tile.plantAge = 0;
+
+        // Harvested plants go directly to inventory; overflow falls to the ground.
+        auto gather = [&](Item item) {
+            if (!player.addToContainer(item))
+                groundItems.push_back({tx, ty, item});
+        };
+
+        switch (oid) {
+            case O_BUSH:
+                gather(Items::berries());
+                for (int k = 0; k < rand() % 2 + 1; k++) gather(Items::branch());
+                panel.addMessage("You strip the bush clean.");
+                break;
+            case O_WHEAT:
+                gather(Items::grain());
+                panel.addMessage("You harvest the wheat.");
+                break;
+            case O_HERB:
+                gather(Items::herb());
+                panel.addMessage("You gather the herbs.");
+                break;
+            case O_MUSHROOM:
+                gather(Items::mushroom());
+                panel.addMessage("You pick the mushrooms.");
+                break;
+        }
+
+        currentPath.clear(); pathIndex = 0; previewPath.clear();
+        updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
+        onPlayerAct();
+        return;
+    }
+
     // Tool requirement checks
-    bool needsAxe  = (oid == O_TREE || oid == O_DEAD_TREE || oid == O_FALLEN_LOG);
-    bool needsPick = (oid == O_ROCK || oid == O_BOULDER);
+    bool needsAxe  = (oid == O_TREE || oid == O_DEAD_TREE || oid == O_FALLEN_LOG ||
+                      oid == O_LAMP || oid == O_TABLE || oid == O_BED ||
+                      oid == O_BARREL || oid == O_WINDOW);
+    bool needsPick = (oid == O_ROCK || oid == O_BOULDER ||
+                      oid == O_WALL || oid == O_FIREPLACE);
 
     if (needsAxe && !player.hasChopTool()) {
         panel.addMessage("You need an axe to chop this.");
@@ -525,11 +860,6 @@ void interactWithObject(int tx, int ty) {
                 drop(Items::branch());
                 panel.addMessage("The dead tree splinters and collapses.");
                 break;
-            case O_BUSH:
-                drop(Items::berries());
-                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::branch());
-                panel.addMessage("You strip the bush clean.");
-                break;
             case O_ROCK:
                 for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::stonePiece());
                 panel.addMessage("The rock breaks apart.");
@@ -542,10 +872,13 @@ void interactWithObject(int tx, int ty) {
                 for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::woodLog());
                 panel.addMessage("You chop the log into sections.");
                 break;
+            default:
+                panel.addMessage("The " + std::string(objectDefs[oid].name) + " breaks apart.");
+                break;
         }
 
         currentPath.clear(); pathIndex = 0; previewPath.clear();
-        updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
+        updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
     } else {
         panel.addMessage("You strike the " + std::string(od.name)
                        + ". (" + std::to_string(tile.objectHp)
@@ -562,21 +895,23 @@ void doTeleport(int newSX, int newSY) {
     player.y = MAP_HEIGHT / 2;
 
     generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
-                   playerSectorX, playerSectorY);
+                   playerSectorX, playerSectorY,
+                   overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     overmap.reveal(playerSectorX, playerSectorY);
     enemies.clear();
     corpses.clear();
     initEnemy();
+    spawnVillagers(overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     currentPath.clear();
     pathIndex = 0;
     previewPath.clear();
     examinePanel.hide();
-    updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
     updateCamera();
 
     int bi = (int)overmap.sectors[playerSectorY][playerSectorX].biome;
     panel.addMessage("Teleported to [" + std::to_string(newSX) + ", "
-                     + std::to_string(newSY) + "] вЂ” " + biomeVisuals[bi].name + ".");
+                     + std::to_string(newSY) + "] - " + biomeVisuals[bi].name + ".");
 }
 
 // ------------------------------------------------------------------ input
@@ -601,6 +936,31 @@ void handleInput(SDL_Event& event, bool& running) {
         return;
     }
 
+    // Craft panel intercepts input while visible.
+    if (craftPanel.visible()) {
+        if (event.type == SDL_KEYDOWN) {
+            Item outItem; int outMins = 0;
+            if (craftPanel.handleKey(event.key.keysym.sym, player, outItem, outMins)) {
+                isCrafting       = true;
+                craftMinutesLeft = outMins;
+                craftPendingItem = outItem;
+                panel.addMessage("You begin crafting " + outItem.name
+                                 + "... (" + std::to_string(outMins) + " min)");
+            }
+        }
+        if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            Item outItem; int outMins = 0;
+            if (craftPanel.handleClick(event.button.x, event.button.y, player, outItem, outMins)) {
+                isCrafting       = true;
+                craftMinutesLeft = outMins;
+                craftPendingItem = outItem;
+                panel.addMessage("You begin crafting " + outItem.name
+                                 + "... (" + std::to_string(outMins) + " min)");
+            }
+        }
+        return;
+    }
+
     // Overmap handles arrow keys and M while open.
     if (overmap.visible) {
         if (event.type == SDL_KEYDOWN) {
@@ -622,7 +982,20 @@ void handleInput(SDL_Event& event, bool& running) {
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
         if (event.key.keysym.sym == SDLK_m)      overmap.open(playerSectorX, playerSectorY);
         if (event.key.keysym.sym == SDLK_i)      inventoryPanel.toggle();
-        if (event.key.keysym.sym == SDLK_g)      pickUpAtPlayer();
+        if (event.key.keysym.sym == SDLK_c)      craftPanel.open();
+        if (event.key.keysym.sym == SDLK_g && !isCrafting) pickUpAtPlayer();
+        // Block most actions while crafting — only allow waiting (advances crafting)
+        if (isCrafting) {
+            if (event.key.keysym.sym == SDLK_ESCAPE) {
+                isCrafting = false;
+                panel.addMessage("You stop crafting " + craftPendingItem.name + ".");
+                updateVisibility(worldTime.viewRadius(player.totalLightRadius()),
+                                 (int)(worldTime.darkness() * 7.0f));
+            } else if (event.key.keysym.sym == SDLK_SPACE) {
+                onPlayerAct(); // manually advance one minute
+            }
+            return;
+        }
         if (event.key.keysym.sym == SDLK_SPACE &&
             !pickupPanel.visible && !contextMenu.visible)
             onPlayerAct();  // wait one turn
@@ -645,6 +1018,10 @@ void handleInput(SDL_Event& event, bool& running) {
             enemyExaminePanel.hide();
             return;
         }
+        if (villagerExaminePanel.visible) {
+            villagerExaminePanel.hide();
+            return;
+        }
 
         // Pickup panel handles its own clicks (item toggle, button, outside-close).
         if (pickupPanel.visible) {
@@ -658,13 +1035,13 @@ void handleInput(SDL_Event& event, bool& running) {
             return;
         }
 
-        // Context menu has priority вЂ” handles menu items from inventory too.
+        // Context menu has priority вЂ" handles menu items from inventory too.
         if (contextMenu.visible) {
             contextMenu.handleClick(event.button.x, event.button.y);
             return;
         }
 
-        // Inventory panel вЂ” consumes all clicks while open.
+        // Inventory panel вЂ" consumes all clicks while open.
         if (inventoryPanel.visible) {
             inventoryPanel.handleClick(event.button.x, event.button.y,
                                        player, contextMenu, groundItems,
@@ -742,6 +1119,29 @@ void handleInput(SDL_Event& event, bool& running) {
                         int mx = mouseX, my = mouseY;
                         std::vector<MenuItem> items;
 
+                        // Villager interaction
+                        for (Villager& v : villagers) {
+                            if (!v.alive || v.x != mx || v.y != my) continue;
+                            if (!map[my][mx].visible) break;
+                            bool sleeping = (v.state == Villager::State::SLEEP);
+                            std::string talkLabel = "Talk to " + v.name;
+                            std::string greeting  = sleeping
+                                ? GREETINGS_NIGHT[v.greetIdx % countStrings(GREETINGS_NIGHT)]
+                                : GREETINGS_DAY  [v.greetIdx % countStrings(GREETINGS_DAY)];
+                            items.push_back({talkLabel,
+                                [greeting, vname = v.name, sleeping]() {
+                                    if (sleeping)
+                                        panel.addMessage(vname + ": " + greeting);
+                                    else
+                                        panel.addMessage(vname + " says: \"" + greeting + "\"");
+                                }});
+                            items.push_back({"Examine " + v.name,
+                                [vsnap = v]() {
+                                    villagerExaminePanel.show(vsnap);
+                                }});
+                            break; // one NPC per tile is enough
+                        }
+
                         // Gather corpse info for Examine (captured by value — safe if vector reallocates)
                         std::string corpseNameHere;
                         bool        corpseFreshHere = false;
@@ -808,23 +1208,59 @@ void handleInput(SDL_Event& event, bool& running) {
                         // World interaction — walk to object first if needed
                         {
                             int oid = map[my][mx].objectId;
-                            if (oid >= 0 && objectDefs[oid].durability > 0 && map[my][mx].visible) {
-                                const char* verb =
-                                    (oid == O_BUSH)                        ? "Harvest" :
-                                    (oid == O_ROCK || oid == O_BOULDER)    ? "Mine"    : "Chop";
-                                std::string label = std::string(verb)
-                                                  + " " + objectDefs[oid].name
-                                                  + " (" + std::to_string(map[my][mx].objectHp)
-                                                  + "/" + std::to_string(objectDefs[oid].durability)
-                                                  + ")";
-                                items.push_back({label, [mx, my]() {
-                                    int dist = std::max(std::abs(mx - player.x),
-                                                        std::abs(my - player.y));
-                                    if (dist <= 1)
-                                        interactWithObject(mx, my);
-                                    else
-                                        walkAdjacentTo(mx, my);
-                                }});
+                            if (oid >= 0 && map[my][mx].visible) {
+                                if (oid == O_DOOR || oid == O_DOOR_CLOSED) {
+                                    // Door: open or close
+                                    bool isOpen = (oid == O_DOOR);
+                                    items.push_back({isOpen ? "Close Door" : "Open Door",
+                                        [mx, my]() {
+                                            int dist = std::max(std::abs(mx - player.x),
+                                                                std::abs(my - player.y));
+                                            if (dist <= 1) interactWithObject(mx, my);
+                                            else           walkAdjacentTo(mx, my);
+                                        }});
+                                } else if (oid == O_WELL) {
+                                    items.push_back({"Drink from well", [mx, my]() {
+                                        int dist = std::max(std::abs(mx - player.x),
+                                                            std::abs(my - player.y));
+                                        if (dist <= 1) interactWithObject(mx, my);
+                                        else           walkAdjacentTo(mx, my);
+                                    }});
+                                } else if (objectDefs[oid].isPlant) {
+                                    bool mature = (map[my][mx].plantAge >= 170);
+                                    std::string label = mature
+                                        ? ("Harvest " + std::string(objectDefs[oid].name))
+                                        : (std::string(objectDefs[oid].name) + " (growing...)");
+                                    items.push_back({label, [mx, my, mature]() {
+                                        if (!mature) {
+                                            panel.addMessage("This plant is not yet ready to harvest.");
+                                            return;
+                                        }
+                                        int dist = std::max(std::abs(mx - player.x),
+                                                            std::abs(my - player.y));
+                                        if (dist <= 1) interactWithObject(mx, my);
+                                        else           walkAdjacentTo(mx, my);
+                                    }});
+                                } else if (objectDefs[oid].durability > 0) {
+                                    // Destructible objects: chop/mine/break
+                                    const char* verb =
+                                        (oid == O_ROCK || oid == O_BOULDER || oid == O_WALL || oid == O_FIREPLACE) ? "Mine" :
+                                        (oid == O_TREE || oid == O_DEAD_TREE || oid == O_FALLEN_LOG)               ? "Chop" :
+                                        "Break";
+                                    std::string label = std::string(verb)
+                                                      + " " + objectDefs[oid].name
+                                                      + " (" + std::to_string(map[my][mx].objectHp)
+                                                      + "/" + std::to_string(objectDefs[oid].durability)
+                                                      + ")";
+                                    items.push_back({label, [mx, my]() {
+                                        int dist = std::max(std::abs(mx - player.x),
+                                                            std::abs(my - player.y));
+                                        if (dist <= 1)
+                                            interactWithObject(mx, my);
+                                        else
+                                            walkAdjacentTo(mx, my);
+                                    }});
+                                }
                             }
                         }
 
@@ -873,7 +1309,7 @@ void handleInput(SDL_Event& event, bool& running) {
 
 // Advances the player one step along currentPath (with visual pacing).
 // If the player has extra energy (speed > 100), the next call will act again
-// before the world gets another tick вЂ” producing CDDA-style multi-actions.
+// before the world gets another tick вЂ" producing CDDA-style multi-actions.
 bool updatePlayer() {
     if (pathIndex >= (int)currentPath.size()) return false;
 
@@ -982,7 +1418,7 @@ void renderDeathScreen(SDL_Renderer* renderer, TTF_Font* font) {
     SDL_RenderFillRect(renderer, &overlay);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
-    // "YOU DIED" text вЂ” rendered twice for a shadow effect
+    // "YOU DIED" text вЂ" rendered twice for a shadow effect
     TTF_Font* bigFont = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 48);
     if (bigFont) {
         auto renderCentered = [&](const char* text, int y, SDL_Color col) {
@@ -1031,8 +1467,10 @@ int main(int argc, char* argv[]) {
     overmap.generate();
     overmap.reveal(playerSectorX, playerSectorY);
     generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
-                   playerSectorX, playerSectorY);
+                   playerSectorX, playerSectorY,
+                   overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     initEnemy();
+    spawnVillagers(overmap.sectors[playerSectorY][playerSectorX].hasVillage);
 
     // Starting equipment
     player.worn[(int)EquipSlot::BACK]  = Items::backpack();
@@ -1074,7 +1512,7 @@ int main(int argc, char* argv[]) {
 
     initTextures(renderer, font);
     overmap.initTextures(renderer, font);
-    updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
     updateCamera();
 
     bool running = true;
@@ -1083,6 +1521,12 @@ int main(int argc, char* argv[]) {
     while (running) {
         while (SDL_PollEvent(&event))
             handleInput(event, running);
+
+        // Auto-advance crafting — one tick per frame while crafting is active
+        if (isCrafting) {
+            onPlayerAct();
+            SDL_Delay(40); // ~25 fps during craft so the player can see progress
+        }
 
         if (console.pendingTeleport) {
             console.pendingTeleport = false;
@@ -1153,10 +1597,18 @@ int main(int argc, char* argv[]) {
             console.pendingGive.clear();
         }
 
+        if (console.pendingGrowPlants) {
+            console.pendingGrowPlants = false;
+            for (int my = 0; my < MAP_HEIGHT; my++)
+                for (int mx = 0; mx < MAP_WIDTH; mx++)
+                    if (map[my][mx].objectId >= 0 && objectDefs[map[my][mx].objectId].isPlant)
+                        map[my][mx].plantAge = 255;
+        }
+
         updatePlayer();
         checkSectorTransition();
         updatePreviewPath();
-        updateVisibility(worldTime.viewRadius(player.totalLightRadius()));
+        updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
         updateCamera();
 
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
@@ -1181,7 +1633,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Ground items on top of map tiles вЂ” show $ for piles, item symbol for single
+        // Ground items on top of map tiles вЂ" show $ for piles, item symbol for single
         {
             // Count items per tile
             std::map<std::pair<int,int>, int> tileCount;
@@ -1215,6 +1667,7 @@ int main(int argc, char* argv[]) {
 
         renderPath(renderer);
         renderPlayer(renderer);
+        renderVillagers(renderer, font);
         renderEnemies(renderer, font);
 
         // Night/dusk darkness overlay over the map view
@@ -1237,6 +1690,8 @@ int main(int argc, char* argv[]) {
         inventoryPanel.render(renderer, font, player);
         itemExaminePanel.render(renderer, font);
         enemyExaminePanel.render(renderer, font);
+        villagerExaminePanel.render(renderer, font);
+        craftPanel.render(renderer, font, player);
         pickupPanel.render(renderer, font);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);
@@ -1244,6 +1699,40 @@ int main(int argc, char* argv[]) {
 
         if (!player.isAlive()) {
             renderDeathScreen(renderer, font);
+        }
+
+        // Crafting progress bar overlay
+        if (isCrafting) {
+            const int BW = 260, BH = 36, BX = (SCREEN_WIDTH - BW) / 2, BY = 6;
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 8, 8, 12, 230);
+            SDL_Rect bgr = {BX - 4, BY - 2, BW + 8, BH + 4};
+            SDL_RenderFillRect(renderer, &bgr);
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+            SDL_SetRenderDrawColor(renderer, 80, 70, 40, 255);
+            SDL_RenderDrawRect(renderer, &bgr);
+
+            // Progress bar
+            int total = craftPendingItem.value > 0 ? craftPendingItem.value : 1; // reuse stored mins
+            // We don't have totalMins handy here; just show minutes left text
+            std::string label = "Crafting " + craftPendingItem.name + "...";
+            std::string timeLeft = std::to_string(craftMinutesLeft) + " min left  [ESC cancel]";
+            SDL_Surface* ls = TTF_RenderText_Solid(font, label.c_str(), {200,185,100,255});
+            SDL_Surface* ts = TTF_RenderText_Solid(font, timeLeft.c_str(), {130,125,90,255});
+            if (ls) {
+                SDL_Texture* lt = SDL_CreateTextureFromSurface(renderer, ls);
+                int w,h; SDL_QueryTexture(lt,nullptr,nullptr,&w,&h);
+                SDL_Rect ld{BX, BY+4, w, h};
+                SDL_RenderCopy(renderer, lt, nullptr, &ld);
+                SDL_FreeSurface(ls); SDL_DestroyTexture(lt);
+            }
+            if (ts) {
+                SDL_Texture* tt = SDL_CreateTextureFromSurface(renderer, ts);
+                int w,h; SDL_QueryTexture(tt,nullptr,nullptr,&w,&h);
+                SDL_Rect td{BX, BY+4+18, w, h};
+                SDL_RenderCopy(renderer, tt, nullptr, &td);
+                SDL_FreeSurface(ts); SDL_DestroyTexture(tt);
+            }
         }
 
         SDL_RenderPresent(renderer);

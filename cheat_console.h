@@ -25,6 +25,9 @@ struct CheatConsole {
     // Pending give — item name set by execute(), consumed by main.cpp.
     std::string pendingGive;
 
+    // Pending grow_plants — set by execute(), consumed by main.cpp.
+    bool pendingGrowPlants = false;
+
     void open() {
         visible = true;
         input.clear();
@@ -79,7 +82,12 @@ struct CheatConsole {
         if (cmd.empty()) return;
 
         // ── Commands ─────────────────────────────────────────────────────
-        if (cmd == "reveal_map" || cmd == "rm") {
+        if (cmd == "grow_plants" || cmd == "gp") {
+            pendingGrowPlants = true;
+            result   = "All plants matured.";
+            resultOk = true;
+
+        } else if (cmd == "reveal_map" || cmd == "rm") {
             for (int y = 0; y < OVERMAP_H; y++)
                 for (int x = 0; x < OVERMAP_W; x++)
                     overmap.sectors[y][x].explored = true;
@@ -94,7 +102,7 @@ struct CheatConsole {
             resultOk = true;
 
         } else if (cmd == "help") {
-            result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  help";
+            result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  gp  help";
             resultOk = true;
 
         } else {
@@ -217,7 +225,7 @@ struct CheatConsole {
             return input.rfind(prefix, 0) == 0;
         };
         if (input.empty())
-            return "Commands: rm  hm  tp  time  season  spawn  give  help    (Tab autocompletes)";
+            return "Commands: rm  hm  tp  time  season  spawn  give  gp  help    (Tab autocompletes)";
         if (input == "spawn" || starts("spawn "))
             return "spawn: goblin  orc  skeleton  wolf  bandit   e.g. spawn goblin 3";
         if (input == "give" || starts("give "))

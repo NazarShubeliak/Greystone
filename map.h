@@ -8,12 +8,13 @@
 // Derived properties (walkable, moveCost, etc.) are computed from these.
 
 struct Tile {
-    int  terrainId = T_GRASSLAND;
-    int  groundId  = -1;   // -1 = none
-    int  objectId  = -1;   // -1 = none
-    int  objectHp  = 0;    // current HP of the object on this tile
-    bool visible   = false;
-    bool explored  = false;
+    int     terrainId = T_GRASSLAND;
+    int     groundId  = -1;   // -1 = none
+    int     objectId  = -1;   // -1 = none
+    int     objectHp  = 0;    // current HP of the object on this tile
+    uint8_t plantAge  = 0;    // growth 0-255 for isPlant objects (170+ = mature)
+    bool    visible   = false;
+    bool    explored  = false;
 
     // Is this tile passable at all?
     bool walkable() const {
@@ -24,7 +25,7 @@ struct Tile {
 
     // Does this tile block line-of-sight?
     bool blocksVision() const {
-        if (!walkable()) return true;
+        if (terrainDefs[terrainId].moveCost == 0) return true;
         if (objectId >= 0 && objectDefs[objectId].blocksVision) return true;
         return false;
     }
@@ -57,6 +58,6 @@ struct Tile {
 
 // ================================================================ Functions
 
-void generateSector(BiomeType biome = BiomeType::FOREST, int seedX = -1, int seedY = -1);
+void generateSector(BiomeType biome = BiomeType::FOREST, int seedX = -1, int seedY = -1, bool isVillage = false);
 bool hasLineOfSight(int x0, int y0, int x1, int y1);
-void updateVisibility(int radius = VIEW_RADIUS);
+void updateVisibility(int radius = VIEW_RADIUS, int lampRadius = 0);
