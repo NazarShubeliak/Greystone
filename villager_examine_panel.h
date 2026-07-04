@@ -44,7 +44,9 @@ struct VillagerExaminePanel {
         std::string header = "[@] " + snapshot.name;
         txt(r, f, header.c_str(), X + PAD, ty, vc);
 
-        txt(r, f, "Villager", X + W - textW(f, "Villager") - PAD, ty, {vc.r, vc.g, vc.b, 160});
+        std::string occTag = snapshot.occupation == Occupation::NONE
+                            ? "Villager" : occupationName(snapshot.occupation);
+        txt(r, f, occTag.c_str(), X + W - textW(f, occTag.c_str()) - PAD, ty, {vc.r, vc.g, vc.b, 160});
         ty += LH + 2;
         hline(r, X, ty, W);
         ty += 10;
@@ -74,7 +76,7 @@ struct VillagerExaminePanel {
         ty += 10;
 
         // ── Flavour ───────────────────────────────────────────────────────
-        txt(r, f, "A resident of this village.", X + PAD, ty, {150,145,125,255});
+        txt(r, f, occupationFlavor(snapshot.occupation), X + PAD, ty, {150,145,125,255});
         ty += LH;
 
         if (snapshot.state == Villager::State::SLEEP)

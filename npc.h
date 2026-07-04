@@ -28,6 +28,55 @@ static const SDL_Color VILLAGER_COLORS[] = {
 };
 static constexpr int VILLAGER_COLOR_COUNT = 5;
 
+// ================================================================ Occupation
+
+enum class Occupation { NONE, FARMER, HERBALIST, WOODCUTTER, BLACKSMITH, ELDER, SEAMSTRESS };
+
+// Short label shown in UI (context menu, examine panel). "" for NONE.
+inline const char* occupationName(Occupation occ) {
+    switch (occ) {
+        case Occupation::FARMER:     return "Farmer";
+        case Occupation::HERBALIST:  return "Herbalist";
+        case Occupation::WOODCUTTER: return "Woodcutter";
+        case Occupation::BLACKSMITH: return "Blacksmith";
+        case Occupation::ELDER:      return "Elder";
+        case Occupation::SEAMSTRESS: return "Seamstress";
+        default:                     return "";
+    }
+}
+
+// One-line flavor description for the villager examine panel (kept short — the
+// panel renders it on a single line with no word-wrap).
+inline const char* occupationFlavor(Occupation occ) {
+    switch (occ) {
+        case Occupation::FARMER:     return "Tends the wheat fields west of the village.";
+        case Occupation::HERBALIST:  return "Grows medicinal herbs and treats the sick.";
+        case Occupation::WOODCUTTER: return "Fells timber in the forest to sell as lumber.";
+        case Occupation::BLACKSMITH: return "Forges tools and weapons from raw iron.";
+        case Occupation::ELDER:      return "Oversees the village and settles disputes.";
+        case Occupation::SEAMSTRESS: return "Sews and mends clothing for the villagers.";
+        default:                     return "Helps run the household and tends the garden.";
+    }
+}
+
+// Goods this occupation sells, if any. Elder and plain helpers (NONE) don't trade.
+inline std::vector<Item> goodsFor(Occupation occ) {
+    switch (occ) {
+        case Occupation::FARMER:
+            return { Items::bread(), Items::flatbread(), Items::grain(), Items::roastedBerries() };
+        case Occupation::HERBALIST:
+            return { Items::herb(), Items::herbalPoultice(), Items::mushroom(), Items::mushroomStew() };
+        case Occupation::WOODCUTTER:
+            return { Items::woodLog(), Items::branch(), Items::hatchet() };
+        case Occupation::BLACKSMITH:
+            return { Items::ironSword(), Items::warAxe(), Items::pickaxe(), Items::crudeAxe(), Items::crudeDagger() };
+        case Occupation::SEAMSTRESS:
+            return { Items::leatherVest(), Items::leatherBoots(), Items::ropeItem() };
+        default:
+            return {};
+    }
+}
+
 // ================================================================ Villager
 
 struct Villager {
@@ -56,7 +105,7 @@ struct Villager {
     // Index rotates so households say different things.
     int greetIdx = 0;
 
-    // One villager per village doubles as the general-goods merchant.
-    bool isMerchant = false;
+    // What this villager does for a living — determines flavor text and shopItems.
+    Occupation occupation = Occupation::NONE;
     std::vector<Item> shopItems;
 };

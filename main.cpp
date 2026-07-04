@@ -197,10 +197,19 @@ bool isTileOccupied(int x, int y) {
 }
 
 void spawnEnemy(std::function<Enemy(int,int)> factory) {
+    bool isVillageSector = overmap.sectors[playerSectorY][playerSectorX].hasVillage;
+    const int VCX = MAP_WIDTH / 2, VCY = MAP_HEIGHT / 2;
+
     for (int attempt = 0; attempt < 50; attempt++) {
         int x = rand() % (MAP_WIDTH  - 4) + 2;
         int y = rand() % (MAP_HEIGHT - 4) + 2;
         if (!map[y][x].walkable()) continue;
+        if (map[y][x].terrainId == T_FLOOR) continue; // never spawn inside a building
+        if (isVillageSector) {
+            // No village-raid AI yet — keep spawns outside the village proper for now.
+            int vdx = x - VCX, vdy = y - VCY;
+            if (vdx*vdx + vdy*vdy < 55*55) continue;
+        }
         if (isTileOccupied(x, y))  continue;
         // Don't spawn too close to player.
         int dx = x - player.x, dy = y - player.y;
@@ -599,16 +608,61 @@ void spawnVillagers(bool isVillage) {
         villagers.push_back(v);
     }
 
-    // One villager per village doubles as the general-goods merchant.
-    if (!villagers.empty()) {
-        Villager& merch = villagers[0];
-        merch.isMerchant = true;
-        merch.shopItems = {
-            Items::bread(), Items::flatbread(), Items::roastedBerries(),
-            Items::waterFlask(), Items::torch(), Items::lantern(),
-            Items::crudeDagger(), Items::hatchet(), Items::ropeItem(),
-            Items::leatherBoots()
-        };
+    // ---- Assign occupations, one primary worker per household ----------------
+    // Every household (surnameIdx group) is one of: west farmstead, east farmstead,
+    // or a generic HOME. Farmstead houses sit at fixed offsets from village center
+    // (see placeFarmstead() calls in map.cpp), so bed X position tells them apart.
+    const int VCX = MAP_WIDTH / 2;
+
+    std::map<int, std::vector<int>> households; // surnameIdx -> villager indices
+    for (int i = 0; i < (int)villagers.size(); i++)
+        households[surnameIdx[i]].push_back(i);
+
+    std::vector<int> farmWestKeys, farmEastKeys, homeKeys;
+    for (auto& kv : households) {
+        int bx = beds[kv.second[0]].x;
+        if      (bx < VCX - 30) farmWestKeys.push_back(kv.first);
+        else if (bx > VCX + 30) farmEastKeys.push_back(kv.first);
+        else                    homeKeys.push_back(kv.first);
+    }
+
+    auto assign = [&](int householdKey, Occupation occ) {
+        auto it = households.find(householdKey);
+        if (it == households.end() || it->second.empty()) return;
+        Villager& v = villagers[it->second[0]];
+        v.occupation = occ;
+        v.shopItems  = goodsFor(occ);
+    };
+
+    // West farmstead: always a Farmer.
+    if (!farmWestKeys.empty()) assign(farmWestKeys[0], Occupation::FARMER);
+
+    // East farmstead: usually another Farmer, sometimes the village Herbalist.
+    if (!farmEastKeys.empty()) {
+        bool herbalist = (rand() % 100) < 45;
+        assign(farmEastKeys[0], herbalist ? Occupation::HERBALIST : Occupation::FARMER);
+    }
+
+    // The 3 generic HOME households always cover Blacksmith/Elder/Woodcutter,
+    // shuffled into random houses so it's not always the same one per village.
+    std::vector<Occupation> mandatory = {
+        Occupation::BLACKSMITH, Occupation::ELDER, Occupation::WOODCUTTER
+    };
+    for (int i = (int)mandatory.size() - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        std::swap(mandatory[i], mandatory[j]);
+    }
+    for (int i = 0; i < (int)homeKeys.size() && i < (int)mandatory.size(); i++)
+        assign(homeKeys[i], mandatory[i]);
+
+    // Rare chance: one HOME household's spouse becomes a Seamstress instead of a plain helper.
+    if (!homeKeys.empty() && (rand() % 100) < 20) {
+        auto& members = households[homeKeys[rand() % homeKeys.size()]];
+        if (members.size() > 1) {
+            Villager& spouse = villagers[members[1]];
+            spouse.occupation = Occupation::SEAMSTRESS;
+            spouse.shopItems  = goodsFor(Occupation::SEAMSTRESS);
+        }
     }
 }
 
@@ -1284,9 +1338,10 @@ void handleInput(SDL_Event& event, bool& running) {
                                 [vsnap = v]() {
                                     villagerExaminePanel.show(vsnap);
                                 }});
-                            if (v.isMerchant && !sleeping) {
+                            if (!v.shopItems.empty() && !sleeping) {
                                 int vi = (int)(&v - &villagers[0]);
-                                items.push_back({"Trade with " + v.name,
+                                items.push_back({"Trade with " + v.name
+                                                 + " (" + occupationName(v.occupation) + ")",
                                     [vi]() { tradePanel.show(vi); }});
                             }
                             break; // one NPC per tile is enough
