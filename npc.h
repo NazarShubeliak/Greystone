@@ -1,5 +1,7 @@
 #pragma once
+#include "item.h"
 #include <string>
+#include <vector>
 #include <SDL2/SDL.h>
 
 // ================================================================ Name tables
@@ -53,4 +55,8 @@ struct Villager {
     // Greeting lines used when the player talks to them.
     // Index rotates so households say different things.
     int greetIdx = 0;
+
+    // One villager per village doubles as the general-goods merchant.
+    bool isMerchant = false;
+    std::vector<Item> shopItems;
 };

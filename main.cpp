@@ -21,6 +21,7 @@
 #include "wait_panel.h"
 #include "confirm_panel.h"
 #include "effects_panel.h"
+#include "trade_panel.h"
 #include "render.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -66,6 +67,7 @@ UI ui;
 BottomPanel panel;
 BodyPanel bodyPanel;
 EffectsPanel effectsPanel;
+TradePanel   tradePanel;
 ContextMenu contextMenu;
 ExaminePanel examinePanel;
 Overmap overmap;
@@ -596,6 +598,18 @@ void spawnVillagers(bool isVillage) {
 
         villagers.push_back(v);
     }
+
+    // One villager per village doubles as the general-goods merchant.
+    if (!villagers.empty()) {
+        Villager& merch = villagers[0];
+        merch.isMerchant = true;
+        merch.shopItems = {
+            Items::bread(), Items::flatbread(), Items::roastedBerries(),
+            Items::waterFlask(), Items::torch(), Items::lantern(),
+            Items::crudeDagger(), Items::hatchet(), Items::ropeItem(),
+            Items::leatherBoots()
+        };
+    }
 }
 
 // Build a home path using A*, treating closed doors as passable.
@@ -784,6 +798,7 @@ void checkSectorTransition() {
     pathIndex = 0;
     previewPath.clear();
     examinePanel.hide();
+    tradePanel.hide();
     updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
     updateCamera();
 
@@ -968,6 +983,7 @@ void doTeleport(int newSX, int newSY) {
     pathIndex = 0;
     previewPath.clear();
     examinePanel.hide();
+    tradePanel.hide();
     updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
     updateCamera();
 
@@ -990,6 +1006,21 @@ void handleInput(SDL_Event& event, bool& running) {
 
     // Console intercepts all input while open (except the backtick above).
     if (console.handleEvent(event, overmap, worldTime)) return;
+
+    // Trade panel intercepts input while visible.
+    if (tradePanel.visible) {
+        if (event.type == SDL_MOUSEMOTION)
+            tradePanel.handleMotion(event.motion.x, event.motion.y, player, villagers);
+        if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            std::string msg = tradePanel.handleClick(event.button.x, event.button.y, player, villagers);
+            if (!msg.empty()) panel.addMessage(msg);
+        }
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+            tradePanel.hide();
+            panel.addMessage("You leave the trade.");
+        }
+        return;
+    }
 
     // Pickup panel intercepts keyboard while visible.
     if (pickupPanel.visible) {
@@ -1253,6 +1284,11 @@ void handleInput(SDL_Event& event, bool& running) {
                                 [vsnap = v]() {
                                     villagerExaminePanel.show(vsnap);
                                 }});
+                            if (v.isMerchant && !sleeping) {
+                                int vi = (int)(&v - &villagers[0]);
+                                items.push_back({"Trade with " + v.name,
+                                    [vi]() { tradePanel.show(vi); }});
+                            }
                             break; // one NPC per tile is enough
                         }
 
@@ -1640,6 +1676,7 @@ int main(int argc, char* argv[]) {
     player.worn[(int)EquipSlot::WAIST] = Items::beltPouch();
     player.addToContainer(Items::bread());
     player.addToContainer(Items::waterFlask());
+    for (int k = 0; k < 30; k++) player.addToContainer(Items::goldCoin());
 
     // Scatter a few items on the ground near the player for testing
     groundItems.push_back({player.x + 2, player.y,     Items::ironSword()});
@@ -1938,6 +1975,7 @@ int main(int argc, char* argv[]) {
         panel.render(renderer, font, player, worldTime);
         bodyPanel.render(renderer, font, player);
         effectsPanel.render(renderer, font, player);
+        tradePanel.render(renderer, font, player, villagers);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
         inventoryPanel.render(renderer, font, player);

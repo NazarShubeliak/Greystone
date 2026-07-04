@@ -269,6 +269,15 @@ inline Item stonePiece() {
     return i;
 }
 
+inline Item goldCoin() {
+    Item i;
+    i.name        = "Gold Coin";
+    i.description = "A small gold coin. Standard currency across the realm.";
+    i.type        = ItemType::MISC;
+    i.volume      = 2; i.weight = 8; i.value = 1;
+    return i;
+}
+
 inline Item torch() {
     Item i;
     i.name        = "Torch";
