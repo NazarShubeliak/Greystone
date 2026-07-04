@@ -8,17 +8,32 @@
 struct ItemExaminePanel {
     bool visible = false;
     Item item;
+    bool pendingResumeCraft = false; // set when player clicks "Resume Crafting"
 
-    void show(const Item& i) { item = i; visible = true; }
+    void show(const Item& i) { item = i; visible = true; pendingResumeCraft = false; }
     void hide()              { visible = false; }
+
+    // Returns true if the click was consumed (resume button hit).
+    bool handleClick(int mx, int my) {
+        if (!visible) return false;
+        if (item.isPartial &&
+            mx >= resumeBtn.x && mx <= resumeBtn.x + resumeBtn.w &&
+            my >= resumeBtn.y && my <= resumeBtn.y + resumeBtn.h) {
+            pendingResumeCraft = true;
+            visible = false;
+            return true;
+        }
+        visible = false;
+        return false;
+    }
 
     void render(SDL_Renderer* r, TTF_Font* f) {
         if (!visible) return;
 
-        const int W  = 430;
-        const int H  = 295;
-        const int X  = (SCREEN_WIDTH  - W) / 2;
-        const int Y  = (MAP_VIEW_HEIGHT - H) / 2;
+        const int W   = 430;
+        const int H   = item.isPartial ? 355 : 295;
+        const int X   = (SCREEN_WIDTH  - W) / 2;
+        const int Y   = (MAP_VIEW_HEIGHT - H) / 2;
         const int PAD = 14;
         const int LH  = 20;
 
@@ -143,12 +158,51 @@ struct ItemExaminePanel {
             default: break;
         }
 
+        // ── Partial craft: progress bar + Resume button ───────────────────
+        if (item.isPartial && item.craftTotalMins > 0) {
+            ty += 4;
+            hline(r, X, ty, W); ty += 8;
+
+            int pct = item.craftProgress * 100 / item.craftTotalMins;
+            std::string pctStr = "Craft progress: " + std::to_string(pct) + "%  ("
+                + std::to_string(item.craftProgress) + " / "
+                + std::to_string(item.craftTotalMins) + " min)";
+            txt(r, f, pctStr.c_str(), X + PAD, ty, {180, 160, 80, 255});
+            ty += LH + 4;
+
+            // Progress bar
+            const int BW = W - PAD*2, BH = 10;
+            SDL_Rect barBg   = {X+PAD, ty, BW, BH};
+            SDL_Rect barFill = {X+PAD, ty, BW * pct / 100, BH};
+            SDL_SetRenderDrawColor(r, 30, 25, 10, 255);
+            SDL_RenderFillRect(r, &barBg);
+            SDL_SetRenderDrawColor(r, 160, 130, 40, 255);
+            SDL_RenderFillRect(r, &barFill);
+            SDL_SetRenderDrawColor(r, 80, 70, 35, 255);
+            SDL_RenderDrawRect(r, &barBg);
+            ty += BH + 10;
+
+            // Resume button
+            resumeBtn = {X + PAD, ty, W - PAD*2, 26};
+            SDL_SetRenderDrawColor(r, 45, 80, 35, 255);
+            SDL_RenderFillRect(r, &resumeBtn);
+            SDL_SetRenderDrawColor(r, 75, 130, 55, 255);
+            SDL_RenderDrawRect(r, &resumeBtn);
+            int bw = textW(f, "[ Resume Crafting ]");
+            txt(r, f, "[ Resume Crafting ]",
+                resumeBtn.x + (resumeBtn.w - bw)/2, resumeBtn.y + 4,
+                {150, 220, 110, 255});
+            ty += 30;
+        }
+
         // ── Footer hint ───────────────────────────────────────────────────
         hline(r, X, Y + H - 24, W);
         txt(r, f, "Click anywhere to close", X + PAD, Y + H - 18, {55, 55, 50, 255});
     }
 
 private:
+    SDL_Rect resumeBtn = {0, 0, 0, 0};
+
     static void txt(SDL_Renderer* r, TTF_Font* f,
                     const char* text, int x, int y, SDL_Color col) {
         SDL_Surface* s = TTF_RenderText_Solid(f, text, col);

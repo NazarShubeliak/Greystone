@@ -325,8 +325,8 @@ struct Actor {
     // Call once per tick for all living actors.
     void tickNeeds() {
         const RaceTraits& rt = raceTraits[(int)race];
-        if (rt.needsFood)  hunger = std::min(1.0f, hunger + 0.0001f);
-        if (rt.needsWater) thirst = std::min(1.0f, thirst + 0.0003f);
+        if (rt.needsFood)  hunger = std::min(1.0f, hunger + 0.000347f); // ~48h to starve
+        if (rt.needsWater) thirst = std::min(1.0f, thirst + 0.000694f); // ~24h to dehydrate
 
         // Bleeding drains torso HP
         if (rt.canBleed) {
@@ -381,23 +381,37 @@ struct Player : Actor {
         return 0;
     }
 
-    // Speed penalty from hunger/thirst (subtracted from speed in tickWorld).
-    int needsSpeedPenalty() const {
-        static const int hPen[] = {0, 5, 15, 30, 40};
-        static const int tPen[] = {0, 8, 20, 38, 50};
-        int hl = std::min(hungerLevel(), 3);
-        int tl = std::min(thirstLevel(), 3);
-        return hPen[hl] + tPen[tl];
+    // Display label for the current hunger/thirst level (0 = no debuff, "").
+    const char* hungerLabel() const {
+        static const char* n[] = {"", "Peckish", "Hungry", "Very Hungry", "Starving"};
+        return n[hungerLevel()];
+    }
+    const char* thirstLabel() const {
+        static const char* n[] = {"", "Thirsty", "Very Thirsty", "Parched", "Dehydrated"};
+        return n[thirstLevel()];
     }
 
-    // STR penalty from hunger/thirst.
-    int needsStrPenalty() const {
-        static const int hPen[] = {0, 1, 2, 4, 6};
-        static const int tPen[] = {0, 1, 3, 5, 7};
-        int hl = std::min(hungerLevel(), 3);
-        int tl = std::min(thirstLevel(), 3);
-        return hPen[hl] + tPen[tl];
+    // Speed penalty from hunger/thirst (subtracted from speed in tickWorld).
+    int hungerSpeedPenalty() const {
+        static const int p[] = {0, 5, 15, 30, 40};
+        return p[std::min(hungerLevel(), 3)];
     }
+    int thirstSpeedPenalty() const {
+        static const int p[] = {0, 8, 20, 38, 50};
+        return p[std::min(thirstLevel(), 3)];
+    }
+    int needsSpeedPenalty() const { return hungerSpeedPenalty() + thirstSpeedPenalty(); }
+
+    // STR penalty from hunger/thirst.
+    int hungerStrPenalty() const {
+        static const int p[] = {0, 1, 2, 4, 6};
+        return p[std::min(hungerLevel(), 3)];
+    }
+    int thirstStrPenalty() const {
+        static const int p[] = {0, 1, 3, 5, 7};
+        return p[std::min(thirstLevel(), 3)];
+    }
+    int needsStrPenalty() const { return hungerStrPenalty() + thirstStrPenalty(); }
 
     int effectiveStr() const {
         int b = 0;

@@ -85,6 +85,12 @@ struct Item {
     bool canChop = false;  // can chop trees / fallen logs
     bool canMine = false;  // can mine rocks / boulders
 
+    // Partial craft state (item interrupted mid-crafting)
+    bool        isPartial       = false;
+    int         craftProgress   = 0;   // minutes already spent
+    int         craftTotalMins  = 0;   // total minutes the recipe requires
+    std::string craftRecipeName;       // recipe name, used to resume
+
     // ---- Helpers ----
     const char* groundSymbol() const { return typeVisuals[(int)type].symbol; }
     SDL_Color   groundColor()  const { return typeVisuals[(int)type].color;  }

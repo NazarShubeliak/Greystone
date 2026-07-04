@@ -1,6 +1,7 @@
 #pragma once
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <cstring>
 #include <deque>
 #include <string>
 #include "astar.h"
@@ -24,7 +25,7 @@ struct BottomPanel {
     // --- Render ---
     void render(SDL_Renderer* renderer, TTF_Font* font, const Player& player, const WorldTime& wt) {
         const int TOP = MAP_VIEW_HEIGHT;
-        const int HUD_H = 32;
+        const int HUD_H = 48;
         const int LOG_H = PANEL_HEIGHT - HUD_H - 1;
 
         // Background
@@ -66,7 +67,8 @@ private:
 
     // ---- HUD ----------------------------------------------------------------
     void renderHUD(SDL_Renderer* r, TTF_Font* f, const Player& p, const WorldTime& wt) {
-        const int Y      = SCREEN_HEIGHT - 28;
+        const int Y      = SCREEN_HEIGHT - 44;
+        const int Y2     = Y + 20;
         const int BAR_X  = 85;
         const int BAR_W  = 130;
         const int BAR_H  = 13;
@@ -89,8 +91,10 @@ private:
         SDL_SetRenderDrawColor(r, 120, 120, 120, 255);
         SDL_RenderDrawRect(r, &barBg);
 
-        // Speed / Energy
-        renderText(r, f, ("SPD: " + std::to_string(p.speed)).c_str(), 230, Y, {180, 180, 180, 255});
+        // Speed / Energy — speed shown after hunger/thirst penalty (matches tickWorld's effSpeed)
+        int effSpeed = std::max(1, p.speed - p.needsSpeedPenalty());
+        SDL_Color spdCol = p.needsSpeedPenalty() > 0 ? SDL_Color{220, 140, 90, 255} : SDL_Color{180, 180, 180, 255};
+        renderText(r, f, ("SPD: " + std::to_string(effSpeed)).c_str(), 230, Y, spdCol);
         renderText(r, f, ("NRG: " + std::to_string(p.energy)).c_str(), 320, Y, {80, 180, 255, 255});
 
         // Time + date
@@ -117,6 +121,30 @@ private:
                 lightCol = {220, 200, 100, 255};
             }
             renderText(r, f, lightStr.c_str(), SCREEN_WIDTH - 90, Y, lightCol);
+        }
+
+        // Status effects row — hunger/thirst debuffs, colored by severity.
+        int statusX = 8;
+        int hl = p.hungerLevel();
+        int tl = p.thirstLevel();
+        if (hl > 0) {
+            SDL_Color col = levelColor(hl);
+            renderText(r, f, p.hungerLabel(), statusX, Y2, col);
+            statusX += (int)strlen(p.hungerLabel()) * 9 + 14;
+        }
+        if (tl > 0) {
+            SDL_Color col = levelColor(tl);
+            renderText(r, f, p.thirstLabel(), statusX, Y2, col);
+        }
+    }
+
+    // Severity 1-4 -> yellow/orange/orange-red/red, matching body_panel's palette.
+    static SDL_Color levelColor(int lvl) {
+        switch (lvl) {
+            case 1:  return {210, 185,  60, 255};
+            case 2:  return {225, 130,  45, 255};
+            case 3:  return {235,  90,  40, 255};
+            default: return {220,  50,  50, 255};
         }
     }
 

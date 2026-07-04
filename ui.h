@@ -43,8 +43,18 @@ struct UI {
         txt(r, f, hp.c_str(), LX, cy, {220, 70, 70, 255});
         cy += LH;
 
-        // Speed
-        txt(r, f, ("Speed:  " + std::to_string(player.speed)).c_str(), LX, cy, {190, 190, 190, 255});
+        // Speed (base minus hunger/thirst penalty — matches actual turn rate in tickWorld)
+        {
+            int needsPen  = player.needsSpeedPenalty();
+            int effSpeed  = std::max(1, player.speed - needsPen);
+            std::string spdStr = "Speed:  " + std::to_string(effSpeed);
+            txt(r, f, spdStr.c_str(), LX, cy, {190, 190, 190, 255});
+            if (needsPen != 0) {
+                int cx = LX + (int)spdStr.size() * 9;
+                std::string penStr = " (-" + std::to_string(needsPen) + " needs)";
+                txt(r, f, penStr.c_str(), cx, cy, {220, 90, 70, 255});
+            }
+        }
         cy += LH;
 
         // Race + Age
@@ -56,12 +66,12 @@ struct UI {
         cy += 8;
 
         // ── Stats with item bonuses ───────────────────────────────────────
-        statRow(r, f, "Strength",     player.strength, player.strItemBonus(), LX, cy);  cy += LH;
-        statRow(r, f, "Dexterity",    player.dexterity, player.dexItemBonus(), LX, cy); cy += LH;
-        statRow(r, f, "Intelligence", player.intelligence, 0, LX, cy);                  cy += LH;
-        statRow(r, f, "Constitution", player.constitution, player.conItemBonus(), LX, cy); cy += LH;
-        statRow(r, f, "Perception",   player.perception,  0, LX, cy);                   cy += LH;
-        statRow(r, f, "Charisma",     player.charisma,    0, LX, cy);                   cy += LH + 4;
+        statRow(r, f, "Strength",     player.strength, player.strItemBonus(), player.needsStrPenalty(), LX, cy); cy += LH;
+        statRow(r, f, "Dexterity",    player.dexterity, player.dexItemBonus(), 0, LX, cy); cy += LH;
+        statRow(r, f, "Intelligence", player.intelligence, 0, 0, LX, cy);                  cy += LH;
+        statRow(r, f, "Constitution", player.constitution, player.conItemBonus(), 0, LX, cy); cy += LH;
+        statRow(r, f, "Perception",   player.perception,  0, 0, LX, cy);                   cy += LH;
+        statRow(r, f, "Charisma",     player.charisma,    0, 0, LX, cy);                   cy += LH + 4;
 
         hline(r, X, cy, W);
         cy += 8;
@@ -126,10 +136,11 @@ private:
         SDL_RenderDrawLine(r, x + 8, y, x + w - 8, y);
     }
 
-    // Renders "Name: base (+bonus)" where bonus is colored gold if >0
+    // Renders "Name: effective (+itemBonus) (-needsPenalty)".
+    // effective = base + bonus - penalty, clamped to >=1 (matches effectiveStr() etc).
     void statRow(SDL_Renderer* r, TTF_Font* f,
-                 const char* name, int base, int bonus, int x, int y) {
-        int effective = base + bonus;
+                 const char* name, int base, int bonus, int penalty, int x, int y) {
+        int effective = std::max(1, base + bonus - penalty);
         SDL_Color valCol = effective >= 15 ? SDL_Color{100, 230, 100, 255}
                          : effective >= 10 ? SDL_Color{210, 210, 200, 255}
                                            : SDL_Color{220,  80,  80, 255};
@@ -142,6 +153,7 @@ private:
         int labelW = (int)label.size() * 9;
         std::string valStr = std::to_string(effective);
         txt(r, f, valStr.c_str(), x + labelW, y, valCol);
+        int cx = x + labelW + (int)valStr.size() * 9;
 
         if (bonus != 0) {
             std::string bonStr = bonus > 0
@@ -149,7 +161,12 @@ private:
                 : " (" + std::to_string(bonus) + ")";
             SDL_Color bonCol = bonus > 0 ? SDL_Color{200, 175, 55, 255}
                                          : SDL_Color{200,  70,  70, 255};
-            txt(r, f, bonStr.c_str(), x + labelW + (int)valStr.size() * 9, y, bonCol);
+            txt(r, f, bonStr.c_str(), cx, y, bonCol);
+            cx += (int)bonStr.size() * 9;
+        }
+        if (penalty != 0) {
+            std::string penStr = " (-" + std::to_string(penalty) + " needs)";
+            txt(r, f, penStr.c_str(), cx, y, {220, 90, 70, 255});
         }
     }
 

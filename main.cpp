@@ -18,6 +18,9 @@
 #include "npc.h"
 #include "villager_examine_panel.h"
 #include "craft_panel.h"
+#include "wait_panel.h"
+#include "confirm_panel.h"
+#include "effects_panel.h"
 #include "render.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -47,7 +50,7 @@ int pathIndex = 0;
 Uint32 lastMoveTime = 0;
 
 // Deferred action executed when the player finishes walking to a destination.
-enum class PendingAct { NONE, PICKUP_ONE, PICKUP_PANEL, INTERACT };
+enum class PendingAct { NONE, PICKUP_ONE, PICKUP_PANEL, INTERACT, AUTO_INTERACT };
 PendingAct pendingAct  = PendingAct::NONE;
 int        pendingActX = -1, pendingActY = -1;
 
@@ -62,6 +65,7 @@ int cameraX = 0, cameraY = 0;
 UI ui;
 BottomPanel panel;
 BodyPanel bodyPanel;
+EffectsPanel effectsPanel;
 ContextMenu contextMenu;
 ExaminePanel examinePanel;
 Overmap overmap;
@@ -73,9 +77,20 @@ VillagerExaminePanel villagerExaminePanel;
 CraftPanel craftPanel;
 PickupPanel pickupPanel;
 
+WaitPanel    waitPanel;
+ConfirmPanel needsConfirmPanel;
+
+// ── Wait state ───────────────────────────────────────────────────────────────
+bool isWaiting         = false;
+int  waitTargetMinutes = 0;
+bool waitPaused        = false; // true while needsConfirmPanel is up, mid-wait
+int  waitPrevHungerLv  = 0;
+int  waitPrevThirstLv  = 0;
+
 // ── Crafting state ──────────────────────────────────────────────────────────
 bool isCrafting       = false;
 int  craftMinutesLeft = 0;
+int  craftTotalMins   = 0;
 Item craftPendingItem;
 std::vector<GroundItem> groundItems;
 WorldTime worldTime;
@@ -239,8 +254,15 @@ void initEnemy() {
 
 // Drop all carried items from enemy and leave a corpse.
 void dropEnemyLoot(const Enemy& enemy) {
-    for (const Item& item : enemy.carried)
-        groundItems.push_back({enemy.x, enemy.y, item});
+    if (!enemy.carried.empty()) {
+        std::string list;
+        for (const Item& item : enemy.carried) {
+            groundItems.push_back({enemy.x, enemy.y, item});
+            if (!list.empty()) list += ", ";
+            list += item.name;
+        }
+        panel.addMessage(enemy.name + " drops: " + list + ".");
+    }
     corpses.push_back(makeCorpse(enemy, worldTime.minutes));
 }
 
@@ -314,23 +336,13 @@ void enemyAct(Enemy& enemy) {
     }
 }
 
-void updateVillagers(); // forward declaration — defined after checkSectorTransition
+void updateVillagers();    // forward declaration — defined after checkSectorTransition
+void interruptCrafting(bool playerHit); // forward declaration — defined in villager section
 
 // One world tick: give everyone energy, then let enemies spend theirs.
 void tickWorld() {
     int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty());
     player.energy += effSpeed;
-    player.tickNeeds();
-
-    // Starvation / dehydration damage
-    if (player.hunger >= 1.0f) {
-        player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
-        player.sync();
-    }
-    if (player.thirst >= 1.0f) {
-        player.body.torso.hp = std::max(0, player.body.torso.hp - 2);
-        player.sync();
-    }
 
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
@@ -396,9 +408,31 @@ void onPlayerAct() {
     int prevHungerLv = player.hungerLevel();
     int prevThirstLv = player.thirstLevel();
 
+    int hpBefore = player.hp;
     player.energy -= 100;
     while (player.energy < 100)
         tickWorld();
+
+    // Needs advance and starvation damage once per player action (not per world tick)
+    player.tickNeeds();
+    if (player.hunger >= 1.0f) {
+        player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
+        player.sync();
+        if (worldTime.minutes % 10 == 0)
+            panel.addMessage("You are starving and taking damage!");
+    }
+    if (player.thirst >= 1.0f) {
+        player.body.torso.hp = std::max(0, player.body.torso.hp - 2);
+        player.sync();
+        if (worldTime.minutes % 10 == 0)
+            panel.addMessage("You are dehydrated and taking damage!");
+    }
+
+    // Interrupt crafting if player was hit this tick
+    if (isCrafting && player.hp < hpBefore) {
+        interruptCrafting(true);
+        return;
+    }
 
     // Crafting tick — one game-minute per player action
     if (isCrafting) {
@@ -451,6 +485,7 @@ void doTeleport(int newSX, int newSY);
 void interactWithObject(int tx, int ty);
 void spawnVillagers(bool isVillage);
 void updateVillagers();
+void interruptCrafting(bool playerHit);
 
 // ------------------------------------------------------------------ villagers
 
@@ -564,6 +599,33 @@ void spawnVillagers(bool isVillage) {
 }
 
 // Build a home path using A*, treating closed doors as passable.
+// Interrupt crafting, save partial item to inventory.
+void interruptCrafting(bool playerHit) {
+    if (!isCrafting) return;
+
+    int minsDone = craftTotalMins - craftMinutesLeft;
+    int pct      = craftTotalMins > 0 ? minsDone * 100 / craftTotalMins : 0;
+
+    Item partial            = craftPendingItem;
+    partial.isPartial       = true;
+    partial.craftProgress   = minsDone;
+    partial.craftTotalMins  = craftTotalMins;
+    partial.craftRecipeName = craftPendingItem.name;
+    partial.name            = craftPendingItem.name + " (" + std::to_string(pct) + "%)";
+
+    isCrafting = false;
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()),
+                     (int)(worldTime.darkness() * 7.0f));
+
+    std::string msg = playerHit ? "You were hit and lose focus! " : "You stop crafting. ";
+    if (player.addToContainer(partial))
+        panel.addMessage(msg + partial.name + " saved to inventory.");
+    else {
+        groundItems.push_back({player.x, player.y, partial});
+        panel.addMessage(msg + partial.name + " dropped at your feet.");
+    }
+}
+
 // Targets sleepX/sleepY (walkable tile beside the bed) — NOT bedX/bedY (blocksMove=true).
 static void buildHomePath(Villager& v) {
     // Temporarily open all closed doors so A* can route through them.
@@ -936,6 +998,52 @@ void handleInput(SDL_Event& event, bool& running) {
         return;
     }
 
+    // Needs-warning confirm popup intercepts input while visible (mid-wait pause).
+    if (needsConfirmPanel.visible) {
+        int r = -2;
+        if (event.type == SDL_KEYDOWN)
+            r = needsConfirmPanel.handleKey(event.key.keysym.sym);
+        if (event.type == SDL_MOUSEMOTION)
+            needsConfirmPanel.handleMotion(event.motion.x, event.motion.y);
+        if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT)
+            r = needsConfirmPanel.handleClick(event.button.x, event.button.y);
+        if (r == 1) {
+            waitPaused = false; // resume fast-forwarding
+        } else if (r == 0) {
+            isWaiting  = false;
+            waitPaused = false;
+            panel.addMessage("You stop waiting.");
+        }
+        return;
+    }
+
+    // Wait panel intercepts input while visible.
+    if (waitPanel.visible) {
+        if (event.type == SDL_KEYDOWN) {
+            int t = waitPanel.handleKey(event.key.keysym.sym);
+            if (t >= 0) {
+                isWaiting         = true;
+                waitTargetMinutes = t;
+                waitPaused        = false;
+                waitPrevHungerLv  = player.hungerLevel();
+                waitPrevThirstLv  = player.thirstLevel();
+            }
+        }
+        if (event.type == SDL_MOUSEMOTION)
+            waitPanel.handleMotion(event.motion.x, event.motion.y);
+        if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            int t = waitPanel.handleClick(event.button.x, event.button.y);
+            if (t >= 0) {
+                isWaiting         = true;
+                waitTargetMinutes = t;
+                waitPaused        = false;
+                waitPrevHungerLv  = player.hungerLevel();
+                waitPrevThirstLv  = player.thirstLevel();
+            }
+        }
+        return;
+    }
+
     // Craft panel intercepts input while visible.
     if (craftPanel.visible()) {
         if (event.type == SDL_KEYDOWN) {
@@ -943,6 +1051,7 @@ void handleInput(SDL_Event& event, bool& running) {
             if (craftPanel.handleKey(event.key.keysym.sym, player, outItem, outMins)) {
                 isCrafting       = true;
                 craftMinutesLeft = outMins;
+                craftTotalMins   = outMins;
                 craftPendingItem = outItem;
                 panel.addMessage("You begin crafting " + outItem.name
                                  + "... (" + std::to_string(outMins) + " min)");
@@ -953,6 +1062,7 @@ void handleInput(SDL_Event& event, bool& running) {
             if (craftPanel.handleClick(event.button.x, event.button.y, player, outItem, outMins)) {
                 isCrafting       = true;
                 craftMinutesLeft = outMins;
+                craftTotalMins   = outMins;
                 craftPendingItem = outItem;
                 panel.addMessage("You begin crafting " + outItem.name
                                  + "... (" + std::to_string(outMins) + " min)");
@@ -979,18 +1089,18 @@ void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_KEYDOWN) {
         if (event.key.keysym.sym == SDLK_o)      ui.toggle();
         if (event.key.keysym.sym == SDLK_b)      bodyPanel.toggle();
+        if (event.key.keysym.sym == SDLK_s)      effectsPanel.toggle();
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
         if (event.key.keysym.sym == SDLK_m)      overmap.open(playerSectorX, playerSectorY);
         if (event.key.keysym.sym == SDLK_i)      inventoryPanel.toggle();
         if (event.key.keysym.sym == SDLK_c)      craftPanel.open();
+        if (event.key.keysym.sym == SDLK_t && !isCrafting && !isWaiting)
+            waitPanel.show(worldTime);
         if (event.key.keysym.sym == SDLK_g && !isCrafting) pickUpAtPlayer();
         // Block most actions while crafting — only allow waiting (advances crafting)
         if (isCrafting) {
             if (event.key.keysym.sym == SDLK_ESCAPE) {
-                isCrafting = false;
-                panel.addMessage("You stop crafting " + craftPendingItem.name + ".");
-                updateVisibility(worldTime.viewRadius(player.totalLightRadius()),
-                                 (int)(worldTime.darkness() * 7.0f));
+                interruptCrafting(false);
             } else if (event.key.keysym.sym == SDLK_SPACE) {
                 onPlayerAct(); // manually advance one minute
             }
@@ -1010,8 +1120,12 @@ void handleInput(SDL_Event& event, bool& running) {
         int mouseY = event.button.y / TILE_SIZE + cameraY;
 
         // Any click closes examine panels.
+        if (effectsPanel.visible) {
+            effectsPanel.hide();
+            return;
+        }
         if (itemExaminePanel.visible) {
-            itemExaminePanel.hide();
+            itemExaminePanel.handleClick(event.button.x, event.button.y);
             return;
         }
         if (enemyExaminePanel.visible) {
@@ -1238,11 +1352,16 @@ void handleInput(SDL_Event& event, bool& running) {
                                         }
                                         int dist = std::max(std::abs(mx - player.x),
                                                             std::abs(my - player.y));
-                                        if (dist <= 1) interactWithObject(mx, my);
-                                        else           walkAdjacentTo(mx, my);
+                                        if (dist <= 1) {
+                                            pendingAct  = PendingAct::AUTO_INTERACT;
+                                            pendingActX = mx; pendingActY = my;
+                                        } else {
+                                            walkAdjacentTo(mx, my);
+                                            pendingAct = PendingAct::AUTO_INTERACT;
+                                        }
                                     }});
                                 } else if (objectDefs[oid].durability > 0) {
-                                    // Destructible objects: chop/mine/break
+                                    // Destructible objects: chop/mine/break — auto-repeats until done
                                     const char* verb =
                                         (oid == O_ROCK || oid == O_BOULDER || oid == O_WALL || oid == O_FIREPLACE) ? "Mine" :
                                         (oid == O_TREE || oid == O_DEAD_TREE || oid == O_FALLEN_LOG)               ? "Chop" :
@@ -1255,10 +1374,13 @@ void handleInput(SDL_Event& event, bool& running) {
                                     items.push_back({label, [mx, my]() {
                                         int dist = std::max(std::abs(mx - player.x),
                                                             std::abs(my - player.y));
-                                        if (dist <= 1)
-                                            interactWithObject(mx, my);
-                                        else
+                                        if (dist <= 1) {
+                                            pendingAct  = PendingAct::AUTO_INTERACT;
+                                            pendingActX = mx; pendingActY = my;
+                                        } else {
                                             walkAdjacentTo(mx, my);
+                                            pendingAct = PendingAct::AUTO_INTERACT;
+                                        }
                                     }});
                                 }
                             }
@@ -1311,6 +1433,33 @@ void handleInput(SDL_Event& event, bool& running) {
 // If the player has extra energy (speed > 100), the next call will act again
 // before the world gets another tick вЂ" producing CDDA-style multi-actions.
 bool updatePlayer() {
+    // AUTO_INTERACT in-place: player is already adjacent, no path needed — keep firing each frame.
+    if (pendingAct == PendingAct::AUTO_INTERACT && currentPath.empty()) {
+        Uint32 now = SDL_GetTicks();
+        if (now - lastMoveTime < 100) return false;
+        lastMoveTime = now;
+
+        while (player.energy < 100) tickWorld();
+
+        int dist = std::max(std::abs(player.x - pendingActX),
+                            std::abs(player.y - pendingActY));
+        if (dist <= 1) {
+            int prevObj = map[pendingActY][pendingActX].objectId;
+            int prevHp  = map[pendingActY][pendingActX].objectHp;
+            interactWithObject(pendingActX, pendingActY);
+            int newObj = map[pendingActY][pendingActX].objectId;
+            int newHp  = map[pendingActY][pendingActX].objectHp;
+            if (!(newObj == prevObj && newHp < prevHp && newHp > 0)) {
+                pendingAct  = PendingAct::NONE;
+                pendingActX = pendingActY = -1;
+            }
+        } else {
+            pendingAct  = PendingAct::NONE;
+            pendingActX = pendingActY = -1;
+        }
+        return true;
+    }
+
     if (pathIndex >= (int)currentPath.size()) return false;
 
     // Visual pacing: one rendered step per 100 ms regardless of game speed.
@@ -1379,6 +1528,7 @@ bool updatePlayer() {
             int dist = std::max(std::abs(player.x - pendingActX),
                                 std::abs(player.y - pendingActY));
             if (dist <= 1) {
+                bool keepPending = false;
                 switch (pendingAct) {
                     case PendingAct::PICKUP_ONE: {
                         std::vector<bool> sel = {true};
@@ -1399,11 +1549,24 @@ bool updatePlayer() {
                     case PendingAct::INTERACT:
                         interactWithObject(pendingActX, pendingActY);
                         break;
+                    case PendingAct::AUTO_INTERACT: {
+                        int prevObj = map[pendingActY][pendingActX].objectId;
+                        int prevHp  = map[pendingActY][pendingActX].objectHp;
+                        interactWithObject(pendingActX, pendingActY);
+                        int newObj = map[pendingActY][pendingActX].objectId;
+                        int newHp  = map[pendingActY][pendingActX].objectHp;
+                        // Keep repeating if same object and HP was reduced
+                        if (newObj == prevObj && newHp < prevHp && newHp > 0)
+                            keepPending = true;
+                        break;
+                    }
                     default: break;
                 }
+                if (!keepPending) {
+                    pendingAct  = PendingAct::NONE;
+                    pendingActX = pendingActY = -1;
+                }
             }
-            pendingAct  = PendingAct::NONE;
-            pendingActX = pendingActY = -1;
         }
     }
 
@@ -1522,6 +1685,28 @@ int main(int argc, char* argv[]) {
         while (SDL_PollEvent(&event))
             handleInput(event, running);
 
+        // Resume crafting from a partial item (set by ItemExaminePanel)
+        if (itemExaminePanel.pendingResumeCraft) {
+            itemExaminePanel.pendingResumeCraft = false;
+            const Item& partial = itemExaminePanel.item;
+            if (partial.isPartial) {
+                const auto& recs = CraftPanel::allRecipes();
+                for (const auto& rec : recs) {
+                    if (rec.name == partial.craftRecipeName) {
+                        // Remove the partial item from inventory
+                        CraftPanel::consumeItems(player, partial.name, 1);
+                        craftTotalMins   = partial.craftTotalMins;
+                        craftMinutesLeft = partial.craftTotalMins - partial.craftProgress;
+                        craftPendingItem = rec.make();
+                        isCrafting       = true;
+                        panel.addMessage("You resume crafting " + craftPendingItem.name
+                                         + "... (" + std::to_string(craftMinutesLeft) + " min left)");
+                        break;
+                    }
+                }
+            }
+        }
+
         // Auto-advance crafting — one tick per frame while crafting is active
         if (isCrafting) {
             onPlayerAct();
@@ -1605,10 +1790,77 @@ int main(int argc, char* argv[]) {
                         map[my][mx].plantAge = 255;
         }
 
+        // ── Waiting: fast-forward time until target, stop if enemy nearby ──────
+        if (isWaiting && !waitPaused) {
+            const int TICKS_PER_FRAME = 60;
+            bool disturbed  = false;
+            bool needsPause = false;
+            int lastNeedsHour = worldTime.hour();
+
+            for (int i = 0; i < TICKS_PER_FRAME && worldTime.minutes < waitTargetMinutes; i++) {
+                // Check BEFORE ticking — enemies haven't acted yet this step
+                for (const Enemy& e : enemies) {
+                    if (!e.alive) continue;
+                    int cheb = std::max(std::abs(e.x - player.x), std::abs(e.y - player.y));
+                    if (cheb <= 14) { disturbed = true; break; }
+                }
+                if (disturbed) break;
+
+                worldTime.advance();
+                tickWorld();
+                player.energy = 0;
+
+                // Needs advance every game-minute, same rate as normal play.
+                player.tickNeeds();
+
+                // Starvation/dehydration damage + message throttled to once per game hour.
+                if (worldTime.hour() != lastNeedsHour) {
+                    lastNeedsHour = worldTime.hour();
+                    if (player.hunger >= 1.0f) {
+                        player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
+                        player.sync();
+                        panel.addMessage("Resting while starving — you take damage!");
+                    }
+                    if (player.thirst >= 1.0f) {
+                        player.body.torso.hp = std::max(0, player.body.torso.hp - 2);
+                        player.sync();
+                        panel.addMessage("Resting while dehydrated — you take damage!");
+                    }
+                }
+
+                if (!player.isAlive()) { disturbed = true; break; }
+
+                // A hunger/thirst debuff level just got worse — ask before continuing.
+                int hl = player.hungerLevel();
+                int tl = player.thirstLevel();
+                if (hl > waitPrevHungerLv || tl > waitPrevThirstLv) {
+                    std::string what = (hl > waitPrevHungerLv) ? player.hungerLabel() : player.thirstLabel();
+                    waitPrevHungerLv = hl;
+                    waitPrevThirstLv = tl;
+                    needsConfirmPanel.show("You are becoming " + what + ". Continue waiting?");
+                    needsPause = true;
+                    break;
+                }
+            }
+
+            if (needsPause) {
+                waitPaused = true; // isWaiting stays true; resumes or cancels via popup response
+            } else if (disturbed) {
+                isWaiting = false;
+                panel.addMessage("Your rest is disturbed by a nearby enemy!");
+            } else if (worldTime.minutes >= waitTargetMinutes) {
+                isWaiting = false;
+                panel.addMessage("You finish waiting. It is now " + worldTime.timeStr() + ".");
+            }
+        }
+
         updatePlayer();
         checkSectorTransition();
         updatePreviewPath();
-        updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
+        if (isCrafting)
+            updateVisibility(6, 0);
+        else
+            updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
         updateCamera();
 
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
@@ -1685,6 +1937,7 @@ int main(int argc, char* argv[]) {
         ui.renderStats(renderer, font);
         panel.render(renderer, font, player, worldTime);
         bodyPanel.render(renderer, font, player);
+        effectsPanel.render(renderer, font, player);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
         inventoryPanel.render(renderer, font, player);
@@ -1693,6 +1946,8 @@ int main(int argc, char* argv[]) {
         villagerExaminePanel.render(renderer, font);
         craftPanel.render(renderer, font, player);
         pickupPanel.render(renderer, font);
+        waitPanel.render(renderer, font, worldTime);
+        needsConfirmPanel.render(renderer, font);
         contextMenu.render(renderer, font);
         overmap.render(renderer, font, playerSectorX, playerSectorY);
         console.render(renderer, font);
@@ -1732,6 +1987,19 @@ int main(int argc, char* argv[]) {
                 SDL_Rect td{BX, BY+4+18, w, h};
                 SDL_RenderCopy(renderer, tt, nullptr, &td);
                 SDL_FreeSurface(ts); SDL_DestroyTexture(tt);
+            }
+        }
+
+        // Waiting HUD
+        if (isWaiting) {
+            std::string wstr = "Waiting...  " + worldTime.timeStr();
+            SDL_Surface* ws = TTF_RenderText_Solid(font, wstr.c_str(), {140, 170, 200, 255});
+            if (ws) {
+                SDL_Texture* wt = SDL_CreateTextureFromSurface(renderer, ws);
+                int ww, wh; SDL_QueryTexture(wt, nullptr, nullptr, &ww, &wh);
+                SDL_Rect wd = {(SCREEN_WIDTH - ww) / 2, 6, ww, wh};
+                SDL_RenderCopy(renderer, wt, nullptr, &wd);
+                SDL_FreeSurface(ws); SDL_DestroyTexture(wt);
             }
         }
 
