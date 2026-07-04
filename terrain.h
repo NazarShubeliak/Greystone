@@ -49,6 +49,7 @@ enum ObjectId {
     O_HERB,
     O_MUSHROOM,
     O_ANVIL,
+    O_STUMP,
     O_COUNT
 };
 
@@ -148,6 +149,8 @@ static const ObjectDef objectDefs[O_COUNT] = {
   { "Mushroom",    "Dark mushrooms growing from the damp soil.",       "n", {160, 90, 40,255},  10, false, false,  10, true, 4,  8 },
   { "Anvil",       "A blacksmith's iron anvil, scarred from years of hammering.",
                                                                        "A", {150,150,160,255},   0, true,  false,  400 },
+  { "Stump",       "A weathered tree stump, left behind after felling.",
+                                                                       "u", {110, 70, 35,255},  20, false, false,   20 },
 };
 
 // ================================================================ Biome type

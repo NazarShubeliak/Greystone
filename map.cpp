@@ -207,28 +207,44 @@ static void pathToPlaza(int doorX, int doorY, Dir doorDir, int VCX, int VCY) {
 }
 
 // Places a farmhouse + adjacent crop field on the given side of the village.
-static void placeFarmstead(Dir dir, int VCX, int VCY, int secX, int secY, BuildingRole role) {
+// The field sits beside the house (left or right of the door, chosen at random),
+// never in front of it — so reaching the door never means crossing the crop rows.
+static BldgRect placeFarmstead(Dir dir, int VCX, int VCY, int secX, int secY, BuildingRole role) {
     int hw = 9, hh = 9;
-    int hx, hy, fx, fy, fw, fh, doorX, doorY;
+    int hx, hy, doorX, doorY;
     Dir doorDir;
 
     switch (dir) {
         case Dir::WEST:
-            hx = VCX - 47; hy = VCY - 4; fw = 10; fh = 9; fx = VCX - 38; fy = VCY - 4;
-            doorX = hx + hw - 1; doorY = hy + hh / 2; doorDir = Dir::EAST;
+            hx = VCX - 47; hy = VCY - 4;
+            doorX = hx + hw - 1; doorY = hy + hh/2; doorDir = Dir::EAST;
             break;
         case Dir::EAST:
-            hx = VCX + 39; hy = VCY - 4; fw = 10; fh = 9; fx = VCX + 29; fy = VCY - 4;
-            doorX = hx; doorY = hy + hh / 2; doorDir = Dir::WEST;
+            hx = VCX + 39; hy = VCY - 4;
+            doorX = hx; doorY = hy + hh/2; doorDir = Dir::WEST;
             break;
         case Dir::NORTH:
-            hx = VCX - 4; hy = VCY - 47; fw = 9; fh = 10; fx = VCX - 4; fy = VCY - 38;
-            doorX = hx + hw / 2; doorY = hy + hh - 1; doorDir = Dir::SOUTH;
+            hx = VCX - 4; hy = VCY - 47;
+            doorX = hx + hw/2; doorY = hy + hh - 1; doorDir = Dir::SOUTH;
             break;
         default: // SOUTH
-            hx = VCX - 4; hy = VCY + 39; fw = 9; fh = 10; fx = VCX - 4; fy = VCY + 29;
-            doorX = hx + hw / 2; doorY = hy; doorDir = Dir::NORTH;
+            hx = VCX - 4; hy = VCY + 39;
+            doorX = hx + hw/2; doorY = hy; doorDir = Dir::NORTH;
             break;
+    }
+
+    // Field goes on one of the two sides perpendicular to the door (north/south of
+    // an east/west-facing house, or east/west of a north/south-facing one).
+    bool sideB = (rand() % 2) != 0;
+    int fx, fy, fw, fh;
+    if (dir == Dir::WEST || dir == Dir::EAST) {
+        fw = hw; fh = 9;
+        fx = hx;
+        fy = sideB ? (hy + hh + 1) : (hy - fh - 1);
+    } else {
+        fw = 9; fh = hh;
+        fy = hy;
+        fx = sideB ? (hx + hw + 1) : (hx - fw - 1);
     }
 
     // Interior floor
@@ -312,6 +328,10 @@ static void placeFarmstead(Dir dir, int VCX, int VCY, int secX, int secY, Buildi
 
     pathToPlaza(doorX, doorY, doorDir, VCX, VCY);
     villageBuildings.push_back({bedX, bedY, role});
+
+    int minX = std::min(hx, fx), minY = std::min(hy, fy);
+    int maxX = std::max(hx+hw, fx+fw), maxY = std::max(hy+hh, fy+fh);
+    return {minX, minY, maxX-minX, maxY-minY};
 }
 
 // Places a single-room occupation building (Smithy/Elder/Woodcutter) at a random
@@ -387,36 +407,54 @@ static bool placeRoleBuilding(BuildingRole role, int VCX, int VCY,
         // Furniture at fixed interior offsets — safe regardless of door side, since the
         // door always sits on a wall tile, never on these interior ones.
         int bedX = hx+2, bedY = hy+1;
+        // Unit vector pointing straight out of the door, and its perpendicular —
+        // used to place outdoor decoration beside the entrance instead of blocking it.
+        int outX=0, outY=0, perpX=0, perpY=0;
+        switch (doorDir) {
+            case Dir::NORTH: outY=-1; perpX=1; break;
+            case Dir::SOUTH: outY= 1; perpX=1; break;
+            case Dir::EAST:  outX= 1; perpY=1; break;
+            default:         outX=-1; perpY=1; break; // WEST
+        }
+
         switch (role) {
-            case BuildingRole::SMITHY:
+            case BuildingRole::SMITHY: {
                 putFurniture(bedX, bedY, O_BED);
                 putFurniture(hx+hw-3, hy+hh-2, O_TABLE);
-                putFurniture(hx+hw-3, hy+1, O_ANVIL);
+
+                // Forge yard beside the entrance (left or right, picked at random) —
+                // furnace, anvil and supply crates, not crammed into the bedroom.
+                int side = (rand() % 2) ? 1 : -1;
+                int fyX = doorX + outX*2 + perpX*side*3;
+                int fyY = doorY + outY*2 + perpY*side*3;
+                putObject(fyX, fyY, O_FIREPLACE);
+                putObject(fyX + perpX*side,   fyY + perpY*side,   O_ANVIL);
+                putObject(fyX - perpX*side,   fyY - perpY*side,   O_BARREL);
+                putObject(fyX + perpX*side*2, fyY + perpY*side*2, O_BARREL);
                 break;
+            }
             case BuildingRole::ELDER:
                 putFurniture(bedX, bedY, O_BED);
                 putFurniture(bedX+1, bedY, O_BED);
                 putFurniture(hx+2, hy+hh-2, O_TABLE);
                 putFurniture(hx+hw-3, hy+hh-2, O_TABLE);
                 break;
-            case BuildingRole::WOODCUTTER:
+            case BuildingRole::WOODCUTTER: {
                 putFurniture(bedX, bedY, O_BED);
                 putFurniture(hx+hw-3, hy+hh-2, O_TABLE);
                 putFurniture(hx+hw-3, hy+1, O_BARREL);
-                // A couple of felled logs just outside the door — his own cut stock.
-                {
-                    int lx = doorX, ly = doorY;
-                    switch (doorDir) {
-                        case Dir::NORTH: ly -= 2; break;
-                        case Dir::SOUTH: ly += 2; break;
-                        case Dir::EAST:  lx += 2; break;
-                        default:         lx -= 2; break;
-                    }
-                    putObject(lx, ly, O_FALLEN_LOG);
-                    putObject(lx + (doorDir==Dir::NORTH||doorDir==Dir::SOUTH ? 1 : 0),
-                              ly + (doorDir==Dir::NORTH||doorDir==Dir::SOUTH ? 0 : 1), O_FALLEN_LOG);
-                }
+
+                // A stack of felled logs beside the entrance, offset to the side
+                // so it doesn't block the way in — plus a couple of stumps nearby
+                // from whatever he's already cleared.
+                int px = doorX + outX + perpX*2, py = doorY + outY + perpY*2;
+                putObject(px,             py,             O_FALLEN_LOG);
+                putObject(px + perpX,     py + perpY,     O_FALLEN_LOG);
+                putObject(px + perpX*2,   py + perpY*2,   O_FALLEN_LOG);
+                putObject(px + outX,               py + outY,               O_STUMP);
+                putObject(px + perpX*3 + outX,     py + perpY*3 + outY,     O_STUMP);
                 break;
+            }
             default: break;
         }
 
@@ -426,16 +464,6 @@ static bool placeRoleBuilding(BuildingRole role, int VCX, int VCY,
         return true;
     }
     return false;
-}
-
-// Approximate bounding box covering a farmstead's house + field, for overlap checks.
-static BldgRect farmFootprint(Dir dir, int VCX, int VCY) {
-    switch (dir) {
-        case Dir::WEST:  return {VCX-47, VCY-4, 19, 9};
-        case Dir::EAST:  return {VCX+29, VCY-4, 19, 9};
-        case Dir::NORTH: return {VCX-4, VCY-47, 9, 19};
-        default:         return {VCX-4, VCY+29, 9, 19}; // SOUTH
-    }
 }
 
 static void placeVillage(int secX, int secY) {
@@ -459,13 +487,12 @@ static void placeVillage(int secX, int secY) {
     for (int i = 3; i > 0; i--) { int j = rand() % (i + 1); std::swap(dirs[i], dirs[j]); }
     bool herbalist = (rand() % 100) < 45;
 
-    placeFarmstead(dirs[0], VCX, VCY, secX, secY, BuildingRole::FARM);
-    placeFarmstead(dirs[1], VCX, VCY, secX, secY,
+    BldgRect farmA = placeFarmstead(dirs[0], VCX, VCY, secX, secY, BuildingRole::FARM);
+    BldgRect farmB = placeFarmstead(dirs[1], VCX, VCY, secX, secY,
                    herbalist ? BuildingRole::HERBALIST_FARM : BuildingRole::FARM);
 
     std::vector<BldgRect> footprints = {
-        farmFootprint(dirs[0], VCX, VCY),
-        farmFootprint(dirs[1], VCX, VCY),
+        farmA, farmB,
         {VCX-6, VCY-6, 13, 13}, // reserve the plaza
     };
 
