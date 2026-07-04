@@ -2,6 +2,21 @@
 #include "terrain.h"
 #include "astar.h"
 #include "actor.h"
+#include <vector>
+
+// ================================================================ Village buildings
+// Records what map.cpp actually built during placeVillage(), so main.cpp can assign
+// occupations to whoever's bed ends up in each building instead of guessing from position.
+// Kept independent of npc.h/Occupation — map.cpp doesn't need to know about NPCs.
+
+enum class BuildingRole { FARM, HERBALIST_FARM, SMITHY, ELDER, WOODCUTTER };
+
+struct VillageBuildingInfo {
+    int          bedX, bedY; // one representative bed tile inside this building
+    BuildingRole role;
+};
+
+extern std::vector<VillageBuildingInfo> villageBuildings;
 
 // ================================================================ Tile
 // Three independent layers: terrain (ground type), ground cover, object.

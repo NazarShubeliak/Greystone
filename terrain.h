@@ -48,6 +48,7 @@ enum ObjectId {
     O_WHEAT,
     O_HERB,
     O_MUSHROOM,
+    O_ANVIL,
     O_COUNT
 };
 
@@ -145,6 +146,8 @@ static const ObjectDef objectDefs[O_COUNT] = {
   { "Wheat",       "Tall stalks of golden wheat, ready to harvest.","\"",{210,185, 60,255},  30, false, false,   5, true, 6, 20 },
   { "Herb",        "A cluster of medicinal herbs with a sharp scent.", ":", { 80,160, 60,255},  10, false, false,   8, true, 3, 10 },
   { "Mushroom",    "Dark mushrooms growing from the damp soil.",       "n", {160, 90, 40,255},  10, false, false,  10, true, 4,  8 },
+  { "Anvil",       "A blacksmith's iron anvil, scarred from years of hammering.",
+                                                                       "A", {150,150,160,255},   0, true,  false,  400 },
 };
 
 // ================================================================ Biome type

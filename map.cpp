@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 extern Tile      map[MAP_HEIGHT][MAP_WIDTH];
 extern Player    player;
@@ -138,6 +140,17 @@ static void spawnObject(Tile& t, int x, int y, int secX, int secY) {
 
 // ---------------------------------------------------------------- village generation
 
+std::vector<VillageBuildingInfo> villageBuildings;
+
+enum class Dir { NORTH, SOUTH, EAST, WEST };
+
+struct BldgRect { int x, y, w, h; };
+
+static bool rectsClash(const BldgRect& a, const BldgRect& b, int margin) {
+    return !(a.x + a.w + margin <= b.x || b.x + b.w + margin <= a.x ||
+             a.y + a.h + margin <= b.y || b.y + b.h + margin <= a.y);
+}
+
 static void putFurniture(int x, int y, int oid) {
     if (!inBounds(x, y)) return;
     if (map[y][x].terrainId != T_FLOOR) return;
@@ -146,90 +159,12 @@ static void putFurniture(int x, int y, int oid) {
     map[y][x].objectHp = objectDefs[oid].durability;
 }
 
-// Add a vertical internal wall at bx+divX, with a closed door at mid-height.
-static void placeRoomDivider(int bx, int by, int bh, int divX) {
-    int doorY = by + bh / 2;
-    for (int y = by + 1; y <= by + bh - 2; y++) {
-        if (!inBounds(bx + divX, y)) continue;
-        Tile& t = map[y][bx + divX];
-        t.terrainId = T_FLOOR;
-        t.groundId  = -1;
-        if (y == doorY) {
-            t.objectId = O_DOOR_CLOSED;
-            t.objectHp = objectDefs[O_DOOR_CLOSED].durability;
-        } else {
-            t.objectId = O_WALL;
-            t.objectHp = objectDefs[O_WALL].durability;
-        }
-    }
-}
-
 // Place a window tile — only if the tile is already a wall.
 static void putWindow(int x, int y) {
     if (!inBounds(x, y)) return;
     if (map[y][x].objectId != O_WALL) return;
     map[y][x].objectId = O_WINDOW;
     map[y][x].objectHp = objectDefs[O_WINDOW].durability;
-}
-
-static void placeWindows(int bx, int by, int bw, int bh, bool doorNorth, int doorX) {
-    // Opposite wall from exterior door: 1–2 windows
-    int oppY = doorNorth ? (by + bh - 1) : by;
-    if (bw >= 10) {
-        putWindow(bx + bw / 3,     oppY);
-        putWindow(bx + 2 * bw / 3, oppY);
-    } else {
-        putWindow(bx + bw / 2, oppY);
-    }
-    // Left and right walls: one window at mid-height each
-    int midY = by + bh / 2;
-    putWindow(bx,           midY);
-    putWindow(bx + bw - 1,  midY);
-}
-
-enum BType { HOME, TAVERN, STORAGE };
-
-static void placeFurniture(int bx, int by, int bw, int bh, BType type, bool divided) {
-    int wallX = bx + bw / 2; // divider column (only used when divided)
-
-    switch (type) {
-    case HOME:
-        // Main room: bed in corner, table in center
-        putFurniture(bx + bw - 2, by + 1,      O_BED);
-        putFurniture(bx + bw - 2, by + 2,      O_BED);
-        putFurniture(bx + 2,      by + bh / 2, O_TABLE);
-        if (divided) {
-            // Second room (right of divider): storage barrel
-            putFurniture(wallX + 1, by + 1,      O_BARREL);
-            putFurniture(wallX + 2, by + bh - 2, O_BARREL);
-        }
-        break;
-    case TAVERN:
-        // Main room: tables + fireplace against back wall
-        putFurniture(bx + 2,      by + 2,      O_TABLE);
-        putFurniture(bx + 2,      by + bh - 2, O_TABLE);
-        putFurniture(bx + bw - 2, by + 1,      O_FIREPLACE);
-        if (divided) {
-            // Second room: more seating + barrel
-            putFurniture(wallX + 1, by + 2,      O_TABLE);
-            putFurniture(wallX + 1, by + bh - 2, O_BARREL);
-            putFurniture(wallX + 2, by + bh - 2, O_BARREL);
-        }
-        break;
-    case STORAGE:
-        // Barrels arranged in rows in both rooms
-        for (int k = 0; k < (divided ? bw / 2 - 2 : bw - 3); k++) {
-            putFurniture(bx + 1 + k, by + 1,      O_BARREL);
-            putFurniture(bx + 1 + k, by + bh - 2, O_BARREL);
-        }
-        if (divided) {
-            for (int k = 0; k < bw / 2 - 1; k++) {
-                putFurniture(wallX + 1 + k, by + 1,      O_BARREL);
-                putFurniture(wallX + 1 + k, by + bh - 2, O_BARREL);
-            }
-        }
-        break;
-    }
 }
 
 static void putObject(int x, int y, int oid) {
@@ -247,11 +182,55 @@ static void placeLamps(int vcx, int vcy) {
     for (auto& p : plaza) putObject(vcx+p[0], vcy+p[1], O_LAMP);
 }
 
-// Places a farmhouse (hx,hy,hw,hh) + adjacent crop field (fx,fy,fw,fh).
-// doorFacesWest: door on west wall if true, east wall if false.
-static void placeFarmstead(int hx, int hy, int hw, int hh,
-                            int fx, int fy, int fw, int fh,
-                            bool doorFacesWest, int secX, int secY) {
+// Dirt path from a door to the village plaza, routed as an L-shape whose long
+// leg matches whichever way the door faces (so it never cuts through the wall).
+static void pathToPlaza(int doorX, int doorY, Dir doorDir, int VCX, int VCY) {
+    auto paint = [&](int x, int y) {
+        if (!inBounds(x, y)) return;
+        Tile& t = map[y][x];
+        if (t.objectId < 0 && t.terrainId != T_FLOOR) t.terrainId = T_MUD;
+    };
+
+    if (doorDir == Dir::NORTH || doorDir == Dir::SOUTH) {
+        int startY = (doorDir == Dir::NORTH) ? doorY - 1 : doorY + 1;
+        int stepY  = (VCY >= startY) ? 1 : -1;
+        for (int y = startY; y != VCY + stepY; y += stepY) paint(doorX, y);
+        int stepX = (VCX >= doorX) ? 1 : -1;
+        for (int x = doorX; x != VCX + stepX; x += stepX) paint(x, VCY);
+    } else {
+        int startX = (doorDir == Dir::WEST) ? doorX - 1 : doorX + 1;
+        int stepX  = (VCX >= startX) ? 1 : -1;
+        for (int x = startX; x != VCX + stepX; x += stepX) paint(x, doorY);
+        int stepY = (VCY >= doorY) ? 1 : -1;
+        for (int y = doorY; y != VCY + stepY; y += stepY) paint(VCX, y);
+    }
+}
+
+// Places a farmhouse + adjacent crop field on the given side of the village.
+static void placeFarmstead(Dir dir, int VCX, int VCY, int secX, int secY, BuildingRole role) {
+    int hw = 9, hh = 9;
+    int hx, hy, fx, fy, fw, fh, doorX, doorY;
+    Dir doorDir;
+
+    switch (dir) {
+        case Dir::WEST:
+            hx = VCX - 47; hy = VCY - 4; fw = 10; fh = 9; fx = VCX - 38; fy = VCY - 4;
+            doorX = hx + hw - 1; doorY = hy + hh / 2; doorDir = Dir::EAST;
+            break;
+        case Dir::EAST:
+            hx = VCX + 39; hy = VCY - 4; fw = 10; fh = 9; fx = VCX + 29; fy = VCY - 4;
+            doorX = hx; doorY = hy + hh / 2; doorDir = Dir::WEST;
+            break;
+        case Dir::NORTH:
+            hx = VCX - 4; hy = VCY - 47; fw = 9; fh = 10; fx = VCX - 4; fy = VCY - 38;
+            doorX = hx + hw / 2; doorY = hy + hh - 1; doorDir = Dir::SOUTH;
+            break;
+        default: // SOUTH
+            hx = VCX - 4; hy = VCY + 39; fw = 9; fh = 10; fx = VCX - 4; fy = VCY + 29;
+            doorX = hx + hw / 2; doorY = hy; doorDir = Dir::NORTH;
+            break;
+    }
+
     // Interior floor
     for (int y = hy+1; y < hy+hh-1; y++)
         for (int x = hx+1; x < hx+hw-1; x++)
@@ -272,33 +251,46 @@ static void placeFarmstead(int hx, int hy, int hw, int hh,
             map[y][x].objectHp  = objectDefs[O_WALL].durability;
         }
 
-    // Door on the side facing the field
-    int doorX = doorFacesWest ? hx : hx+hw-1;
-    int doorY = hy + hh/2;
+    // Door facing the field/village
     if (inBounds(doorX, doorY)) {
         map[doorY][doorX].objectId = O_DOOR_CLOSED;
         map[doorY][doorX].objectHp = objectDefs[O_DOOR_CLOSED].durability;
     }
 
-    // Windows: opposite side + back wall
-    putWindow(doorFacesWest ? hx+hw-1 : hx, doorY);
+    // Windows: wall opposite the door + the two side walls
+    switch (dir) {
+        case Dir::WEST:  putWindow(hx, hy+hh/2);      break;
+        case Dir::EAST:  putWindow(hx+hw-1, hy+hh/2); break;
+        case Dir::NORTH: putWindow(hx+hw/2, hy);      break;
+        default:         putWindow(hx+hw/2, hy+hh-1); break;
+    }
     putWindow(hx+hw/2, hy);
     putWindow(hx+hw/2, hy+hh-1);
 
-    // Furniture: beds away from door, table in middle, barrel in back corner
-    if (doorFacesWest) {
-        putFurniture(hx+hw-2, hy+1,    O_BED);
-        putFurniture(hx+hw-2, hy+2,    O_BED);
-        putFurniture(hx+hw-3, hy+hh/2, O_TABLE);
-        putFurniture(hx+hw-2, hy+hh-2, O_BARREL);
-    } else {
-        putFurniture(hx+1, hy+1,    O_BED);
-        putFurniture(hx+1, hy+2,    O_BED);
-        putFurniture(hx+2, hy+hh/2, O_TABLE);
-        putFurniture(hx+1, hy+hh-2, O_BARREL);
+    // Furniture: beds away from door, table in middle, barrel in the back corner
+    int bedX, bedY, tableX, tableY, barrelX, barrelY;
+    switch (dir) {
+        case Dir::WEST: // door on east wall -> back = west side
+            bedX=hx+1; bedY=hy+1; tableX=hx+2; tableY=hy+hh/2; barrelX=hx+1; barrelY=hy+hh-2;
+            break;
+        case Dir::EAST: // door on west wall -> back = east side
+            bedX=hx+hw-2; bedY=hy+1; tableX=hx+hw-3; tableY=hy+hh/2; barrelX=hx+hw-2; barrelY=hy+hh-2;
+            break;
+        case Dir::NORTH: // door on south wall -> back = north side
+            bedX=hx+1; bedY=hy+1; tableX=hx+hw/2; tableY=hy+2; barrelX=hx+hw-2; barrelY=hy+1;
+            break;
+        default: // SOUTH: door on north wall -> back = south side
+            bedX=hx+1; bedY=hy+hh-2; tableX=hx+hw/2; tableY=hy+hh-3; barrelX=hx+hw-2; barrelY=hy+hh-2;
+            break;
     }
+    putFurniture(bedX, bedY, O_BED);
+    putFurniture(bedX + (dir==Dir::NORTH||dir==Dir::SOUTH ? 1 : 0),
+                 bedY + (dir==Dir::NORTH||dir==Dir::SOUTH ? 0 : 1), O_BED);
+    putFurniture(tableX, tableY, O_TABLE);
+    putFurniture(barrelX, barrelY, O_BARREL);
 
-    // Crop field: even rows = wheat, odd rows with spacing = herb
+    // Crop field: even rows = wheat, odd rows with spacing = herb — everyone plants a
+    // little of everything for the table, on top of whatever their specialty is.
     for (int y = fy; y < fy+fh; y++)
         for (int x = fx; x < fx+fw; x++) {
             if (!inBounds(x,y)) continue;
@@ -317,11 +309,140 @@ static void placeFarmstead(int hx, int hy, int hw, int hh,
                     objectDefs[O_HERB].growSeasons, objectDefs[O_HERB].daysToMature);
             }
         }
+
+    pathToPlaza(doorX, doorY, doorDir, VCX, VCY);
+    villageBuildings.push_back({bedX, bedY, role});
+}
+
+// Places a single-room occupation building (Smithy/Elder/Woodcutter) at a random
+// position and distance band around the village center, door facing back toward it,
+// rejecting overlaps against everything already placed. Returns false if it couldn't
+// find room after several tries (village stays smaller — no building forced in).
+static bool placeRoleBuilding(BuildingRole role, int VCX, int VCY,
+                              int minDist, int maxDist, int hw, int hh,
+                              std::vector<BldgRect>& footprints) {
+    for (int attempt = 0; attempt < 30; attempt++) {
+        double angle = (rand() % 360) * 3.14159265 / 180.0;
+        int    dist  = minDist + rand() % (maxDist - minDist + 1);
+        int    cx    = VCX + (int)(std::cos(angle) * dist);
+        int    cy    = VCY + (int)(std::sin(angle) * dist);
+        int    hx    = cx - hw / 2;
+        int    hy    = cy - hh / 2;
+        if (hx < 5 || hy < 5 || hx + hw >= MAP_WIDTH - 5 || hy + hh >= MAP_HEIGHT - 5) continue;
+
+        BldgRect candidate = {hx, hy, hw, hh};
+        bool clash = false;
+        for (const BldgRect& f : footprints)
+            if (rectsClash(candidate, f, 3)) { clash = true; break; }
+        if (clash) continue;
+
+        // Door goes on whichever wall faces back toward the village center.
+        int dxToCenter = VCX - cx, dyToCenter = VCY - cy;
+        Dir doorDir = (abs(dxToCenter) > abs(dyToCenter))
+                    ? (dxToCenter > 0 ? Dir::EAST : Dir::WEST)
+                    : (dyToCenter > 0 ? Dir::SOUTH : Dir::NORTH);
+
+        // Interior floor
+        for (int y = hy+1; y < hy+hh-1; y++)
+            for (int x = hx+1; x < hx+hw-1; x++)
+                if (inBounds(x,y)) {
+                    map[y][x].terrainId = T_FLOOR;
+                    map[y][x].objectId  = -1;
+                    map[y][x].groundId  = -1;
+                }
+
+        // Perimeter walls
+        for (int y = hy; y < hy+hh; y++)
+            for (int x = hx; x < hx+hw; x++) {
+                bool edge = (x==hx || x==hx+hw-1 || y==hy || y==hy+hh-1);
+                if (!edge || !inBounds(x,y)) continue;
+                map[y][x].terrainId = T_GRASSLAND;
+                map[y][x].groundId  = -1;
+                map[y][x].objectId  = O_WALL;
+                map[y][x].objectHp  = objectDefs[O_WALL].durability;
+            }
+
+        int doorX, doorY;
+        switch (doorDir) {
+            case Dir::NORTH: doorX = hx+hw/2; doorY = hy;      break;
+            case Dir::SOUTH: doorX = hx+hw/2; doorY = hy+hh-1; break;
+            case Dir::EAST:  doorX = hx+hw-1; doorY = hy+hh/2; break;
+            default:         doorX = hx;      doorY = hy+hh/2; break; // WEST
+        }
+        if (inBounds(doorX, doorY)) {
+            map[doorY][doorX].objectId = O_DOOR_CLOSED;
+            map[doorY][doorX].objectHp = objectDefs[O_DOOR_CLOSED].durability;
+        }
+
+        // Windows: wall opposite the door + the two side walls
+        switch (doorDir) {
+            case Dir::NORTH: putWindow(hx+hw/2, hy+hh-1); break;
+            case Dir::SOUTH: putWindow(hx+hw/2, hy);      break;
+            case Dir::EAST:  putWindow(hx, hy+hh/2);      break;
+            default:         putWindow(hx+hw-1, hy+hh/2); break;
+        }
+        putWindow(hx+hw/2, hy);
+        putWindow(hx+hw/2, hy+hh-1);
+
+        // Furniture at fixed interior offsets — safe regardless of door side, since the
+        // door always sits on a wall tile, never on these interior ones.
+        int bedX = hx+2, bedY = hy+1;
+        switch (role) {
+            case BuildingRole::SMITHY:
+                putFurniture(bedX, bedY, O_BED);
+                putFurniture(hx+hw-3, hy+hh-2, O_TABLE);
+                putFurniture(hx+hw-3, hy+1, O_ANVIL);
+                break;
+            case BuildingRole::ELDER:
+                putFurniture(bedX, bedY, O_BED);
+                putFurniture(bedX+1, bedY, O_BED);
+                putFurniture(hx+2, hy+hh-2, O_TABLE);
+                putFurniture(hx+hw-3, hy+hh-2, O_TABLE);
+                break;
+            case BuildingRole::WOODCUTTER:
+                putFurniture(bedX, bedY, O_BED);
+                putFurniture(hx+hw-3, hy+hh-2, O_TABLE);
+                putFurniture(hx+hw-3, hy+1, O_BARREL);
+                // A couple of felled logs just outside the door — his own cut stock.
+                {
+                    int lx = doorX, ly = doorY;
+                    switch (doorDir) {
+                        case Dir::NORTH: ly -= 2; break;
+                        case Dir::SOUTH: ly += 2; break;
+                        case Dir::EAST:  lx += 2; break;
+                        default:         lx -= 2; break;
+                    }
+                    putObject(lx, ly, O_FALLEN_LOG);
+                    putObject(lx + (doorDir==Dir::NORTH||doorDir==Dir::SOUTH ? 1 : 0),
+                              ly + (doorDir==Dir::NORTH||doorDir==Dir::SOUTH ? 0 : 1), O_FALLEN_LOG);
+                }
+                break;
+            default: break;
+        }
+
+        pathToPlaza(doorX, doorY, doorDir, VCX, VCY);
+        footprints.push_back(candidate);
+        villageBuildings.push_back({bedX, bedY, role});
+        return true;
+    }
+    return false;
+}
+
+// Approximate bounding box covering a farmstead's house + field, for overlap checks.
+static BldgRect farmFootprint(Dir dir, int VCX, int VCY) {
+    switch (dir) {
+        case Dir::WEST:  return {VCX-47, VCY-4, 19, 9};
+        case Dir::EAST:  return {VCX+29, VCY-4, 19, 9};
+        case Dir::NORTH: return {VCX-4, VCY-47, 9, 19};
+        default:         return {VCX-4, VCY+29, 9, 19}; // SOUTH
+    }
 }
 
 static void placeVillage(int secX, int secY) {
     const int VCX = MAP_WIDTH  / 2;
     const int VCY = MAP_HEIGHT / 2;
+
+    villageBuildings.clear();
 
     // Wipe a 50-tile radius clean: remove trees, rocks, ground cover
     for (int y = VCY - 50; y <= VCY + 50; y++)
@@ -333,74 +454,25 @@ static void placeVillage(int secX, int secY) {
                 map[y][x].terrainId = T_GRASSLAND;
             }
 
-    struct Bldg { int rx, ry, w, h; bool doorNorth; BType type; bool divided; };
-    static const Bldg bldgs[] = {
-        { -26, -21, 11, 8, false, HOME,    false },
-        {  15, -21, 11, 8, false, HOME,    false },
-        {  -6, -23,  9, 7, false, TAVERN,  false },
-        { -28,   8, 14, 9, true,  HOME,    true  },
-        {  16,   8, 13, 9, true,  STORAGE, true  },
-        {  -6,  15, 14, 8, true,  TAVERN,  true  },
+    // Randomize which 2 of the 4 cardinal directions get a farmstead this village.
+    Dir dirs[4] = { Dir::NORTH, Dir::SOUTH, Dir::EAST, Dir::WEST };
+    for (int i = 3; i > 0; i--) { int j = rand() % (i + 1); std::swap(dirs[i], dirs[j]); }
+    bool herbalist = (rand() % 100) < 45;
+
+    placeFarmstead(dirs[0], VCX, VCY, secX, secY, BuildingRole::FARM);
+    placeFarmstead(dirs[1], VCX, VCY, secX, secY,
+                   herbalist ? BuildingRole::HERBALIST_FARM : BuildingRole::FARM);
+
+    std::vector<BldgRect> footprints = {
+        farmFootprint(dirs[0], VCX, VCY),
+        farmFootprint(dirs[1], VCX, VCY),
+        {VCX-6, VCY-6, 13, 13}, // reserve the plaza
     };
 
-    for (const auto& b : bldgs) {
-        int bx = VCX + b.rx;
-        int by = VCY + b.ry;
-
-        // Interior floor
-        for (int y = by + 1; y < by + b.h - 1; y++)
-            for (int x = bx + 1; x < bx + b.w - 1; x++)
-                if (inBounds(x, y)) {
-                    map[y][x].terrainId = T_FLOOR;
-                    map[y][x].objectId  = -1;
-                    map[y][x].groundId  = -1;
-                }
-
-        // Perimeter walls
-        for (int y = by; y < by + b.h; y++)
-            for (int x = bx; x < bx + b.w; x++) {
-                bool edge = (x == bx || x == bx + b.w - 1 || y == by || y == by + b.h - 1);
-                if (!edge || !inBounds(x, y)) continue;
-                map[y][x].terrainId = T_GRASSLAND;
-                map[y][x].groundId  = -1;
-                map[y][x].objectId  = O_WALL;
-                map[y][x].objectHp  = objectDefs[O_WALL].durability;
-            }
-
-        // Exterior door: for divided buildings, open into the left room (bw/4).
-        int doorX = b.divided ? (bx + b.w / 4) : (bx + b.w / 2);
-        int doorY = b.doorNorth ? by : (by + b.h - 1);
-        if (inBounds(doorX, doorY)) {
-            map[doorY][doorX].objectId = O_DOOR_CLOSED;
-            map[doorY][doorX].objectHp = objectDefs[O_DOOR_CLOSED].durability;
-        }
-
-        // Windows
-        placeWindows(bx, by, b.w, b.h, b.doorNorth, doorX);
-
-        // Internal room divider
-        if (b.divided) placeRoomDivider(bx, by, b.h, b.w / 2);
-
-        // Furniture
-        placeFurniture(bx, by, b.w, b.h, b.type, b.divided);
-
-        // L-shaped dirt path: vertical from door to VCY row, then horizontal to VCX
-        int startY = b.doorNorth ? doorY - 1 : doorY + 1;
-        int stepY  = (VCY >= startY) ? 1 : -1;
-        for (int y = startY; y != VCY + stepY; y += stepY) {
-            if (!inBounds(doorX, y)) break;
-            Tile& t = map[y][doorX];
-            if (t.objectId < 0 && t.terrainId != T_FLOOR)
-                t.terrainId = T_MUD;
-        }
-        int stepX = (VCX >= doorX) ? 1 : -1;
-        for (int x = doorX; x != VCX + stepX; x += stepX) {
-            if (!inBounds(x, VCY)) break;
-            Tile& t = map[VCY][x];
-            if (t.objectId < 0 && t.terrainId != T_FLOOR)
-                t.terrainId = T_MUD;
-        }
-    }
+    // Elder's hall sits close to the plaza; smithy and woodcutter's lodge range further out.
+    placeRoleBuilding(BuildingRole::ELDER,      VCX, VCY, 14, 22, 12, 9, footprints);
+    placeRoleBuilding(BuildingRole::SMITHY,     VCX, VCY, 22, 42,  9, 8, footprints);
+    placeRoleBuilding(BuildingRole::WOODCUTTER, VCX, VCY, 22, 42,  9, 8, footprints);
 
     // Central stone plaza
     for (int y = VCY - 4; y <= VCY + 4; y++)
@@ -417,16 +489,6 @@ static void placeVillage(int secX, int secY) {
     map[VCY][VCX].objectHp = 0;  // indestructible
 
     placeLamps(VCX, VCY);
-
-    // West farmstead: house at far west, field between house and village
-    placeFarmstead(VCX-47, VCY-4, 9, 9,   // farmhouse
-                   VCX-38, VCY-4, 10, 9,  // field (east of house, door faces east)
-                   false, secX, secY);
-
-    // East farmstead: field between village and house, house at far east
-    placeFarmstead(VCX+39, VCY-4, 9, 9,  // farmhouse
-                   VCX+29, VCY-4, 10, 9, // field (west of house, door faces west)
-                   true, secX, secY);
 }
 
 // ---------------------------------------------------------------- sector generation

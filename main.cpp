@@ -609,57 +609,39 @@ void spawnVillagers(bool isVillage) {
     }
 
     // ---- Assign occupations, one primary worker per household ----------------
-    // Every household (surnameIdx group) is one of: west farmstead, east farmstead,
-    // or a generic HOME. Farmstead houses sit at fixed offsets from village center
-    // (see placeFarmstead() calls in map.cpp), so bed X position tells them apart.
-    const int VCX = MAP_WIDTH / 2;
-
+    // map.cpp's placeVillage() already decided what each building is (villageBuildings);
+    // just match each household's bed to the nearest recorded building anchor.
     std::map<int, std::vector<int>> households; // surnameIdx -> villager indices
     for (int i = 0; i < (int)villagers.size(); i++)
         households[surnameIdx[i]].push_back(i);
 
-    std::vector<int> farmWestKeys, farmEastKeys, homeKeys;
     for (auto& kv : households) {
-        int bx = beds[kv.second[0]].x;
-        if      (bx < VCX - 30) farmWestKeys.push_back(kv.first);
-        else if (bx > VCX + 30) farmEastKeys.push_back(kv.first);
-        else                    homeKeys.push_back(kv.first);
-    }
+        int primary = kv.second[0];
 
-    auto assign = [&](int householdKey, Occupation occ) {
-        auto it = households.find(householdKey);
-        if (it == households.end() || it->second.empty()) return;
-        Villager& v = villagers[it->second[0]];
-        v.occupation = occ;
-        v.shopItems  = goodsFor(occ);
-    };
+        BuildingRole role = BuildingRole::FARM;
+        int bestDist = -1;
+        for (const VillageBuildingInfo& info : villageBuildings) {
+            int dx = beds[primary].x - info.bedX, dy = beds[primary].y - info.bedY;
+            int d  = dx*dx + dy*dy;
+            if (bestDist < 0 || d < bestDist) { bestDist = d; role = info.role; }
+        }
 
-    // West farmstead: always a Farmer.
-    if (!farmWestKeys.empty()) assign(farmWestKeys[0], Occupation::FARMER);
+        Occupation occ;
+        switch (role) {
+            case BuildingRole::FARM:           occ = Occupation::FARMER;     break;
+            case BuildingRole::HERBALIST_FARM:  occ = Occupation::HERBALIST;  break;
+            case BuildingRole::SMITHY:          occ = Occupation::BLACKSMITH; break;
+            case BuildingRole::ELDER:           occ = Occupation::ELDER;      break;
+            default:                            occ = Occupation::WOODCUTTER; break;
+        }
+        villagers[primary].occupation = occ;
+        villagers[primary].shopItems  = goodsFor(occ);
 
-    // East farmstead: usually another Farmer, sometimes the village Herbalist.
-    if (!farmEastKeys.empty()) {
-        bool herbalist = (rand() % 100) < 45;
-        assign(farmEastKeys[0], herbalist ? Occupation::HERBALIST : Occupation::FARMER);
-    }
-
-    // The 3 generic HOME households always cover Blacksmith/Elder/Woodcutter,
-    // shuffled into random houses so it's not always the same one per village.
-    std::vector<Occupation> mandatory = {
-        Occupation::BLACKSMITH, Occupation::ELDER, Occupation::WOODCUTTER
-    };
-    for (int i = (int)mandatory.size() - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        std::swap(mandatory[i], mandatory[j]);
-    }
-    for (int i = 0; i < (int)homeKeys.size() && i < (int)mandatory.size(); i++)
-        assign(homeKeys[i], mandatory[i]);
-
-    // Rare chance: one HOME household's spouse becomes a Seamstress instead of a plain helper.
-    if (!homeKeys.empty() && (rand() % 100) < 20) {
-        auto& members = households[homeKeys[rand() % homeKeys.size()]];
-        if (members.size() > 1) {
-            Villager& spouse = villagers[members[1]];
+        // Rare chance: the spouse in a non-farm household becomes a Seamstress
+        // instead of a plain helper.
+        bool isFarmHousehold = (role == BuildingRole::FARM || role == BuildingRole::HERBALIST_FARM);
+        if (!isFarmHousehold && kv.second.size() > 1 && (rand() % 100) < 20) {
+            Villager& spouse = villagers[kv.second[1]];
             spouse.occupation = Occupation::SEAMSTRESS;
             spouse.shopItems  = goodsFor(Occupation::SEAMSTRESS);
         }
