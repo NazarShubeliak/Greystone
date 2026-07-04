@@ -16,7 +16,7 @@ struct VillagerExaminePanel {
         if (!visible) return;
 
         const int W   = 380;
-        const int H   = 220;
+        const int H   = 242;
         const int PAD = 14;
         const int LH  = 20;
         const int X   = (SCREEN_WIDTH  - W) / 2;
@@ -59,6 +59,10 @@ struct VillagerExaminePanel {
                 stateStr = "Sleeping";     stateCol = {120,140,200,255}; break;
             case Villager::State::WALK_HOME:
                 stateStr = "Going home";   stateCol = {200,180,100,255}; break;
+            case Villager::State::EAT:
+                stateStr = "Eating";       stateCol = {200,170,100,255}; break;
+            case Villager::State::DRINK:
+                stateStr = "Fetching water"; stateCol = {100,170,200,255}; break;
             default:
                 stateStr = "Wandering";    stateCol = {120,200,120,255}; break;
         }
@@ -70,6 +74,11 @@ struct VillagerExaminePanel {
         std::string bedStr = "Home bed: (" + std::to_string(snapshot.bedX)
                            + ", "          + std::to_string(snapshot.bedY) + ")";
         txt(r, f, bedStr.c_str(), X + PAD, ty, {80,80,75,255});
+        ty += LH + 4;
+
+        // ── Needs ─────────────────────────────────────────────────────────
+        txt(r, f, needsStr("Hunger", snapshot.hunger).c_str(), X + PAD, ty, needsCol(snapshot.hunger));
+        txt(r, f, needsStr("Thirst", snapshot.thirst).c_str(), X + PAD + 170, ty, needsCol(snapshot.thirst));
         ty += LH + 4;
 
         hline(r, X, ty, W);
@@ -116,5 +125,20 @@ private:
     static void hline(SDL_Renderer* r, int x, int y, int w) {
         SDL_SetRenderDrawColor(r, 50,48,38,255);
         SDL_RenderDrawLine(r, x + 8, y, x + w - 8, y);
+    }
+
+    // Same tiered labeling as the player's needs bar (body_panel.h).
+    static std::string needsStr(const char* label, float v) {
+        const char* state =
+            v < 0.10f ? "Fine" : v < 0.30f ? "Peckish" :
+            v < 0.55f ? "Hungry" : v < 0.80f ? "Very hungry" : "Starving!";
+        return std::string(label) + ": " + state;
+    }
+
+    static SDL_Color needsCol(float v) {
+        return v < 0.30f ? SDL_Color{90, 175, 65, 255}
+             : v < 0.55f ? SDL_Color{210,185,60, 255}
+             : v < 0.80f ? SDL_Color{225,130,45, 255}
+                         : SDL_Color{220, 50,50, 255};
     }
 };

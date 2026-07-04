@@ -31,7 +31,7 @@ struct ItemExaminePanel {
         if (!visible) return;
 
         const int W   = 430;
-        const int H   = item.isPartial ? 355 : 295;
+        const int H   = (item.isPartial ? 355 : 295) + (item.count > 1 ? 20 : 0);
         const int X   = (SCREEN_WIDTH  - W) / 2;
         const int Y   = (MAP_VIEW_HEIGHT - H) / 2;
         const int PAD = 14;
@@ -85,10 +85,15 @@ struct ItemExaminePanel {
         SDL_Color good  = {100, 210,  80, 255};
         SDL_Color warn  = {255, 165,   0, 255};
 
-        // Volume + Weight (always shown)
+        // Volume + Weight (always shown, per unit)
         stat(r, f, "Volume:",  std::to_string(item.volume) + " ml",  X+PAD, ty, label, value);
         stat(r, f, "Weight:",  std::to_string(item.weight) + " g",   COL2,  ty, label, value);
         ty += LH;
+
+        if (item.count > 1) {
+            stat(r, f, "Count:", std::to_string(item.count), X+PAD, ty, label, {220, 200, 100, 255});
+            ty += LH;
+        }
 
         // Slot (if equippable)
         if (item.slot != EquipSlot::NONE) {

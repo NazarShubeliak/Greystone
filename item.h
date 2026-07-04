@@ -2,6 +2,7 @@
 #include <SDL2/SDL.h>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 // ================================================================ Enums
 
@@ -91,24 +92,69 @@ struct Item {
     int         craftTotalMins  = 0;   // total minutes the recipe requires
     std::string craftRecipeName;       // recipe name, used to resume
 
+    // Stacking — maxStack == 1 (default) means this item never stacks (weapons, armor,
+    // tools, jewelry, containers). Stackable factories (currency, food, raw materials)
+    // set maxStack explicitly.
+    int count    = 1;
+    int maxStack = 1;
+
     // ---- Helpers ----
     const char* groundSymbol() const { return typeVisuals[(int)type].symbol; }
     SDL_Color   groundColor()  const { return typeVisuals[(int)type].color;  }
     bool        isContainer()  const { return maxVolume > 0; }
     bool        isEquippable() const { return slot != EquipSlot::NONE; }
 
+    // Same stackable item, neither one a unique in-progress craft.
+    bool stacksWith(const Item& other) const {
+        return maxStack > 1 && !isPartial && !other.isPartial && name == other.name;
+    }
+
     int usedVolume() const {
-        int v = 0; for (const auto& i : contents) v += i.volume; return v;
+        int v = 0; for (const auto& i : contents) v += i.volume * i.count; return v;
     }
     int usedWeight() const {
-        int w = 0; for (const auto& i : contents) w += i.weight; return w;
+        int w = 0; for (const auto& i : contents) w += i.weight * i.count; return w;
     }
     bool canFit(const Item& item) const {
         if (!isContainer()) return false;
-        return (usedVolume() + item.volume <= maxVolume) &&
-               (usedWeight() + item.weight <= maxWeight);
+        return (usedVolume() + item.volume * item.count <= maxVolume) &&
+               (usedWeight() + item.weight * item.count <= maxWeight);
     }
 };
+
+// Adds `item` (possibly count > 1) into `container`'s contents, merging into existing
+// matching stacks first (respecting each stack's maxStack), then placing any leftover as
+// new stack(s) capped at maxStack — split across multiple entries if it doesn't all fit
+// in one. All-or-nothing: checks up front that the container has room for the whole
+// item, so it never partially inserts and leaves the rest stranded (a caller trying
+// several containers in sequence can safely retry the original, untouched item elsewhere
+// on failure).
+inline bool addToContainer(Item& container, Item item) {
+    if (item.count <= 0) return false;
+    if (!container.canFit(item)) return false; // covers !isContainer() too
+
+    bool stackable = item.maxStack > 1 && !item.isPartial;
+    if (stackable) {
+        for (Item& existing : container.contents) {
+            if (item.count <= 0) break;
+            if (!existing.stacksWith(item)) continue;
+            int room = existing.maxStack - existing.count;
+            if (room <= 0) continue;
+            int take = std::min(room, item.count);
+            existing.count += take;
+            item.count     -= take;
+        }
+    }
+
+    while (item.count > 0) {
+        int chunk = stackable ? std::min(item.count, item.maxStack) : item.count;
+        Item piece = item;
+        piece.count = chunk;
+        container.contents.push_back(std::move(piece));
+        item.count -= chunk;
+    }
+    return true;
+}
 
 // ================================================================ Ground item
 
@@ -207,6 +253,7 @@ inline Item bread() {
     i.type        = ItemType::FOOD;
     i.volume      = 500; i.weight  = 300;
     i.nutrition   = 35;  i.value   = 1;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -217,6 +264,7 @@ inline Item waterFlask() {
     i.type        = ItemType::DRINK;
     i.volume      = 400; i.weight  = 500;
     i.hydration   = 40;  i.value   = 2;
+    i.maxStack    = 10;
     return i;
 }
 
@@ -248,6 +296,7 @@ inline Item woodLog() {
     i.description = "A solid section of tree trunk. Useful for building or fuel.";
     i.type        = ItemType::MISC;
     i.volume      = 8000; i.weight = 5000; i.value = 3;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -257,6 +306,7 @@ inline Item branch() {
     i.description = "A sturdy wooden branch. Could serve as a crude weapon.";
     i.type        = ItemType::MISC;
     i.volume      = 1500; i.weight = 600; i.value = 1;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -266,6 +316,7 @@ inline Item stonePiece() {
     i.description = "A chunk of rough stone. Heavy and hard.";
     i.type        = ItemType::MISC;
     i.volume      = 600; i.weight = 1200; i.value = 1;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -275,6 +326,7 @@ inline Item goldCoin() {
     i.description = "A small gold coin. Standard currency across the realm.";
     i.type        = ItemType::MISC;
     i.volume      = 2; i.weight = 8; i.value = 1;
+    i.maxStack    = 100;
     return i;
 }
 
@@ -361,6 +413,7 @@ inline Item berries() {
     i.description = "A handful of wild berries. Tart but nourishing.";
     i.type        = ItemType::FOOD;
     i.volume      = 200; i.weight = 100; i.nutrition = 10; i.value = 1;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -370,6 +423,7 @@ inline Item grain() {
     i.description = "A bundle of wheat grain. Can be ground into flour.";
     i.type        = ItemType::MISC;
     i.volume      = 300; i.weight = 250; i.value = 2;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -379,6 +433,7 @@ inline Item herb() {
     i.description = "Dried medicinal herbs with a sharp scent. Useful in potions.";
     i.type        = ItemType::MISC;
     i.volume      = 150; i.weight = 50; i.value = 3;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -388,6 +443,7 @@ inline Item mushroom() {
     i.description = "A cluster of autumn mushrooms. Earthy and somewhat nourishing.";
     i.type        = ItemType::FOOD;
     i.volume      = 100; i.weight = 80; i.nutrition = 8; i.value = 2;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -429,6 +485,7 @@ inline Item herbalPoultice() {
     i.description = "Crushed herbs wrapped in bark. Helps wounds stop bleeding and begin healing.";
     i.type        = ItemType::MISC;
     i.volume      = 150; i.weight = 80; i.value = 8;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -438,6 +495,7 @@ inline Item mushroomStew() {
     i.description = "Slow-cooked mushrooms in their own juices. Hearty and filling.";
     i.type        = ItemType::FOOD;
     i.volume      = 400; i.weight = 350; i.nutrition = 24; i.value = 5;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -447,6 +505,7 @@ inline Item flatbread() {
     i.description = "Grain pressed and sun-baked on a hot stone. Simple and filling.";
     i.type        = ItemType::FOOD;
     i.volume      = 300; i.weight = 200; i.nutrition = 20; i.value = 4;
+    i.maxStack    = 20;
     return i;
 }
 
@@ -456,6 +515,7 @@ inline Item roastedBerries() {
     i.description = "Berries dried and caramelised over embers. Sweet and sustaining.";
     i.type        = ItemType::FOOD;
     i.volume      = 150; i.weight = 100; i.nutrition = 10; i.value = 3;
+    i.maxStack    = 20;
     return i;
 }
 

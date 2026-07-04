@@ -45,7 +45,7 @@ struct CraftPanel {
         for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++) {
             if (!p.worn[s].has_value()) continue;
             for (const Item& it : p.worn[s]->contents)
-                if (it.name == name) n++;
+                if (it.name == name) n += it.count;
         }
         return n;
     }
@@ -54,8 +54,13 @@ struct CraftPanel {
         for (int s = 0; s < (int)EquipSlot::SLOT_COUNT && need > 0; s++) {
             if (!p.worn[s].has_value()) continue;
             auto& c = p.worn[s]->contents;
-            for (int i = (int)c.size() - 1; i >= 0 && need > 0; i--)
-                if (c[i].name == name) { c.erase(c.begin() + i); need--; }
+            for (int i = (int)c.size() - 1; i >= 0 && need > 0; i--) {
+                if (c[i].name != name) continue;
+                int take = std::min(need, c[i].count);
+                c[i].count -= take;
+                need       -= take;
+                if (c[i].count <= 0) c.erase(c.begin() + i);
+            }
         }
     }
 

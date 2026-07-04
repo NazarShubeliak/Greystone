@@ -97,7 +97,7 @@ struct InventoryPanel {
             }});
         }
 
-        // Use — food / drink
+        // Use — food / drink (consumes one unit from the stack)
         if (it.type == ItemType::FOOD || it.type == ItemType::DRINK) {
             opts.push_back({"Use", [this, &p, cs, idx]() {
                 if (!p.worn[cs]) return;
@@ -107,7 +107,8 @@ struct InventoryPanel {
                 float oldH = p.hunger, oldT = p.thirst;
                 p.hunger = std::max(0.0f, p.hunger - item.nutrition / 100.0f);
                 p.thirst = std::max(0.0f, p.thirst - item.hydration / 100.0f);
-                cont.erase(cont.begin() + idx);
+                if (cont[idx].count > 1) cont[idx].count--;
+                else                     cont.erase(cont.begin() + idx);
                 if (onMessage) {
                     std::string verb = (item.type == ItemType::FOOD) ? "eat" : "drink";
                     std::string msg  = "You " + verb + " the " + item.name + ".";
@@ -234,7 +235,9 @@ struct InventoryPanel {
                 const Item& item = cont.contents[i];
                 int ry = TITLE_H + i * ROW_H;
                 SDL_Color col = typeVisuals[(int)item.type].color;
-                txt(r, f, LEFT_W + PAD, ry + 4, item.name.c_str(), col);
+                std::string label = item.name;
+                if (item.count > 1) label += " x" + std::to_string(item.count);
+                txt(r, f, LEFT_W + PAD, ry + 4, label.c_str(), col);
 
                 // Volume + weight right-aligned
                 std::string stats = std::to_string(item.volume) + "ml  "

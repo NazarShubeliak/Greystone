@@ -509,25 +509,17 @@ struct Player : Actor {
     }
 
     // Try to add item to the best available container (BACK first, then WAIST, etc.).
-    // Returns true on success.
+    // Stacks into an existing matching stack when possible. Returns true on success.
     bool addToContainer(Item item) {
         int order[] = {
             (int)EquipSlot::BACK,  (int)EquipSlot::WAIST,
             (int)EquipSlot::HANDS, (int)EquipSlot::HAND_L
         };
-        for (int s : order) {
-            if (worn[s].has_value() && worn[s]->canFit(item)) {
-                worn[s]->contents.push_back(std::move(item));
-                return true;
-            }
-        }
+        for (int s : order)
+            if (worn[s].has_value() && ::addToContainer(*worn[s], item)) return true;
         // Try any remaining container slot
-        for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++) {
-            if (worn[s].has_value() && worn[s]->canFit(item)) {
-                worn[s]->contents.push_back(std::move(item));
-                return true;
-            }
-        }
+        for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++)
+            if (worn[s].has_value() && ::addToContainer(*worn[s], item)) return true;
         return false;
     }
 
@@ -552,10 +544,14 @@ struct Enemy : Actor {
     int   aggroRange;
     bool  flees     = false;
     float fleeHpPct = 0.0f;   // flee when hp/maxHp drops below this fraction
-    std::vector<Item> carried; // Items dropped on death
+
+    // Everything they have — weapon, armor, loot, rations — lives inside this one
+    // real container (no floating/invisible items). Dropped in full on death.
+    std::optional<Item> bag;
 
     int weaponDmg() const {
-        for (const Item& item : carried)
+        if (!bag) return 0;
+        for (const Item& item : bag->contents)
             if (item.type == ItemType::WEAPON) return item.damage;
         return 0;
     }

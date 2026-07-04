@@ -11,7 +11,8 @@
 
 // Simple two-column buy/sell UI with a village merchant. Currency is the
 // physical "Gold Coin" item — buying/selling moves coins and goods between
-// the player's worn containers and the merchant's shopItems list.
+// the player's worn containers and the merchant's bag (their one real
+// container — holds trade goods and personal food together).
 struct TradePanel {
     bool visible     = false;
     int  villagerIdx = -1;
@@ -39,9 +40,15 @@ struct TradePanel {
         return v;
     }
 
+    // Read-only access to a merchant's carried goods — empty if they somehow have no bag.
+    static const std::vector<Item>& stockOf(const Villager& merch) {
+        static const std::vector<Item> empty;
+        return merch.bag ? merch.bag->contents : empty;
+    }
+
     // ── Layout ────────────────────────────────────────────────────────────
     int rows(const Villager& merch, const Player& p) const {
-        return std::max({(int)merch.shopItems.size(), (int)sellableRefs(p).size(), 1});
+        return std::max({(int)stockOf(merch).size(), (int)sellableRefs(p).size(), 1});
     }
     int panelH(const Villager& merch, const Player& p) const {
         return HEADER + rows(merch, p) * ROW_H + 16;
@@ -59,7 +66,7 @@ struct TradePanel {
         if (my < listY) return false;
         row = (my - listY) / ROW_H;
         int colLx = X + 12, colRx = X + 12 + COL_W + COL_GAP;
-        if (mx >= colLx && mx < colLx + COL_W) { side = 0; return row < (int)merch.shopItems.size(); }
+        if (mx >= colLx && mx < colLx + COL_W) { side = 0; return row < (int)stockOf(merch).size(); }
         if (mx >= colRx && mx < colRx + COL_W) { side = 1; return row < (int)sellableRefs(p).size(); }
         return false;
     }
@@ -91,32 +98,40 @@ struct TradePanel {
         return sell(merch, p, sellableRefs(p)[row]);
     }
 
+    // Buying/selling always transacts the whole stack shown in a row.
     std::string buy(Villager& merch, Player& p, int idx) {
-        if (idx < 0 || idx >= (int)merch.shopItems.size()) return "";
-        Item& stock = merch.shopItems[idx];
-        int price = std::max(1, stock.value);
+        if (!merch.bag) return "";
+        auto& stock = merch.bag->contents;
+        if (idx < 0 || idx >= (int)stock.size()) return "";
+        Item item = stock[idx];
+        int price = std::max(1, item.value) * item.count;
         if (CraftPanel::countItems(p, "Gold Coin") < price)
-            return "Not enough gold to buy " + stock.name + ".";
-        Item copy = stock;
+            return "Not enough gold to buy " + item.name + ".";
+        Item copy = item;
         if (!p.addToContainer(copy))
             return "Not enough room in your inventory.";
         CraftPanel::consumeItems(p, "Gold Coin", price);
-        std::string name = stock.name;
-        merch.shopItems.erase(merch.shopItems.begin() + idx);
-        return "You buy " + name + " for " + std::to_string(price) + " gold.";
+        std::string name = item.name;
+        std::string qty  = item.count > 1 ? (" x" + std::to_string(item.count)) : "";
+        stock.erase(stock.begin() + idx);
+        return "You buy " + name + qty + " for " + std::to_string(price) + " gold.";
     }
 
     std::string sell(Villager& merch, Player& p, Ref ref) {
+        if (!merch.bag) return "";
         if (!p.worn[ref.slot].has_value()) return "";
         auto& c = p.worn[ref.slot]->contents;
         if (ref.idx < 0 || ref.idx >= (int)c.size()) return "";
         Item it = c[ref.idx];
-        int price = std::max(1, it.value);
-        c.erase(c.begin() + ref.idx);
-        for (int k = 0; k < price; k++) p.addToContainer(Items::goldCoin());
+        int price = std::max(1, it.value) * it.count;
         std::string name = it.name;
-        merch.shopItems.push_back(std::move(it));
-        return "You sell " + name + " for " + std::to_string(price) + " gold.";
+        std::string qty  = it.count > 1 ? (" x" + std::to_string(it.count)) : "";
+        if (!addToContainer(*merch.bag, it)) return "The merchant has no room to carry that.";
+        c.erase(c.begin() + ref.idx);
+        Item coins = Items::goldCoin();
+        coins.count = price;
+        p.addToContainer(std::move(coins));
+        return "You sell " + name + qty + " for " + std::to_string(price) + " gold.";
     }
 
     // ── Render ────────────────────────────────────────────────────────────
@@ -152,13 +167,13 @@ struct TradePanel {
         txt(r, f, "Your Items", colRx, ty, {170, 165, 145, 255});
         ty += 20;
 
+        const std::vector<Item>& stock = stockOf(merch);
         int listY = ty;
-        if (merch.shopItems.empty())
+        if (stock.empty())
             txt(r, f, "(sold out)", colLx + 4, listY, {110, 110, 110, 255});
-        for (int i = 0; i < (int)merch.shopItems.size(); i++) {
+        for (int i = 0; i < (int)stock.size(); i++) {
             bool hov = (hoverSide == 0 && hoverRow == i);
-            drawRow(r, f, colLx, listY + i * ROW_H, COL_W, merch.shopItems[i].name,
-                    merch.shopItems[i].value, hov);
+            drawRow(r, f, colLx, listY + i * ROW_H, COL_W, stock[i], hov);
         }
 
         if (sellRefs.empty())
@@ -166,13 +181,13 @@ struct TradePanel {
         for (int i = 0; i < (int)sellRefs.size(); i++) {
             const Item& it = p.worn[sellRefs[i].slot]->contents[sellRefs[i].idx];
             bool hov = (hoverSide == 1 && hoverRow == i);
-            drawRow(r, f, colRx, listY + i * ROW_H, COL_W, it.name, it.value, hov);
+            drawRow(r, f, colRx, listY + i * ROW_H, COL_W, it, hov);
         }
     }
 
 private:
     void drawRow(SDL_Renderer* r, TTF_Font* f, int x, int y, int w,
-                 const std::string& name, int price, bool hover) {
+                 const Item& item, bool hover) {
         if (hover) {
             SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
             SDL_SetRenderDrawColor(r, 50, 45, 20, 200);
@@ -181,8 +196,10 @@ private:
             SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
         }
         SDL_Color nameCol = hover ? SDL_Color{230, 210, 120, 255} : SDL_Color{190, 185, 170, 255};
-        txt(r, f, name.c_str(), x, y + 2, nameCol);
-        std::string priceStr = std::to_string(price) + "g";
+        std::string label = item.name;
+        if (item.count > 1) label += " x" + std::to_string(item.count);
+        txt(r, f, label.c_str(), x, y + 2, nameCol);
+        std::string priceStr = std::to_string(std::max(1, item.value) * item.count) + "g";
         int pw = textW(f, priceStr.c_str());
         txt(r, f, priceStr.c_str(), x + w - pw, y + 2, {200, 175, 70, 255});
     }

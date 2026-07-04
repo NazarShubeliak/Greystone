@@ -20,7 +20,7 @@ struct EnemyExaminePanel {
         const int LH  = 20;
 
         // Count carried items for height
-        int extraLines = (int)snapshot.carried.size();
+        int extraLines = snapshot.bag ? (int)snapshot.bag->contents.size() : 0;
         const int H = 290 + extraLines * LH;
         const int X = (SCREEN_WIDTH  - W) / 2;
         const int Y = (MAP_VIEW_HEIGHT - H) / 2;
@@ -162,12 +162,12 @@ struct EnemyExaminePanel {
         }
 
         // ── Carried items ─────────────────────────────────────────────────
-        if (!snapshot.carried.empty()) {
+        if (snapshot.bag && !snapshot.bag->contents.empty()) {
             hline(r, X, ty, W);
             ty += 8;
             txt(r, f, "Carries:", X + PAD, ty, {100,100,90,255});
             ty += LH;
-            for (const Item& item : snapshot.carried) {
+            for (const Item& item : snapshot.bag->contents) {
                 std::string itemLine = "  " + item.name;
                 if (item.type == ItemType::WEAPON)
                     itemLine += "  (dmg " + std::to_string(item.damage) + ")";

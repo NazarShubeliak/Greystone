@@ -45,6 +45,7 @@ Player player(20, 15);
 std::vector<Enemy>    enemies;
 std::vector<Corpse>   corpses;
 std::vector<Villager> villagers;
+int villageWellX = -1, villageWellY = -1; // walkable tile beside the well, set in spawnVillagers()
 
 std::vector<SDL_Point> currentPath;
 int pathIndex = 0;
@@ -263,17 +264,26 @@ void initEnemy() {
     }
 }
 
-// Drop all carried items from enemy and leave a corpse.
-void dropEnemyLoot(const Enemy& enemy) {
-    if (!enemy.carried.empty()) {
-        std::string list;
-        for (const Item& item : enemy.carried) {
-            groundItems.push_back({enemy.x, enemy.y, item});
-            if (!list.empty()) list += ", ";
-            list += item.name;
-        }
-        panel.addMessage(enemy.name + " drops: " + list + ".");
+// Scatters a container's contents onto the ground as individual pickups, plus the
+// (now empty) container itself — nothing a creature had vanishes on death, and
+// nothing lives as an invisible inventory in the meantime.
+void dropBag(const Actor& who, const std::optional<Item>& bag) {
+    if (!bag) return;
+    std::string list;
+    for (const Item& item : bag->contents) {
+        groundItems.push_back({who.x, who.y, item});
+        if (!list.empty()) list += ", ";
+        list += item.name;
     }
+    if (!list.empty()) panel.addMessage(who.name + " drops: " + list + ".");
+    Item emptyBag = *bag;
+    emptyBag.contents.clear();
+    groundItems.push_back({who.x, who.y, emptyBag});
+}
+
+// Drop everything an enemy had and leave a corpse.
+void dropEnemyLoot(const Enemy& enemy) {
+    dropBag(enemy, enemy.bag);
     corpses.push_back(makeCorpse(enemy, worldTime.minutes));
 }
 
@@ -314,8 +324,9 @@ void enemyAct(Enemy& enemy) {
         int damage = std::max(1, rawDmg - player.totalDefense());
         player.takeDamage(damage, part);
         std::string withWeapon;
-        for (const Item& item : enemy.carried)
-            if (item.type == ItemType::WEAPON) { withWeapon = " with " + item.name; break; }
+        if (enemy.bag)
+            for (const Item& item : enemy.bag->contents)
+                if (item.type == ItemType::WEAPON) { withWeapon = " with " + item.name; break; }
         panel.addMessage(enemy.name + " hits your " + partName(part)
                          + withWeapon + " for " + std::to_string(damage) + " damage.");
         if (!player.isAlive())
@@ -348,6 +359,7 @@ void enemyAct(Enemy& enemy) {
 }
 
 void updateVillagers();    // forward declaration — defined after checkSectorTransition
+void tickVillagerNeeds();  // forward declaration — defined after updateVillagers
 void interruptCrafting(bool playerHit); // forward declaration — defined in villager section
 
 // One world tick: give everyone energy, then let enemies spend theirs.
@@ -355,13 +367,26 @@ void tickWorld() {
     int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty());
     player.energy += effSpeed;
 
+    // Starvation/dehydration damage gated to once per crossed game-hour — tickWorld()
+    // itself can fire more than once per game-minute (see onPlayerAct()), so applying
+    // it unconditionally every call would kill a maxed-out enemy almost instantly.
+    static int lastEnemyNeedsHour = -1;
+    bool enemyHourCrossed = (lastEnemyNeedsHour != worldTime.hour());
+    lastEnemyNeedsHour = worldTime.hour();
+
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
         e.energy += e.speed;
         e.tickNeeds();
+        if (enemyHourCrossed) {
+            if (e.hunger >= 1.0f) e.takeDamage(1, PartTarget::TORSO);
+            if (e.thirst >= 1.0f) e.takeDamage(2, PartTarget::TORSO);
+        }
         if (!e.alive) {
-            // Died from bleeding or starvation — drop loot now.
-            panel.addMessage(e.name + " bleeds to death.");
+            std::string cause = e.thirst >= 1.0f ? "dies of dehydration."
+                               : e.hunger >= 1.0f ? "dies of starvation."
+                                                   : "bleeds to death.";
+            panel.addMessage(e.name + " " + cause);
             dropEnemyLoot(e);
             continue;
         }
@@ -426,6 +451,7 @@ void onPlayerAct() {
 
     // Needs advance and starvation damage once per player action (not per world tick)
     player.tickNeeds();
+    tickVillagerNeeds();
     if (player.hunger >= 1.0f) {
         player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
         player.sync();
@@ -496,6 +522,7 @@ void doTeleport(int newSX, int newSY);
 void interactWithObject(int tx, int ty);
 void spawnVillagers(bool isVillage);
 void updateVillagers();
+void tickVillagerNeeds();
 void interruptCrafting(bool playerHit);
 
 // ------------------------------------------------------------------ villagers
@@ -521,7 +548,19 @@ static int countStrings(const char** arr) {
 
 void spawnVillagers(bool isVillage) {
     villagers.clear();
+    villageWellX = villageWellY = -1;
     if (!isVillage) return;
+
+    // Walkable tile beside the well — every village has exactly one, at map center.
+    {
+        int wx = MAP_WIDTH / 2, wy = MAP_HEIGHT / 2;
+        const int DIRS[4][2] = {{0,-1},{0,1},{-1,0},{1,0}};
+        for (auto& d : DIRS) {
+            int nx = wx + d[0], ny = wy + d[1];
+            if (nx < 1 || nx >= MAP_WIDTH-1 || ny < 1 || ny >= MAP_HEIGHT-1) continue;
+            if (map[ny][nx].walkable()) { villageWellX = nx; villageWellY = ny; break; }
+        }
+    }
 
     // Collect all bed positions
     struct BedPos { int x, y; };
@@ -589,6 +628,16 @@ void spawnVillagers(bool isVillage) {
         v.color     = VILLAGER_COLORS[i % VILLAGER_COLOR_COUNT];
         v.greetIdx  = i % countStrings(GREETINGS_DAY);
 
+        // Everything they carry lives in one real container — no floating inventory.
+        // Starting food reserve: Farmer/Herbalist can top this up later by harvesting
+        // their own field; everyone else only ever depletes it.
+        v.bag = Items::backpack();
+        {
+            Item loaves = Items::bread();
+            loaves.count = 6;
+            addToContainer(*v.bag, std::move(loaves));
+        }
+
         // Start sleeping if it's night, else place them near their bed
         if (worldTime.darkness() > 0.5f) {
             v.state = Villager::State::SLEEP;
@@ -615,6 +664,13 @@ void spawnVillagers(bool isVillage) {
     for (int i = 0; i < (int)villagers.size(); i++)
         households[surnameIdx[i]].push_back(i);
 
+    // Adds an occupation's goods into a villager's bag (real container, no floating items).
+    auto giveOccupation = [](Villager& v, Occupation occ) {
+        v.occupation = occ;
+        if (!v.bag) return;
+        for (Item& g : goodsFor(occ)) addToContainer(*v.bag, std::move(g));
+    };
+
     for (auto& kv : households) {
         int primary = kv.second[0];
 
@@ -634,17 +690,13 @@ void spawnVillagers(bool isVillage) {
             case BuildingRole::ELDER:           occ = Occupation::ELDER;      break;
             default:                            occ = Occupation::WOODCUTTER; break;
         }
-        villagers[primary].occupation = occ;
-        villagers[primary].shopItems  = goodsFor(occ);
+        giveOccupation(villagers[primary], occ);
 
         // Rare chance: the spouse in a non-farm household becomes a Seamstress
         // instead of a plain helper.
         bool isFarmHousehold = (role == BuildingRole::FARM || role == BuildingRole::HERBALIST_FARM);
-        if (!isFarmHousehold && kv.second.size() > 1 && (rand() % 100) < 20) {
-            Villager& spouse = villagers[kv.second[1]];
-            spouse.occupation = Occupation::SEAMSTRESS;
-            spouse.shopItems  = goodsFor(Occupation::SEAMSTRESS);
-        }
+        if (!isFarmHousehold && kv.second.size() > 1 && (rand() % 100) < 20)
+            giveOccupation(villagers[kv.second[1]], Occupation::SEAMSTRESS);
     }
 }
 
@@ -676,8 +728,9 @@ void interruptCrafting(bool playerHit) {
     }
 }
 
-// Targets sleepX/sleepY (walkable tile beside the bed) — NOT bedX/bedY (blocksMove=true).
-static void buildHomePath(Villager& v) {
+// Targets any walkable tile (sleepX/sleepY for home, the well tile for water) — never
+// a blocksMove=true tile like the bed itself.
+static void buildPathTo(Villager& v, int tx, int ty) {
     // Temporarily open all closed doors so A* can route through them.
     std::vector<SDL_Point> closedDoors;
     for (int y = 0; y < MAP_HEIGHT; y++)
@@ -687,12 +740,58 @@ static void buildHomePath(Villager& v) {
                 map[y][x].objectId = O_DOOR;
             }
 
-    v.homePath    = findPath(v.x, v.y, v.sleepX, v.sleepY);
+    v.homePath    = findPath(v.x, v.y, tx, ty);
     v.homePathIdx = 1;
 
     // Restore closed doors.
     for (const SDL_Point& p : closedDoors)
         map[p.y][p.x].objectId = O_DOOR_CLOSED;
+}
+
+// Advances one step of v.homePath toward (tx,ty), (re)building the path as needed and
+// opening/closing doors along the way. Returns true once the villager has arrived.
+static bool followPath(Villager& v, int tx, int ty) {
+    if (v.x == tx && v.y == ty) return true;
+
+    // Cooldown prevents rebuilding a failed path every tick.
+    if (v.pathRetryCool > 0) { v.pathRetryCool--; return false; }
+
+    // Build path if we don't have one or exhausted it without arriving.
+    if (v.homePath.empty() || v.homePathIdx >= (int)v.homePath.size()) {
+        buildPathTo(v, tx, ty);
+        if (v.homePath.empty()) {
+            v.pathRetryCool = 30; // wait 30 ticks before retrying
+            return false;
+        }
+    }
+
+    if (v.homePathIdx < (int)v.homePath.size()) {
+        SDL_Point next = v.homePath[v.homePathIdx];
+        Tile& t = map[next.y][next.x];
+
+        // Close any previously opened door once we've moved away from it
+        if (v.lastDoorX >= 0 && (v.x != v.lastDoorX || v.y != v.lastDoorY)) {
+            map[v.lastDoorY][v.lastDoorX].objectId = O_DOOR_CLOSED;
+            v.lastDoorX = v.lastDoorY = -1;
+        }
+
+        // Open a closed door and remember it to close later
+        if (t.objectId == O_DOOR_CLOSED) {
+            t.objectId  = O_DOOR;
+            v.lastDoorX = next.x;
+            v.lastDoorY = next.y;
+        }
+
+        if (t.walkable()) {
+            v.x = next.x;
+            v.y = next.y;
+            v.homePathIdx++;
+        } else {
+            // Tile became impassable — recompute next tick.
+            v.homePath.clear();
+        }
+    }
+    return false;
 }
 
 void updateVillagers() {
@@ -702,14 +801,20 @@ void updateVillagers() {
 
     for (Villager& v : villagers) {
         if (!v.alive) continue;
-        v.energy += v.speed;
-        if (v.energy < 100) continue;
-        v.energy -= 100;
+        v.gainEnergy();
+        if (!v.canAct()) continue;
+        v.spendEnergy();
 
         // State transitions
         if (v.state == Villager::State::WANDER && dark > 0.5f) {
             v.state = Villager::State::WALK_HOME;
             v.homePath.clear(); // force path rebuild
+        } else if (v.state == Villager::State::WANDER && v.thirst >= 0.6f) {
+            v.state = Villager::State::DRINK; // thirst is the more urgent need
+            v.homePath.clear();
+        } else if (v.state == Villager::State::WANDER && v.hunger >= 0.6f) {
+            v.state = Villager::State::EAT;
+            v.homePath.clear();
         }
         if (v.state == Villager::State::SLEEP && curH >= sunriseH && dark <= 0.0f) {
             v.state = Villager::State::WANDER;
@@ -736,8 +841,8 @@ void updateVillagers() {
                 if (map[ny][nx].walkable()) { v.x = nx; v.y = ny; }
                 break;
             }
-            case Villager::State::WALK_HOME: {
-                if (v.x == v.sleepX && v.y == v.sleepY) {
+            case Villager::State::WALK_HOME:
+                if (followPath(v, v.sleepX, v.sleepY)) {
                     // Close any door we opened on the way in
                     if (v.lastDoorX >= 0) {
                         map[v.lastDoorY][v.lastDoorX].objectId = O_DOOR_CLOSED;
@@ -745,51 +850,80 @@ void updateVillagers() {
                     }
                     v.x = v.bedX; v.y = v.bedY; // lie down on the bed
                     v.state = Villager::State::SLEEP;
-                    break;
-                }
-                // Cooldown prevents rebuilding a failed path every tick.
-                if (v.pathRetryCool > 0) { v.pathRetryCool--; break; }
-
-                // Build path if we don't have one or exhausted it without arriving.
-                if (v.homePath.empty() || v.homePathIdx >= (int)v.homePath.size()) {
-                    buildHomePath(v);
-                    if (v.homePath.empty()) {
-                        v.pathRetryCool = 30; // wait 30 ticks before retrying
-                        break;
-                    }
-                }
-
-                if (v.homePathIdx < (int)v.homePath.size()) {
-                    SDL_Point next = v.homePath[v.homePathIdx];
-                    Tile& t = map[next.y][next.x];
-
-                    // Close any previously opened door once we've moved away from it
-                    if (v.lastDoorX >= 0 && (v.x != v.lastDoorX || v.y != v.lastDoorY)) {
-                        map[v.lastDoorY][v.lastDoorX].objectId = O_DOOR_CLOSED;
-                        v.lastDoorX = v.lastDoorY = -1;
-                    }
-
-                    // Open a closed door and remember it to close later
-                    if (t.objectId == O_DOOR_CLOSED) {
-                        t.objectId  = O_DOOR;
-                        v.lastDoorX = next.x;
-                        v.lastDoorY = next.y;
-                    }
-
-                    if (t.walkable()) {
-                        v.x = next.x;
-                        v.y = next.y;
-                        v.homePathIdx++;
-                    } else {
-                        // Tile became impassable — recompute next tick.
-                        v.homePath.clear();
-                    }
                 }
                 break;
-            }
+            case Villager::State::EAT:
+                if (followPath(v, v.sleepX, v.sleepY)) {
+                    bool ate = false;
+                    if (v.bag) {
+                        auto& c = v.bag->contents;
+                        for (int i = 0; i < (int)c.size(); i++) {
+                            if (c[i].nutrition > 0) {
+                                if (c[i].count > 1) c[i].count--;
+                                else                 c.erase(c.begin() + i);
+                                ate = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!ate && (v.occupation == Occupation::FARMER || v.occupation == Occupation::HERBALIST)) {
+                        // No stock left — try to harvest a mature crop from their own field.
+                        int wantId = (v.occupation == Occupation::FARMER) ? O_WHEAT : O_HERB;
+                        for (int dy = -6; dy <= 6 && !ate; dy++)
+                            for (int dx = -6; dx <= 6 && !ate; dx++) {
+                                int fx = v.bedX + dx, fy = v.bedY + dy;
+                                if (fx < 0 || fx >= MAP_WIDTH || fy < 0 || fy >= MAP_HEIGHT) continue;
+                                Tile& t = map[fy][fx];
+                                if (t.objectId == wantId && t.plantAge >= 170) {
+                                    t.plantAge = 0; // harvested — regrows over the season
+                                    ate = true;
+                                }
+                            }
+                    }
+                    // If neither worked, hunger stays high — a real risk, not just flavor.
+                    if (ate) v.hunger = 0.0f;
+                    v.state = Villager::State::WANDER;
+                }
+                break;
+            case Villager::State::DRINK:
+                if (villageWellX < 0) { v.state = Villager::State::WANDER; break; }
+                if (followPath(v, villageWellX, villageWellY)) {
+                    v.thirst = 0.0f;
+                    v.state  = Villager::State::WANDER;
+                }
+                break;
             case Villager::State::SLEEP:
                 v.x = v.bedX; v.y = v.bedY; // stay on the bed
                 break;
+        }
+    }
+}
+
+// Advances villager hunger/thirst by exactly one game-minute's worth, and applies
+// starvation/dehydration damage once per crossed game-hour. Called once per game-minute
+// from onPlayerAct()/the wait loop — NOT from updateVillagers(), whose energy-based
+// per-actor loop doesn't fire at a fixed rate relative to real game time (same reason
+// player.tickNeeds() lives outside tickWorld()).
+void tickVillagerNeeds() {
+    static int lastNeedsHour = -1;
+    int curHour = worldTime.hour();
+    bool hourCrossed = (lastNeedsHour != curHour);
+    lastNeedsHour = curHour;
+
+    for (Villager& v : villagers) {
+        if (!v.alive) continue;
+        v.tickNeeds(); // inherited from Actor — same rate constants as the player
+
+        if (!hourCrossed) continue;
+        bool wasThirstDeath = v.thirst >= 1.0f; // check before takeDamage() may push it further
+        if (v.hunger >= 1.0f) v.takeDamage(1, PartTarget::TORSO);
+        if (v.thirst >= 1.0f) v.takeDamage(2, PartTarget::TORSO);
+        if (!v.alive) {
+            panel.addMessage(v.name + " has died of " +
+                             (wasThirstDeath ? "dehydration." : "starvation."));
+            // Everything they had drops — same rule as enemy loot, nothing vanishes.
+            dropBag(v, v.bag);
+            corpses.push_back(makeCorpse(v, worldTime.minutes));
         }
     }
 }
@@ -1320,7 +1454,9 @@ void handleInput(SDL_Event& event, bool& running) {
                                 [vsnap = v]() {
                                     villagerExaminePanel.show(vsnap);
                                 }});
-                            if (!v.shopItems.empty() && !sleeping) {
+                            bool canTrade = v.occupation != Occupation::NONE
+                                          && v.occupation != Occupation::ELDER;
+                            if (canTrade && !sleeping) {
                                 int vi = (int)(&v - &villagers[0]);
                                 items.push_back({"Trade with " + v.name
                                                  + " (" + occupationName(v.occupation) + ")",
@@ -1713,7 +1849,11 @@ int main(int argc, char* argv[]) {
     player.worn[(int)EquipSlot::WAIST] = Items::beltPouch();
     player.addToContainer(Items::bread());
     player.addToContainer(Items::waterFlask());
-    for (int k = 0; k < 30; k++) player.addToContainer(Items::goldCoin());
+    {
+        Item startingGold = Items::goldCoin();
+        startingGold.count = 30;
+        player.addToContainer(std::move(startingGold));
+    }
 
     // Scatter a few items on the ground near the player for testing
     groundItems.push_back({player.x + 2, player.y,     Items::ironSword()});
@@ -1886,6 +2026,7 @@ int main(int argc, char* argv[]) {
 
                 // Needs advance every game-minute, same rate as normal play.
                 player.tickNeeds();
+                tickVillagerNeeds();
 
                 // Starvation/dehydration damage + message throttled to once per game hour.
                 if (worldTime.hour() != lastNeedsHour) {

@@ -187,8 +187,10 @@ struct PickupPanel {
             // Checkbox
             drawText(e.selected ? "[x]" : "[ ]", e.selected ? green : grey, px + 26, cy + 2);
 
-            // Name + weight
-            std::string label = e.item.name + "  (" + std::to_string(e.item.weight) + "g)";
+            // Name (+ count if a stack) + weight
+            std::string label = e.item.name;
+            if (e.item.count > 1) label += " x" + std::to_string(e.item.count);
+            label += "  (" + std::to_string(e.item.weight * e.item.count) + "g)";
             drawText(label, e.selected ? white : dim, px + 68, cy + 2);
 
             cy += ITEM_H;

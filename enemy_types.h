@@ -9,6 +9,13 @@
 
 namespace EnemyTypes {
 
+// Adds an item to an enemy's bag if it fits — every enemy that carries anything
+// gets a real container, never a bare floating list. Stacks with matching loot.
+inline void give(Enemy& e, Item item) {
+    if (!e.bag) e.bag = Items::backpack();
+    addToContainer(*e.bag, std::move(item));
+}
+
 // Fast, fragile. Dangerous only in groups.
 inline Enemy goblin(int x, int y) {
     Enemy e(x, y, "g", {60, 170, 60, 255},
@@ -21,7 +28,9 @@ inline Enemy goblin(int x, int y) {
     e.dexterity   = 14;
     e.disposition = -80;
     e.sync();
-    e.carried.push_back(Items::crudeDagger());
+    give(e, Items::crudeDagger());
+    give(e, Items::mushroom());   // a small ration — goblins forage
+    give(e, Items::waterFlask());
     return e;
 }
 
@@ -37,8 +46,10 @@ inline Enemy orcWarrior(int x, int y) {
     e.dexterity   = 7;
     e.disposition = -80;
     e.sync();
-    e.carried.push_back(Items::warAxe());
-    e.carried.push_back(Items::ironHelmet());
+    give(e, Items::warAxe());
+    give(e, Items::ironHelmet());
+    give(e, Items::bread());
+    give(e, Items::waterFlask());
     return e;
 }
 
@@ -54,7 +65,8 @@ inline Enemy skeleton(int x, int y) {
     e.dexterity   = 10;
     e.disposition = -80;
     e.sync();
-    e.carried.push_back(Items::boneClub());
+    give(e, Items::boneClub());
+    // Undead — no food/water ration; Race::SKELETON doesn't need either.
     return e;
 }
 
@@ -87,8 +99,10 @@ inline Enemy bandit(int x, int y) {
     e.dexterity   = 10;
     e.disposition = -80;
     e.sync();
-    e.carried.push_back(Items::ironSword());
-    e.carried.push_back(Items::leatherVest());
+    give(e, Items::ironSword());
+    give(e, Items::leatherVest());
+    give(e, Items::bread());
+    give(e, Items::waterFlask());
     return e;
 }
 

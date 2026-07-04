@@ -17,7 +17,7 @@ struct Corpse {
     bool decayed(int now) const { return now >= decaysAt; }
 };
 
-inline Corpse makeCorpse(const Enemy& e, int nowMinutes) {
+inline Corpse makeCorpse(const Actor& e, int nowMinutes) {
     Corpse c;
     c.x        = e.x;
     c.y        = e.y;

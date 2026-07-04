@@ -1,7 +1,9 @@
 #pragma once
 #include "item.h"
+#include "actor.h"
 #include <string>
 #include <vector>
+#include <optional>
 #include <SDL2/SDL.h>
 
 // ================================================================ Name tables
@@ -78,22 +80,18 @@ inline std::vector<Item> goodsFor(Occupation occ) {
 }
 
 // ================================================================ Villager
+//
+// A proper Actor subtype — same stat block, Body (6 parts), hunger/thirst and
+// tickNeeds()/takeDamage() as Player/Enemy. Nothing villager-specific duplicates what
+// Actor already provides.
 
-struct Villager {
-    int x = 0, y = 0;           // current tile
+struct Villager : Actor {
     int bedX = 0, bedY = 0;     // home bed object tile (blocksMove=true — not a valid path target)
     int sleepX = 0, sleepY = 0; // walkable tile adjacent to bed — actual path target
 
-    std::string name;
-    SDL_Color   color = {220, 185, 90, 255};
+    enum class State { WANDER, WALK_HOME, SLEEP, EAT, DRINK } state = State::SLEEP;
 
-    bool alive  = true;
-    int  energy = 0;
-    int  speed  = 80;   // a bit slower than the player
-
-    enum class State { WANDER, WALK_HOME, SLEEP } state = State::SLEEP;
-
-    // Path used when walking home (recomputed via A* with doors treated as open)
+    // Path used when walking home or to the well (recomputed via A* with doors open)
     std::vector<SDL_Point> homePath;
     int homePathIdx    = 0;
     int pathRetryCool  = 0; // ticks to wait before rebuilding a failed path
@@ -105,7 +103,16 @@ struct Villager {
     // Index rotates so households say different things.
     int greetIdx = 0;
 
-    // What this villager does for a living — determines flavor text and shopItems.
+    // What this villager does for a living — determines flavor text and bag contents.
     Occupation occupation = Occupation::NONE;
-    std::vector<Item> shopItems;
+
+    // Everything they carry — trade goods AND personal food, all physically inside this
+    // one real container (no floating/invisible items). Eating pulls a food item out of
+    // it; trading reads/writes it directly.
+    std::optional<Item> bag;
+
+    Villager() : Actor(0, 0, "@", {220, 185, 90, 255}, 80, Race::HUMAN) {
+        body = Body(25, 50, 35, 45);
+        sync();
+    }
 };
