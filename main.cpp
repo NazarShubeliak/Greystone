@@ -542,6 +542,21 @@ static const char* GREETINGS_NIGHT[] = {
     nullptr
 };
 
+// The Elder speaks differently from ordinary villagers — with authority, not small talk.
+static const char* ELDER_GREETINGS_DAY[] = {
+    "Welcome, traveler. This village is under my care — mind you keep the peace.",
+    "I've led this village through harder years than this one. What brings you here?",
+    "Every soul in this village answers to me, one way or another.",
+    "Speak your business plainly. I've no patience for riddles.",
+    "Mine is the final word in this village. Remember that.",
+    nullptr
+};
+static const char* ELDER_GREETINGS_NIGHT[] = {
+    "Even an elder needs rest. Come back with the sun.",
+    "The village sleeps under my watch. So should you.",
+    nullptr
+};
+
 static int countStrings(const char** arr) {
     int n = 0; while (arr[n]) n++; return n;
 }
@@ -1440,9 +1455,12 @@ void handleInput(SDL_Event& event, bool& running) {
                             if (!map[my][mx].visible) break;
                             bool sleeping = (v.state == Villager::State::SLEEP);
                             std::string talkLabel = "Talk to " + v.name;
+                            bool isElder = (v.occupation == Occupation::ELDER);
                             std::string greeting  = sleeping
-                                ? GREETINGS_NIGHT[v.greetIdx % countStrings(GREETINGS_NIGHT)]
-                                : GREETINGS_DAY  [v.greetIdx % countStrings(GREETINGS_DAY)];
+                                ? (isElder ? ELDER_GREETINGS_NIGHT[v.greetIdx % countStrings(ELDER_GREETINGS_NIGHT)]
+                                           : GREETINGS_NIGHT      [v.greetIdx % countStrings(GREETINGS_NIGHT)])
+                                : (isElder ? ELDER_GREETINGS_DAY  [v.greetIdx % countStrings(ELDER_GREETINGS_DAY)]
+                                           : GREETINGS_DAY        [v.greetIdx % countStrings(GREETINGS_DAY)]);
                             items.push_back({talkLabel,
                                 [greeting, vname = v.name, sleeping]() {
                                     if (sleeping)
