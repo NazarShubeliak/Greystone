@@ -22,7 +22,7 @@ Greystone — це roguelike RPG у фентезі-сеттингу, натхн�
 
 **Команда збірки:**
 ```
-C:/msys64/mingw64/bin/g++.exe -std=c++17 -O2 -o greystone.exe main.cpp astar.cpp map.cpp render.cpp -I"C:/msys64/mingw64/include/SDL2" -L"C:/msys64/mingw64/lib" -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf
+C:/msys64/mingw64/bin/g++.exe -std=c++17 -O2 -o greystone.exe src/main.cpp src/core/astar.cpp src/core/map.cpp src/render/render.cpp -Isrc/core -Isrc/render -Isrc/entities -Isrc/ui -I"C:/msys64/mingw64/include/SDL2" -L"C:/msys64/mingw64/lib" -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf
 ```
 
 ---
@@ -108,28 +108,37 @@ C:/msys64/mingw64/bin/g++.exe -std=c++17 -O2 -o greystone.exe main.cpp astar.cpp
 
 ## Файли
 
+Код лежить у `src/`, розбитий на 4 підпапки за роллю. Заголовки лишаються
+з пласкими `#include "file.h"` — компілятор шукає їх через `-I` на кожну
+підпапку (див. команду збірки вище), а не через відносний шлях.
+
 | Файл | Призначення |
 |---|---|
-| `main.cpp` | Головний цикл, input, AI, переходи секторів |
-| `actor.h` | Actor / Player / Enemy / Animal + Race + Body |
-| `item.h` | Item, EquipSlot, ItemType, фабрики предметів |
-| `inventory.h` | InventoryPanel (UI інвентаря) |
-| `item_examine_panel.h` | Панель перегляду предмета |
-| `astar.cpp/h` | A* пошук шляху, константи карти |
-| `map.cpp/h` | Tile, generateSector, updateVisibility |
-| `terrain.h` | TerrainDef / GroundDef / ObjectDef + BiomeType |
-| `render.cpp/h` | Ініціалізація текстур, рендер карти/акторів |
-| `overmap.h` | Оверкарта 100×100 |
-| `examine_panel.h` | Перегляд тайла (+ предмета на ньому) |
-| `cheat_console.h` | Чіт-консоль (backtick) |
-| `context_menu.h` | Контекстне меню з lambda-діями |
-| `ui.h` | Панель статів (O) |
-| `bottom_panel.h` | Лог повідомлень + HUD (HP/SPD/NRG/час, рядок статус-ефектів) |
-| `body_panel.h` | Стан частин тіла + голод/спрага (B) |
-| `effects_panel.h` | Панель активних бафів/дебафів (S) |
-| `wait_panel.h` | Вибір тривалості очікування (T) |
-| `confirm_panel.h` | Модальний Так/Ні попап (переривання очікування дебафом) |
-| `craft_panel.h` | Крафт: рецепти, інгредієнти, `countItems`/`consumeItems` |
-| `trade_panel.h` | Торгівля з NPC-торговцем: купівля/продаж |
-| `npc.h` | `Villager : Actor` — маршрути, домівка, `Occupation`/`bag` |
-| `villager_examine_panel.h` | Перегляд інформації про NPC |
+| `src/main.cpp` | Головний цикл, input, AI, переходи секторів |
+| `src/core/astar.cpp/h` | A* пошук шляху, константи карти |
+| `src/core/map.cpp/h` | Tile, generateSector, updateVisibility |
+| `src/core/terrain.h` | TerrainDef / GroundDef / ObjectDef + BiomeType |
+| `src/core/time_system.h` | WorldTime — хвилини/години/дні/сезони |
+| `src/core/overmap.h` | Оверкарта 100×100 |
+| `src/render/render.cpp/h` | Ініціалізація текстур, рендер карти/акторів |
+| `src/entities/actor.h` | Actor / Player / Enemy / Animal + Race + Body |
+| `src/entities/item.h` | Item, EquipSlot, ItemType, фабрики предметів |
+| `src/entities/npc.h` | `Villager : Actor` — маршрути, домівка, `Occupation`/`bag` |
+| `src/entities/corpse.h` | Труп актора після смерті |
+| `src/entities/enemy_types.h` | Фабрики типів ворогів |
+| `src/ui/inventory.h` | InventoryPanel (UI інвентаря) |
+| `src/ui/item_examine_panel.h` | Панель перегляду предмета |
+| `src/ui/examine_panel.h` | Перегляд тайла (+ предмета на ньому) |
+| `src/ui/cheat_console.h` | Чіт-консоль (backtick) |
+| `src/ui/context_menu.h` | Контекстне меню з lambda-діями |
+| `src/ui/ui.h` | Панель статів (O) |
+| `src/ui/bottom_panel.h` | Лог повідомлень + HUD (HP/SPD/NRG/час, рядок статус-ефектів) |
+| `src/ui/body_panel.h` | Стан частин тіла + голод/спрага (B) |
+| `src/ui/effects_panel.h` | Панель активних бафів/дебафів (S) |
+| `src/ui/wait_panel.h` | Вибір тривалості очікування (T) |
+| `src/ui/confirm_panel.h` | Модальний Так/Ні попап (переривання очікування дебафом) |
+| `src/ui/craft_panel.h` | Крафт: рецепти, інгредієнти, `countItems`/`consumeItems` |
+| `src/ui/trade_panel.h` | Торгівля з NPC-торговцем: купівля/продаж |
+| `src/ui/villager_examine_panel.h` | Перегляд інформації про NPC |
+| `src/ui/enemy_examine_panel.h` | Перегляд інформації про ворога |
+| `src/ui/pickup_panel.h` | Панель підбору предметів з землі |

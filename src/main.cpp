@@ -360,36 +360,20 @@ void enemyAct(Enemy& enemy) {
 
 void updateVillagers();    // forward declaration — defined after checkSectorTransition
 void tickVillagerNeeds();  // forward declaration — defined after updateVillagers
+void tickEnemyNeeds();     // forward declaration — defined below, called once per player action
 void interruptCrafting(bool playerHit); // forward declaration — defined in villager section
 
 // One world tick: give everyone energy, then let enemies spend theirs.
+// NOTE: this can run several times per single player action (see onPlayerAct()), with the
+// iteration count depending on player speed — so anything tied to real elapsed game time
+// (hunger/thirst/etc.) must NOT live in here. See tickEnemyNeeds().
 void tickWorld() {
     int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty());
     player.energy += effSpeed;
 
-    // Starvation/dehydration damage gated to once per crossed game-hour — tickWorld()
-    // itself can fire more than once per game-minute (see onPlayerAct()), so applying
-    // it unconditionally every call would kill a maxed-out enemy almost instantly.
-    static int lastEnemyNeedsHour = -1;
-    bool enemyHourCrossed = (lastEnemyNeedsHour != worldTime.hour());
-    lastEnemyNeedsHour = worldTime.hour();
-
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
         e.energy += e.speed;
-        e.tickNeeds();
-        if (enemyHourCrossed) {
-            if (e.hunger >= 1.0f) e.takeDamage(1, PartTarget::TORSO);
-            if (e.thirst >= 1.0f) e.takeDamage(2, PartTarget::TORSO);
-        }
-        if (!e.alive) {
-            std::string cause = e.thirst >= 1.0f ? "dies of dehydration."
-                               : e.hunger >= 1.0f ? "dies of starvation."
-                                                   : "bleeds to death.";
-            panel.addMessage(e.name + " " + cause);
-            dropEnemyLoot(e);
-            continue;
-        }
         while (e.energy >= 100) {
             enemyAct(e);
             e.energy -= 100;
@@ -410,6 +394,32 @@ void tickWorld() {
         std::remove_if(enemies.begin(), enemies.end(),
                        [](const Enemy& e){ return !e.alive; }),
         enemies.end());
+}
+
+// Hunger/thirst/bleed-out tick for enemies, once per player action — mirrors
+// tickVillagerNeeds(). Must NOT live inside tickWorld(): that function can run several
+// times per single player action depending on player speed, which would make enemy
+// needs advance faster the slower the player is instead of tracking real game time.
+void tickEnemyNeeds() {
+    static int lastEnemyNeedsHour = -1;
+    bool hourCrossed = (lastEnemyNeedsHour != worldTime.hour());
+    lastEnemyNeedsHour = worldTime.hour();
+
+    for (Enemy& e : enemies) {
+        if (!e.alive) continue;
+        e.tickNeeds();
+        if (hourCrossed) {
+            if (e.hunger >= 1.0f) e.takeDamage(1, PartTarget::TORSO);
+            if (e.thirst >= 1.0f) e.takeDamage(2, PartTarget::TORSO);
+        }
+        if (!e.alive) {
+            std::string cause = e.thirst >= 1.0f ? "dies of dehydration."
+                               : e.hunger >= 1.0f ? "dies of starvation."
+                                                   : "bleeds to death.";
+            panel.addMessage(e.name + " " + cause);
+            dropEnemyLoot(e);
+        }
+    }
 }
 
 // Called after every player action.
@@ -452,6 +462,7 @@ void onPlayerAct() {
     // Needs advance and starvation damage once per player action (not per world tick)
     player.tickNeeds();
     tickVillagerNeeds();
+    tickEnemyNeeds();
     if (player.hunger >= 1.0f) {
         player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
         player.sync();
@@ -975,6 +986,7 @@ void checkSectorTransition() {
                    overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     overmap.reveal(playerSectorX, playerSectorY);
 
+    attackTarget = nullptr; // enemies.clear() below would otherwise dangle it
     enemies.clear();
     corpses.clear();
     initEnemy();
@@ -1160,6 +1172,7 @@ void doTeleport(int newSX, int newSY) {
                    playerSectorX, playerSectorY,
                    overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     overmap.reveal(playerSectorX, playerSectorY);
+    attackTarget = nullptr; // enemies.clear() below would otherwise dangle it
     enemies.clear();
     corpses.clear();
     initEnemy();
@@ -1186,6 +1199,9 @@ void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_BACKQUOTE) {
         if (console.visible) console.close();
         else                 console.open();
+        // The same keypress also queues an SDL_TEXTINPUT("`") right behind this
+        // event once text input is active; discard it so it doesn't land in input.
+        SDL_FlushEvent(SDL_TEXTINPUT);
         return;
     }
 
