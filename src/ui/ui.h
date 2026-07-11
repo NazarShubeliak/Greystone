@@ -3,6 +3,8 @@
 #include <SDL2/SDL_ttf.h>
 #include <string>
 #include "actor.h"
+#include "panel_style.h"
+#include "menu_hub.h"
 
 extern Player player;
 
@@ -11,76 +13,56 @@ struct UI {
 
     void toggle() { showStats = !showStats; }
 
+    // Two columns filling the hub's full width: vitals+stats on the left,
+    // combat+needs on the right. Borderless — the hub already dims the
+    // background — this only lays out content within it.
     void renderStats(SDL_Renderer* r, TTF_Font* f) {
         if (!showStats) return;
 
-        const int W  = 310;
-        const int H  = 460;
-        const int X  = 50;
-        const int Y  = 50;
-        const int LH = 24;
-        const int LX = X + 16;
+        const int LH   = 24;
+        const int PAD  = 40;
+        const int LX   = PAD;
+        const int RX   = SCREEN_WIDTH / 2 + PAD;
+        const int COLW = SCREEN_WIDTH / 2 - PAD * 2;
+        int ly = MenuHub::TAB_H + 24;
+        int ry = MenuHub::TAB_H + 24;
 
-        // Background + border
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 12, 12, 16, 240);
-        SDL_Rect bg = {X, Y, W, H};
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(r, 130, 110, 50, 255);
-        SDL_RenderDrawRect(r, &bg);
-
-        int cy = Y + 10;
-
-        // Title
-        txt(r, f, "CHARACTER", LX, cy, {200, 170, 60, 255});
-        cy += LH + 2;
-        hline(r, X, cy, W);
-        cy += 8;
-
-        // HP
+        // ── Left column: vitals + stats ─────────────────────────────────
         std::string hp = "HP: " + std::to_string(player.hp) + " / " + std::to_string(player.maxHp);
-        txt(r, f, hp.c_str(), LX, cy, {220, 70, 70, 255});
-        cy += LH;
+        txt(r, f, hp.c_str(), LX, ly, {220, 70, 70, 255});
+        ly += LH;
 
-        // Speed (base minus hunger/thirst penalty — matches actual turn rate in tickWorld)
         {
             int needsPen  = player.needsSpeedPenalty();
             int effSpeed  = std::max(1, player.speed - needsPen);
             std::string spdStr = "Speed:  " + std::to_string(effSpeed);
-            txt(r, f, spdStr.c_str(), LX, cy, {190, 190, 190, 255});
+            txt(r, f, spdStr.c_str(), LX, ly, {190, 190, 190, 255});
             if (needsPen != 0) {
                 int cx = LX + (int)spdStr.size() * 9;
                 std::string penStr = " (-" + std::to_string(needsPen) + " needs)";
-                txt(r, f, penStr.c_str(), cx, cy, {220, 90, 70, 255});
+                txt(r, f, penStr.c_str(), cx, ly, {220, 90, 70, 255});
             }
         }
-        cy += LH;
+        ly += LH;
 
-        // Race + Age
         std::string meta = std::string(raceTraits[(int)player.race].name)
                          + "  age " + std::to_string(player.age);
-        txt(r, f, meta.c_str(), LX, cy, {110, 105, 90, 255});
-        cy += LH + 4;
-        hline(r, X, cy, W);
-        cy += 8;
+        txt(r, f, meta.c_str(), LX, ly, {110, 105, 90, 255});
+        ly += LH + 4;
+        hline(r, LX, ly, COLW);
+        ly += 8;
 
-        // ── Stats with item bonuses ───────────────────────────────────────
-        statRow(r, f, "Strength",     player.strength, player.strItemBonus(), player.needsStrPenalty(), LX, cy); cy += LH;
-        statRow(r, f, "Dexterity",    player.dexterity, player.dexItemBonus(), 0, LX, cy); cy += LH;
-        statRow(r, f, "Intelligence", player.intelligence, 0, 0, LX, cy);                  cy += LH;
-        statRow(r, f, "Constitution", player.constitution, player.conItemBonus(), 0, LX, cy); cy += LH;
-        statRow(r, f, "Perception",   player.perception,  0, 0, LX, cy);                   cy += LH;
-        statRow(r, f, "Charisma",     player.charisma,    0, 0, LX, cy);                   cy += LH + 4;
+        statRow(r, f, "Strength",     player.strength, player.strItemBonus(), player.needsStrPenalty(), LX, ly); ly += LH;
+        statRow(r, f, "Dexterity",    player.dexterity, player.dexItemBonus(), 0, LX, ly); ly += LH;
+        statRow(r, f, "Intelligence", player.intelligence, 0, 0, LX, ly);                  ly += LH;
+        statRow(r, f, "Constitution", player.constitution, player.conItemBonus(), 0, LX, ly); ly += LH;
+        statRow(r, f, "Perception",   player.perception,  0, 0, LX, ly);                   ly += LH;
+        statRow(r, f, "Charisma",     player.charisma,    0, 0, LX, ly);                   ly += LH;
 
-        hline(r, X, cy, W);
-        cy += 8;
+        // ── Right column: combat + needs ────────────────────────────────
+        txt(r, f, "COMBAT", RX, ry, {180, 155, 55, 255});
+        ry += LH;
 
-        // ── Combat ────────────────────────────────────────────────────────
-        txt(r, f, "COMBAT", LX, cy, {180, 155, 55, 255});
-        cy += LH;
-
-        // Attack damage breakdown
         int strBonus  = (player.effectiveStr() - 10) / 2;
         int weapDmg   = player.weaponDamage();
         int totalAtk  = 5 + strBonus + weapDmg - 1;
@@ -89,17 +71,15 @@ struct UI {
             atkLine += "  (weapon +" + std::to_string(weapDmg - 1) + ")";
         if (strBonus > 0)
             atkLine += "  (str +" + std::to_string(strBonus) + ")";
-        txt(r, f, atkLine.c_str(), LX, cy, {210, 180, 80, 255});
-        cy += LH;
+        txt(r, f, atkLine.c_str(), RX, ry, {210, 180, 80, 255});
+        ry += LH;
 
-        // Defense breakdown
         int def = player.totalDefense();
         std::string defLine = "Defense:  " + std::to_string(def);
         if (def > 0) defLine += "  (reduces incoming dmg)";
-        txt(r, f, defLine.c_str(), LX, cy, {80, 175, 210, 255});
-        cy += LH;
+        txt(r, f, defLine.c_str(), RX, ry, {80, 175, 210, 255});
+        ry += LH;
 
-        // Weapon name
         std::string weapName = "Weapon:   ";
         if (player.worn[(int)EquipSlot::HAND_R].has_value())
             weapName += player.worn[(int)EquipSlot::HAND_R]->name;
@@ -107,15 +87,16 @@ struct UI {
             weapName += player.worn[(int)EquipSlot::HAND_L]->name;
         else
             weapName += "Unarmed";
-        txt(r, f, weapName.c_str(), LX, cy, {150, 145, 130, 255});
-        cy += LH + 4;
+        txt(r, f, weapName.c_str(), RX, ry, {150, 145, 130, 255});
+        ry += LH + 4;
 
-        hline(r, X, cy, W);
-        cy += 8;
+        hline(r, RX, ry, COLW);
+        ry += 8;
 
-        // ── Needs (compact) ───────────────────────────────────────────────
-        needsLine(r, f, "Hunger", player.hunger, LX, cy);  cy += LH;
-        needsLine(r, f, "Thirst", player.thirst, LX, cy);
+        txt(r, f, "NEEDS", RX, ry, {180, 155, 55, 255});
+        ry += LH;
+        needsLine(r, f, "Hunger", player.hunger, RX, ry);  ry += LH;
+        needsLine(r, f, "Thirst", player.thirst, RX, ry);
     }
 
 private:

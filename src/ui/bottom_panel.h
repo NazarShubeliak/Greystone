@@ -7,6 +7,7 @@
 #include "astar.h"
 #include "actor.h"
 #include "time_system.h"
+#include "context_menu.h"
 
 enum class PanelMode { LOG, DIALOGUE };
 
@@ -20,6 +21,23 @@ struct BottomPanel {
     void addMessage(const std::string& msg) {
         log.push_front(msg);
         if ((int)log.size() > MAX_LOG) log.pop_back();
+    }
+
+    // --- Dialogue --- (see startDialogue()/endDialogue() below)
+    std::string npcName, npcLine;
+    std::vector<MenuItem> dialogueOptions;
+    int dialogueHover = -1;
+
+    void startDialogue(const std::string& name, const std::string& line, std::vector<MenuItem> options) {
+        mode            = PanelMode::DIALOGUE;
+        npcName         = name;
+        npcLine         = line;
+        dialogueOptions = std::move(options);
+        dialogueHover   = -1;
+    }
+    void endDialogue() {
+        mode = PanelMode::LOG;
+        dialogueOptions.clear();
     }
 
     // --- Render ---
@@ -41,14 +59,89 @@ struct BottomPanel {
         SDL_RenderDrawLine(renderer, 0, SCREEN_HEIGHT - HUD_H, SCREEN_WIDTH, SCREEN_HEIGHT - HUD_H);
 
         switch (mode) {
-            case PanelMode::LOG:      renderLog(renderer, font, TOP, LOG_H);   break;
-            case PanelMode::DIALOGUE: renderLog(renderer, font, TOP, LOG_H);   break;
+            case PanelMode::LOG:      renderLog(renderer, font, TOP, LOG_H);      break;
+            case PanelMode::DIALOGUE: renderDialogue(renderer, font, TOP, LOG_H); break;
         }
 
         renderHUD(renderer, font, player, wt);
     }
 
+    // ---- dialogue input -------------------------------------------------------
+    static constexpr int DLG_ROW_H = 20;
+
+    // Row rects share this geometry with renderDialogue() so hit-testing can't drift.
+    std::vector<SDL_Rect> dialogueRowRects(int top) const {
+        int y = top + 8 + DLG_ROW_H + 6; // below the NPC's line
+        std::vector<SDL_Rect> rects;
+        for (size_t i = 0; i < dialogueOptions.size(); i++) {
+            rects.push_back({8, y, SCREEN_WIDTH - 16, DLG_ROW_H});
+            y += DLG_ROW_H;
+        }
+        return rects;
+    }
+
+    void handleMotion(int mx, int my) {
+        if (mode != PanelMode::DIALOGUE) return;
+        auto rects = dialogueRowRects(MAP_VIEW_HEIGHT);
+        dialogueHover = -1;
+        for (size_t i = 0; i < rects.size(); i++)
+            if (mx >= rects[i].x && mx < rects[i].x + rects[i].w &&
+                my >= rects[i].y && my < rects[i].y + rects[i].h)
+                dialogueHover = (int)i;
+    }
+
+    // Returns true if the click was consumed (dialogue is modal while open).
+    bool handleClick(int mx, int my) {
+        if (mode != PanelMode::DIALOGUE) return false;
+        auto rects = dialogueRowRects(MAP_VIEW_HEIGHT);
+        for (size_t i = 0; i < rects.size(); i++) {
+            if (mx >= rects[i].x && mx < rects[i].x + rects[i].w &&
+                my >= rects[i].y && my < rects[i].y + rects[i].h) {
+                // Copy the action out first — the callback may replace
+                // dialogueOptions (e.g. "Ask about work" rebuilds the list).
+                auto action = dialogueOptions[i].action;
+                if (action) action();
+                return true;
+            }
+        }
+        return true; // still swallow — clicking the world shouldn't act while talking
+    }
+
+    // Returns true if consumed. ESC and 1-9 shortcuts.
+    bool handleKey(SDL_Keycode key) {
+        if (mode != PanelMode::DIALOGUE) return false;
+        if (key == SDLK_ESCAPE) { endDialogue(); return true; }
+        if (key >= SDLK_1 && key <= SDLK_9) {
+            int idx = (int)(key - SDLK_1);
+            if (idx < (int)dialogueOptions.size()) {
+                auto action = dialogueOptions[idx].action;
+                if (action) action();
+            }
+        }
+        return true;
+    }
+
 private:
+    // ---- dialogue -------------------------------------------------------------
+    void renderDialogue(SDL_Renderer* r, TTF_Font* f, int top, int logH) {
+        int y = top + 8;
+        std::string line = npcName + ": " + npcLine;
+        renderText(r, f, line.c_str(), 8, y, {210, 195, 140, 255});
+
+        auto rects = dialogueRowRects(top);
+        for (size_t i = 0; i < dialogueOptions.size(); i++) {
+            bool hov = ((int)i == dialogueHover);
+            if (hov) {
+                SDL_SetRenderDrawColor(r, 45, 40, 25, 255);
+                SDL_RenderFillRect(r, &rects[i]);
+            }
+            SDL_Color col = hov ? SDL_Color{230, 210, 120, 255} : SDL_Color{180, 175, 155, 255};
+            std::string label = std::to_string(i + 1) + ". " + dialogueOptions[i].label;
+            renderText(r, f, label.c_str(), 8, rects[i].y + 1, col);
+        }
+    }
+
+
     // ---- log ----------------------------------------------------------------
     void renderLog(SDL_Renderer* r, TTF_Font* f, int top, int logH) {
         const int LINE_H  = 18;
@@ -69,33 +162,44 @@ private:
     void renderHUD(SDL_Renderer* r, TTF_Font* f, const Player& p, const WorldTime& wt) {
         const int Y      = SCREEN_HEIGHT - 44;
         const int Y2     = Y + 20;
-        const int BAR_X  = 85;
         const int BAR_W  = 130;
         const int BAR_H  = 13;
+        const int GAP    = 14;
+
+        // Left side is a running cursor — each element starts after the previous
+        // one's *actual* rendered width, so long values (e.g. 3-digit HP) never
+        // get overdrawn by whatever comes next.
+        int x = 8;
 
         // HP label
         std::string hpStr = "HP: " + std::to_string(p.hp) + "/" + std::to_string(p.maxHp);
-        renderText(r, f, hpStr.c_str(), 8, Y, {255, 80, 80, 255});
+        renderText(r, f, hpStr.c_str(), x, Y, {255, 80, 80, 255});
+        x += textWidth(f, hpStr.c_str()) + GAP;
 
         // HP bar
-        SDL_Rect barBg = {BAR_X, Y + 1, BAR_W, BAR_H};
+        SDL_Rect barBg = {x, Y + 1, BAR_W, BAR_H};
         SDL_SetRenderDrawColor(r, 60, 0, 0, 255);
         SDL_RenderFillRect(r, &barBg);
         float ratio = (float)p.hp / p.maxHp;
         SDL_Color fillCol = ratio > 0.5f ? SDL_Color{0, 200, 0, 255} :
                             ratio > 0.25f ? SDL_Color{255, 165, 0, 255} :
                                             SDL_Color{220, 0, 0, 255};
-        SDL_Rect barFill = {BAR_X, Y + 1, (int)(BAR_W * ratio), BAR_H};
+        SDL_Rect barFill = {x, Y + 1, (int)(BAR_W * ratio), BAR_H};
         SDL_SetRenderDrawColor(r, fillCol.r, fillCol.g, fillCol.b, 255);
         SDL_RenderFillRect(r, &barFill);
         SDL_SetRenderDrawColor(r, 120, 120, 120, 255);
         SDL_RenderDrawRect(r, &barBg);
+        x += BAR_W + GAP;
 
         // Speed / Energy — speed shown after hunger/thirst penalty (matches tickWorld's effSpeed)
         int effSpeed = std::max(1, p.speed - p.needsSpeedPenalty());
         SDL_Color spdCol = p.needsSpeedPenalty() > 0 ? SDL_Color{220, 140, 90, 255} : SDL_Color{180, 180, 180, 255};
-        renderText(r, f, ("SPD: " + std::to_string(effSpeed)).c_str(), 230, Y, spdCol);
-        renderText(r, f, ("NRG: " + std::to_string(p.energy)).c_str(), 320, Y, {80, 180, 255, 255});
+        std::string spdStr = "SPD: " + std::to_string(effSpeed);
+        renderText(r, f, spdStr.c_str(), x, Y, spdCol);
+        x += textWidth(f, spdStr.c_str()) + GAP;
+
+        std::string nrgStr = "NRG: " + std::to_string(p.energy);
+        renderText(r, f, nrgStr.c_str(), x, Y, {80, 180, 255, 255});
 
         // Time + date
         int h = wt.hour();
@@ -149,6 +253,12 @@ private:
     }
 
     // ---- util ---------------------------------------------------------------
+    int textWidth(TTF_Font* f, const char* text) {
+        int w, h;
+        TTF_SizeText(f, text, &w, &h);
+        return w;
+    }
+
     void renderText(SDL_Renderer* r, TTF_Font* f,
                     const char* text, int x, int y, SDL_Color col) {
         SDL_Surface* s = TTF_RenderText_Solid(f, text, col);

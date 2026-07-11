@@ -22,6 +22,8 @@
 #include "confirm_panel.h"
 #include "effects_panel.h"
 #include "trade_panel.h"
+#include "panel_style.h"
+#include "menu_hub.h"
 #include "render.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -56,14 +58,26 @@ enum class PendingAct { NONE, PICKUP_ONE, PICKUP_PANEL, INTERACT, AUTO_INTERACT 
 PendingAct pendingAct  = PendingAct::NONE;
 int        pendingActX = -1, pendingActY = -1;
 
-// When chasing an enemy, store a pointer so path can be recalculated each step.
-Enemy* attackTarget = nullptr;
+// When chasing an enemy (or hostile villager), store a pointer so path can be
+// recalculated each step. Separate pointers because Enemy/Villager aren't
+// related by a common polymorphic base pointer anywhere else in the codebase.
+Enemy*    attackTarget         = nullptr;
+Villager* attackTargetVillager = nullptr;
+
+// Walking up to a villager to talk to them — same recalculated-path chase as
+// attackTargetVillager, but starts a dialogue instead of a fight on arrival.
+Villager* talkTargetVillager = nullptr;
 
 int hoverX = 0, hoverY = 0;
 int lastHoverX = -1, lastHoverY = -1;
 std::vector<SDL_Point> previewPath;
 
 int cameraX = 0, cameraY = 0;
+
+SDL_Window* window       = nullptr;
+bool        isFullscreen = false; // set true once the window is actually created fullscreen
+TTF_Font*   font         = nullptr; // set once in main(); handleInput() needs it for tab-bar hit-testing
+
 UI ui;
 BottomPanel panel;
 BodyPanel bodyPanel;
@@ -79,6 +93,7 @@ EnemyExaminePanel   enemyExaminePanel;
 VillagerExaminePanel villagerExaminePanel;
 CraftPanel craftPanel;
 PickupPanel pickupPanel;
+MenuHub hub;
 
 WaitPanel    waitPanel;
 ConfirmPanel needsConfirmPanel;
@@ -131,35 +146,39 @@ Enemy* getEnemyAt(int x, int y) {
     return nullptr;
 }
 
-// Returns the first ground item at (x, y), or nullptr if none.
-GroundItem* getGroundItemAt(int x, int y) {
-    for (GroundItem& gi : groundItems)
-        if (gi.x == x && gi.y == y) return &gi;
+Villager* getVillagerAt(int x, int y) {
+    for (Villager& v : villagers)
+        if (v.isAlive() && v.x == x && v.y == y) return &v;
     return nullptr;
 }
 
-// Returns copies of all items at (x, y) in groundItems order.
+// Returns the first ground item at (x, y) in the player's CURRENT sector, or
+// nullptr if none — the same local (x,y) coordinate range is reused by every
+// sector, so a sector check is required or items from other sectors bleed in.
+GroundItem* getGroundItemAt(int x, int y) {
+    for (GroundItem& gi : groundItems)
+        if (gi.x == x && gi.y == y && gi.sectorX == playerSectorX && gi.sectorY == playerSectorY)
+            return &gi;
+    return nullptr;
+}
+
+// Returns copies of all items at (x, y) in groundItems order, current sector only.
 std::vector<Item> getGroundItemsAt(int x, int y) {
     std::vector<Item> result;
     for (const GroundItem& gi : groundItems)
-        if (gi.x == x && gi.y == y) result.push_back(gi.item);
+        if (gi.x == x && gi.y == y && gi.sectorX == playerSectorX && gi.sectorY == playerSectorY)
+            result.push_back(gi.item);
     return result;
 }
 
 // Pick up items at (gx, gy) according to selection mask (parallel to groundItems order at that tile).
 void doPickup(int gx, int gy, const std::vector<bool>& sel) {
-    int selIdx = 0;
-    for (int i = (int)groundItems.size() - 1; i >= 0; i--) {
-        if (groundItems[i].x != gx || groundItems[i].y != gy) continue;
-        // sel is in forward order; we iterate backward, so map accordingly
-        // Build forward list first to align indices
-        (void)selIdx;
-        // We'll do it in a forward pass below
-    }
-    // Forward pass to align with sel[]
+    // Forward pass to align with sel[] — current sector only (see getGroundItemAt()).
     std::vector<int> atTile;
     for (int i = 0; i < (int)groundItems.size(); i++)
-        if (groundItems[i].x == gx && groundItems[i].y == gy) atTile.push_back(i);
+        if (groundItems[i].x == gx && groundItems[i].y == gy &&
+            groundItems[i].sectorX == playerSectorX && groundItems[i].sectorY == playerSectorY)
+            atTile.push_back(i);
 
     // Erase selected in reverse order to preserve indices
     for (int j = (int)atTile.size() - 1; j >= 0; j--) {
@@ -271,20 +290,33 @@ void dropBag(const Actor& who, const std::optional<Item>& bag) {
     if (!bag) return;
     std::string list;
     for (const Item& item : bag->contents) {
-        groundItems.push_back({who.x, who.y, item});
+        groundItems.push_back({who.x, who.y, item, playerSectorX, playerSectorY});
         if (!list.empty()) list += ", ";
         list += item.name;
     }
     if (!list.empty()) panel.addMessage(who.name + " drops: " + list + ".");
     Item emptyBag = *bag;
     emptyBag.contents.clear();
-    groundItems.push_back({who.x, who.y, emptyBag});
+    groundItems.push_back({who.x, who.y, emptyBag, playerSectorX, playerSectorY});
 }
 
 // Drop everything an enemy had and leave a corpse.
 void dropEnemyLoot(const Enemy& enemy) {
     dropBag(enemy, enemy.bag);
-    corpses.push_back(makeCorpse(enemy, worldTime.minutes));
+    corpses.push_back(makeCorpse(enemy, worldTime.minutes, playerSectorX, playerSectorY));
+}
+
+// Same as dropEnemyLoot(), for a villager killed by the player (or anything
+// else) — also drops what they were wearing, not just what they carried, so
+// nothing survives them as an invisible "worn" item.
+void dropVillagerLoot(Villager& v) {
+    dropBag(v, v.bag);
+    if (v.outfit) {
+        groundItems.push_back({v.x, v.y, *v.outfit, playerSectorX, playerSectorY});
+        panel.addMessage(v.name + "'s " + v.outfit->name + " falls to the ground.");
+        v.outfit.reset();
+    }
+    corpses.push_back(makeCorpse(v, worldTime.minutes, playerSectorX, playerSectorY));
 }
 
 // ------------------------------------------------------------------ turn system
@@ -358,6 +390,107 @@ void enemyAct(Enemy& enemy) {
     }
 }
 
+// Rolls fight-or-flee for one villager and commits them to it — occupation
+// sets the base courage, a real weapon in their bag (e.g. Blacksmith stock)
+// adds to it. No side effects beyond this villager; callers decide whether
+// to also alert anyone else (see villagerReactToAttack() below).
+// victimName empty = this villager is the one being hit; otherwise it's a
+// witness reacting to seeing victimName attacked (changes the message only).
+void rollCombatReaction(Villager& v, const std::string& victimName) {
+    int fightChance;
+    switch (v.occupation) {
+        case Occupation::BLACKSMITH: fightChance = 70; break;
+        case Occupation::WOODCUTTER: fightChance = 50; break;
+        case Occupation::ELDER:      fightChance = 35; break;
+        default:                     fightChance = 15; break;
+    }
+    if (v.weaponDmg() > 0) fightChance += 20;
+
+    bool willFight = (rand() % 100) < fightChance;
+    v.state       = willFight ? Villager::State::FIGHT : Villager::State::FLEE;
+    v.disposition = -80;
+    v.homePath.clear(); // interrupts whatever path they were following (home/field/well)
+
+    if (victimName.empty()) {
+        panel.addMessage(willFight ? (v.name + " draws a weapon and turns to fight!")
+                                    : (v.name + " flees in terror!"));
+    } else {
+        panel.addMessage(willFight
+            ? (v.name + " sees " + victimName + " under attack and rushes to help!")
+            : (v.name + " sees " + victimName + " under attack and flees in terror!"));
+    }
+}
+
+// Called once, the moment a villager first takes damage from the player.
+// Rolls their own fight/flee, then alerts any other villager close enough to
+// have witnessed it (visible tile, within range) — each witness rolls their
+// own reaction independently via rollCombatReaction(), NOT this function, so
+// the alert can't chain further out and swallow the whole village at once.
+void villagerReactToAttack(Villager& v) {
+    if (v.state == Villager::State::FIGHT || v.state == Villager::State::FLEE) return;
+    rollCombatReaction(v, "");
+
+    const int WITNESS_RANGE = 12;
+    for (Villager& other : villagers) {
+        if (&other == &v || !other.alive) continue;
+        if (other.state == Villager::State::FIGHT || other.state == Villager::State::FLEE) continue;
+        int dx = other.x - v.x, dy = other.y - v.y;
+        if (dx * dx + dy * dy > WITNESS_RANGE * WITNESS_RANGE) continue;
+        if (!map[other.y][other.x].visible) continue; // must actually be able to see it happen
+        rollCombatReaction(other, v.name);
+    }
+}
+
+// Per-tick behavior once a villager is FIGHT/FLEE — mirrors enemyAct()'s
+// aggro/flee pattern so the two hostile-AI loops stay recognizably the same shape.
+void villagerCombatAct(Villager& v) {
+    int dx = player.x - v.x;
+    int dy = player.y - v.y;
+
+    // A fighting villager who takes enough damage breaks and runs, same
+    // threshold spirit as Enemy::wantsToFlee().
+    if (v.state == Villager::State::FIGHT && v.maxHp > 0 && (float)v.hp / v.maxHp < 0.30f)
+        v.state = Villager::State::FLEE;
+
+    if (v.state == Villager::State::FLEE) {
+        int dist2 = dx * dx + dy * dy;
+        if (dist2 > 20 * 20) { v.state = Villager::State::WANDER; return; } // safe now
+        int fx = v.x - (dx != 0 ? (dx > 0 ? 1 : -1) : 0);
+        int fy = v.y - (dy != 0 ? (dy > 0 ? 1 : -1) : 0);
+        fx = std::max(1, std::min(MAP_WIDTH  - 2, fx));
+        fy = std::max(1, std::min(MAP_HEIGHT - 2, fy));
+        if (map[fy][fx].walkable() && !isTileOccupied(fx, fy) &&
+            !(fx == player.x && fy == player.y)) {
+            v.x = fx; v.y = fy;
+        }
+        return;
+    }
+
+    // FIGHT
+    std::vector<SDL_Point> path = findPath(v.x, v.y, player.x, player.y);
+    if ((int)path.size() < 2) return;
+
+    SDL_Point next = path[1];
+    if (next.x == player.x && next.y == player.y) {
+        PartTarget part   = randomHitPart();
+        int        rawDmg = 3 + (v.strength - 10) / 2 + v.weaponDmg();
+        if (part == PartTarget::HEAD) rawDmg = (int)(rawDmg * 1.5f);
+        int damage = std::max(1, rawDmg - player.totalDefense());
+        player.takeDamage(damage, part);
+        std::string withWeapon;
+        if (v.bag)
+            for (const Item& item : v.bag->contents)
+                if (item.type == ItemType::WEAPON) { withWeapon = " with " + item.name; break; }
+        panel.addMessage(v.name + " hits your " + partName(part)
+                         + withWeapon + " for " + std::to_string(damage) + " damage.");
+        if (!player.isAlive())
+            panel.addMessage("You have been slain by " + v.name + ".");
+    } else if (!isTileOccupied(next.x, next.y)) {
+        v.x = next.x;
+        v.y = next.y;
+    }
+}
+
 void updateVillagers();    // forward declaration — defined after checkSectorTransition
 void tickVillagerNeeds();  // forward declaration — defined after updateVillagers
 void tickEnemyNeeds();     // forward declaration — defined below, called once per player action
@@ -390,6 +523,8 @@ void tickWorld() {
 
     // Drop attack target if it's dead, then remove all dead enemies.
     if (attackTarget && !attackTarget->alive) attackTarget = nullptr;
+    if (attackTargetVillager && !attackTargetVillager->alive) attackTargetVillager = nullptr;
+    if (talkTargetVillager && !talkTargetVillager->alive) talkTargetVillager = nullptr;
     enemies.erase(
         std::remove_if(enemies.begin(), enemies.end(),
                        [](const Enemy& e){ return !e.alive; }),
@@ -492,7 +627,7 @@ void onPlayerAct() {
                 panel.addMessage("You finish crafting " + craftPendingItem.name + ".");
             else {
                 // No room — drop at feet
-                groundItems.push_back({player.x, player.y, craftPendingItem});
+                groundItems.push_back({player.x, player.y, craftPendingItem, playerSectorX, playerSectorY});
                 panel.addMessage("You finish crafting " + craftPendingItem.name
                                  + " but have no room — it drops at your feet.");
             }
@@ -529,6 +664,10 @@ void onPlayerAct() {
 }
 
 void updateCamera();
+void toggleFullscreen();
+void openMenuTab(MenuTab t);
+void closeMenuHub();
+void toggleMenuTab(MenuTab t);
 void doTeleport(int newSX, int newSY);
 void interactWithObject(int tx, int ty);
 void spawnVillagers(bool isVillage);
@@ -570,6 +709,44 @@ static const char* ELDER_GREETINGS_NIGHT[] = {
 
 static int countStrings(const char** arr) {
     int n = 0; while (arr[n]) n++; return n;
+}
+
+// Picks the right greeting line for a villager — Elder speaks differently,
+// and both flavors differ between asleep and awake. Shared by the context
+// menu's "Talk to X" and the walk-up-then-talk arrival in updatePlayer().
+std::string greetingFor(const Villager& v) {
+    bool sleeping = (v.state == Villager::State::SLEEP);
+    bool isElder  = (v.occupation == Occupation::ELDER);
+    return sleeping
+        ? (isElder ? ELDER_GREETINGS_NIGHT[v.greetIdx % countStrings(ELDER_GREETINGS_NIGHT)]
+                   : GREETINGS_NIGHT      [v.greetIdx % countStrings(GREETINGS_NIGHT)])
+        : (isElder ? ELDER_GREETINGS_DAY  [v.greetIdx % countStrings(ELDER_GREETINGS_DAY)]
+                   : GREETINGS_DAY        [v.greetIdx % countStrings(GREETINGS_DAY)]);
+}
+
+// Response options for talking to villagers[vi] — Trade (if they sell
+// anything), Ask about their work (shows another line, rebuilds this same
+// list so the player can keep going), Farewell. Not a real branching tree —
+// one level of depth, reused every time "Ask" is picked.
+std::vector<MenuItem> buildDialogueOptions(int vi) {
+    std::vector<MenuItem> opts;
+    if (vi < 0 || vi >= (int)villagers.size()) return opts;
+    Villager& v = villagers[vi];
+
+    bool canTrade = v.occupation != Occupation::NONE && v.occupation != Occupation::ELDER;
+    if (canTrade) {
+        opts.push_back({"Trade with " + v.name + " (" + occupationName(v.occupation) + ")",
+            [vi]() { panel.endDialogue(); tradePanel.show(vi); }});
+    }
+    if (v.occupation != Occupation::NONE) {
+        opts.push_back({"Ask about their work", [vi]() {
+            if (vi < 0 || vi >= (int)villagers.size()) return;
+            Villager& tv = villagers[vi];
+            panel.startDialogue(tv.name, occupationFlavor(tv.occupation), buildDialogueOptions(vi));
+        }});
+    }
+    opts.push_back({"Farewell", []() { panel.endDialogue(); }});
+    return opts;
 }
 
 void spawnVillagers(bool isVillage) {
@@ -663,6 +840,7 @@ void spawnVillagers(bool isVillage) {
             loaves.count = 6;
             addToContainer(*v.bag, std::move(loaves));
         }
+        v.outfit = Items::commonClothes(); // never "naked with a backpack"
 
         // Start sleeping if it's night, else place them near their bed
         if (worldTime.darkness() > 0.5f) {
@@ -749,7 +927,7 @@ void interruptCrafting(bool playerHit) {
     if (player.addToContainer(partial))
         panel.addMessage(msg + partial.name + " saved to inventory.");
     else {
-        groundItems.push_back({player.x, player.y, partial});
+        groundItems.push_back({player.x, player.y, partial, playerSectorX, playerSectorY});
         panel.addMessage(msg + partial.name + " dropped at your feet.");
     }
 }
@@ -921,6 +1099,10 @@ void updateVillagers() {
             case Villager::State::SLEEP:
                 v.x = v.bedX; v.y = v.bedY; // stay on the bed
                 break;
+            case Villager::State::FLEE:
+            case Villager::State::FIGHT:
+                villagerCombatAct(v);
+                break;
         }
     }
 }
@@ -947,9 +1129,8 @@ void tickVillagerNeeds() {
         if (!v.alive) {
             panel.addMessage(v.name + " has died of " +
                              (wasThirstDeath ? "dehydration." : "starvation."));
-            // Everything they had drops — same rule as enemy loot, nothing vanishes.
-            dropBag(v, v.bag);
-            corpses.push_back(makeCorpse(v, worldTime.minutes));
+            // Everything they had (and wore) drops — same rule as enemy loot, nothing vanishes.
+            dropVillagerLoot(v);
         }
     }
 }
@@ -986,9 +1167,13 @@ void checkSectorTransition() {
                    overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     overmap.reveal(playerSectorX, playerSectorY);
 
-    attackTarget = nullptr; // enemies.clear() below would otherwise dangle it
+    // Enemies/villagers don't persist across sectors yet (no save system) — they
+    // respawn fresh each visit. Corpses/groundItems DO persist (tagged by sector,
+    // filtered at render/interaction time), so no clearing needed for those here.
+    attackTarget         = nullptr; // enemies.clear() below would otherwise dangle it
+    attackTargetVillager = nullptr; // spawnVillagers() below clears villagers, same reason
+    talkTargetVillager    = nullptr;
     enemies.clear();
-    corpses.clear();
     initEnemy();
     spawnVillagers(overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     currentPath.clear();
@@ -1066,7 +1251,7 @@ void interactWithObject(int tx, int ty) {
         // Harvested plants go directly to inventory; overflow falls to the ground.
         auto gather = [&](Item item) {
             if (!player.addToContainer(item))
-                groundItems.push_back({tx, ty, item});
+                groundItems.push_back({tx, ty, item, playerSectorX, playerSectorY});
         };
 
         switch (oid) {
@@ -1120,7 +1305,7 @@ void interactWithObject(int tx, int ty) {
         tile.objectHp = 0;
 
         auto drop = [&](Item item) {
-            groundItems.push_back({tx, ty, std::move(item)});
+            groundItems.push_back({tx, ty, std::move(item), playerSectorX, playerSectorY});
         };
 
         switch (oid) {
@@ -1172,9 +1357,12 @@ void doTeleport(int newSX, int newSY) {
                    playerSectorX, playerSectorY,
                    overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     overmap.reveal(playerSectorX, playerSectorY);
-    attackTarget = nullptr; // enemies.clear() below would otherwise dangle it
+    // Corpses/groundItems persist across sectors (tagged + filtered by sector);
+    // only enemies/villagers respawn fresh, same as checkSectorTransition().
+    attackTarget         = nullptr; // enemies.clear() below would otherwise dangle it
+    attackTargetVillager = nullptr; // spawnVillagers() below clears villagers, same reason
+    talkTargetVillager    = nullptr;
     enemies.clear();
-    corpses.clear();
     initEnemy();
     spawnVillagers(overmap.sectors[playerSectorY][playerSectorX].hasVillage);
     currentPath.clear();
@@ -1195,6 +1383,13 @@ void doTeleport(int newSX, int newSY) {
 void handleInput(SDL_Event& event, bool& running) {
     if (event.type == SDL_QUIT) running = false;
 
+    // Alt+Enter toggles fullscreen/windowed from anywhere.
+    if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_RETURN &&
+        (event.key.keysym.mod & KMOD_ALT)) {
+        toggleFullscreen();
+        return;
+    }
+
     // Backtick (~) opens/closes the cheat console from anywhere.
     if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_BACKQUOTE) {
         if (console.visible) console.close();
@@ -1207,6 +1402,28 @@ void handleInput(SDL_Event& event, bool& running) {
 
     // Console intercepts all input while open (except the backtick above).
     if (console.handleEvent(event, overmap, worldTime)) return;
+
+    // Hub tab strip takes priority over whichever tab's own input handling
+    // below, so clicking a tab always switches — even out of Craft/Map,
+    // which otherwise intercept all input themselves further down.
+    if (hub.visible() && event.type == SDL_MOUSEBUTTONDOWN &&
+        event.button.button == SDL_BUTTON_LEFT) {
+        if (hub.closeButtonAt(event.button.x, event.button.y)) { closeMenuHub(); return; }
+        MenuTab clicked = hub.tabAt(font, event.button.x, event.button.y);
+        if (clicked != MenuTab::NONE) { openMenuTab(clicked); return; }
+    }
+
+    // Dialogue intercepts input while active — a click on the world shouldn't
+    // act while the player is mid-conversation.
+    if (panel.mode == PanelMode::DIALOGUE) {
+        if (event.type == SDL_MOUSEMOTION)
+            panel.handleMotion(event.motion.x, event.motion.y);
+        if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT)
+            panel.handleClick(event.button.x, event.button.y);
+        if (event.type == SDL_KEYDOWN)
+            panel.handleKey(event.key.keysym.sym);
+        return;
+    }
 
     // Trade panel intercepts input while visible.
     if (tradePanel.visible) {
@@ -1279,6 +1496,17 @@ void handleInput(SDL_Event& event, bool& running) {
     // Craft panel intercepts input while visible.
     if (craftPanel.visible()) {
         if (event.type == SDL_KEYDOWN) {
+            SDL_Keycode k = event.key.keysym.sym;
+            // C closes it, mirroring O/B/I/M which all toggle open/closed on the
+            // same key. These also switch straight to another tab, same as
+            // clicking the tab bar — 's' stays reserved for recipe-list
+            // navigation (down), so Effects isn't reachable by hotkey here.
+            if (k == SDLK_c) { closeMenuHub();                       return; }
+            if (k == SDLK_o) { openMenuTab(MenuTab::CHARACTER);      return; }
+            if (k == SDLK_b) { openMenuTab(MenuTab::BODY);           return; }
+            if (k == SDLK_i) { openMenuTab(MenuTab::INVENTORY);      return; }
+            if (k == SDLK_m) { openMenuTab(MenuTab::MAP);            return; }
+
             Item outItem; int outMins = 0;
             if (craftPanel.handleKey(event.key.keysym.sym, player, outItem, outMins)) {
                 isCrafting       = true;
@@ -1307,7 +1535,14 @@ void handleInput(SDL_Event& event, bool& running) {
     if (overmap.visible) {
         if (event.type == SDL_KEYDOWN) {
             switch (event.key.keysym.sym) {
-                case SDLK_m:     overmap.close(); break;
+                case SDLK_m:     closeMenuHub(); break;
+                // Same tab-switch hotkeys as everywhere else — Map has no WASD
+                // navigation of its own, so none of these conflict.
+                case SDLK_o:     openMenuTab(MenuTab::CHARACTER); break;
+                case SDLK_b:     openMenuTab(MenuTab::BODY);      break;
+                case SDLK_s:     openMenuTab(MenuTab::EFFECTS);   break;
+                case SDLK_i:     openMenuTab(MenuTab::INVENTORY); break;
+                case SDLK_c:     openMenuTab(MenuTab::CRAFT);     break;
                 case SDLK_UP:    overmap.moveCam( 0, -1); break;
                 case SDLK_DOWN:  overmap.moveCam( 0,  1); break;
                 case SDLK_LEFT:  overmap.moveCam(-1,  0); break;
@@ -1319,13 +1554,13 @@ void handleInput(SDL_Event& event, bool& running) {
     }
 
     if (event.type == SDL_KEYDOWN) {
-        if (event.key.keysym.sym == SDLK_o)      ui.toggle();
-        if (event.key.keysym.sym == SDLK_b)      bodyPanel.toggle();
-        if (event.key.keysym.sym == SDLK_s)      effectsPanel.toggle();
+        if (event.key.keysym.sym == SDLK_o)      toggleMenuTab(MenuTab::CHARACTER);
+        if (event.key.keysym.sym == SDLK_b)      toggleMenuTab(MenuTab::BODY);
+        if (event.key.keysym.sym == SDLK_s)      toggleMenuTab(MenuTab::EFFECTS);
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
-        if (event.key.keysym.sym == SDLK_m)      overmap.open(playerSectorX, playerSectorY);
-        if (event.key.keysym.sym == SDLK_i)      inventoryPanel.toggle();
-        if (event.key.keysym.sym == SDLK_c)      craftPanel.open();
+        if (event.key.keysym.sym == SDLK_m)      toggleMenuTab(MenuTab::MAP);
+        if (event.key.keysym.sym == SDLK_i)      toggleMenuTab(MenuTab::INVENTORY);
+        if (event.key.keysym.sym == SDLK_c)      toggleMenuTab(MenuTab::CRAFT);
         if (event.key.keysym.sym == SDLK_t && !isCrafting && !isWaiting)
             waitPanel.show(worldTime);
         if (event.key.keysym.sym == SDLK_g && !isCrafting) pickUpAtPlayer();
@@ -1338,24 +1573,29 @@ void handleInput(SDL_Event& event, bool& running) {
             }
             return;
         }
+        // Hub is modal while any of its tabs is open — swallow the rest of
+        // gameplay's keys (wait/pickup) here, but ESC always closes it.
+        if (hub.visible()) {
+            if (event.key.keysym.sym == SDLK_ESCAPE) closeMenuHub();
+            return;
+        }
         if (event.key.keysym.sym == SDLK_SPACE &&
             !pickupPanel.visible && !contextMenu.visible)
             onPlayerAct();  // wait one turn
-        if (event.key.keysym.sym == SDLK_ESCAPE) {
-            if (inventoryPanel.visible) inventoryPanel.close();
-            else                        running = false;
-        }
+        if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
     }
 
     if (event.type == SDL_MOUSEBUTTONDOWN) {
         int mouseX = event.button.x / TILE_SIZE + cameraX;
         int mouseY = event.button.y / TILE_SIZE + cameraY;
 
-        // Any click closes examine panels.
-        if (effectsPanel.visible) {
-            effectsPanel.hide();
+        // Character/Body/Effects have no click handling of their own — swallow
+        // clicks so they don't fall through to map movement/attacks. Inventory
+        // handles its own clicks further below; Craft/Map already returned
+        // earlier in this function.
+        if (hub.activeTab == MenuTab::CHARACTER || hub.activeTab == MenuTab::BODY ||
+            hub.activeTab == MenuTab::EFFECTS)
             return;
-        }
         if (itemExaminePanel.visible) {
             itemExaminePanel.handleClick(event.button.x, event.button.y);
             return;
@@ -1415,7 +1655,39 @@ void handleInput(SDL_Event& event, bool& running) {
                         onPlayerAct();
                     } else {
                         // Walk toward enemy — path recalculates each step via attackTarget
-                        attackTarget = enemy;
+                        attackTarget         = enemy;
+                        attackTargetVillager = nullptr;
+                        talkTargetVillager   = nullptr;
+                        pendingAct   = PendingAct::NONE;
+                        currentPath  = findPath(player.x, player.y, mouseX, mouseY);
+                        pathIndex    = 1;
+                    }
+                } else if (Villager* v = getVillagerAt(mouseX, mouseY);
+                           v && map[mouseY][mouseX].visible && v->isHostile()) {
+                    // Left click only auto-attacks once they're already hostile
+                    // (mid-fight or fleeing from an earlier hit) — a neutral
+                    // villager can only be attacked deliberately, via the
+                    // right-click "Attack" menu, so a stray click never kills
+                    // an innocent by accident.
+                    if (attackDist <= 1) {
+                        PartTarget part   = randomHitPart();
+                        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
+                        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
+                        v->takeDamage(damage, part);
+                        panel.addMessage("You hit " + v->name + "'s " + partName(part)
+                                         + " for " + std::to_string(damage) + " damage.");
+                        if (!v->isAlive()) {
+                            panel.addMessage(v->name + " dies.");
+                            dropVillagerLoot(*v);
+                        } else {
+                            villagerReactToAttack(*v);
+                        }
+                        onPlayerAct();
+                    } else {
+                        // Walk toward them — path recalculates each step via attackTargetVillager.
+                        attackTargetVillager = v;
+                        attackTarget         = nullptr;
+                        talkTargetVillager   = nullptr;
                         pendingAct   = PendingAct::NONE;
                         currentPath  = findPath(player.x, player.y, mouseX, mouseY);
                         pathIndex    = 1;
@@ -1449,7 +1721,8 @@ void handleInput(SDL_Event& event, bool& running) {
                                 }
                                 onPlayerAct();
                             } else {
-                                attackTarget = enemy;
+                                attackTarget         = enemy;
+                                attackTargetVillager = nullptr;
                                 pendingAct   = PendingAct::NONE;
                                 currentPath  = findPath(player.x, player.y, ex, ey);
                                 pathIndex    = 1;
@@ -1458,7 +1731,7 @@ void handleInput(SDL_Event& event, bool& running) {
                         {"Examine", [enemy]() {
                             enemyExaminePanel.show(*enemy);
                         }}
-                    });
+                    }, font);
                 } else {
                     // Non-enemy tile: show context menu if explored
                     if (map[mouseY][mouseX].explored) {
@@ -1466,36 +1739,76 @@ void handleInput(SDL_Event& event, bool& running) {
                         std::vector<MenuItem> items;
 
                         // Villager interaction
+                        bool hasVillagerHere = false;
                         for (Villager& v : villagers) {
                             if (!v.alive || v.x != mx || v.y != my) continue;
                             if (!map[my][mx].visible) break;
-                            bool sleeping = (v.state == Villager::State::SLEEP);
+                            hasVillagerHere = true;
                             std::string talkLabel = "Talk to " + v.name;
-                            bool isElder = (v.occupation == Occupation::ELDER);
-                            std::string greeting  = sleeping
-                                ? (isElder ? ELDER_GREETINGS_NIGHT[v.greetIdx % countStrings(ELDER_GREETINGS_NIGHT)]
-                                           : GREETINGS_NIGHT      [v.greetIdx % countStrings(GREETINGS_NIGHT)])
-                                : (isElder ? ELDER_GREETINGS_DAY  [v.greetIdx % countStrings(ELDER_GREETINGS_DAY)]
-                                           : GREETINGS_DAY        [v.greetIdx % countStrings(GREETINGS_DAY)]);
-                            items.push_back({talkLabel,
-                                [greeting, vname = v.name, sleeping]() {
-                                    if (sleeping)
-                                        panel.addMessage(vname + ": " + greeting);
-                                    else
-                                        panel.addMessage(vname + " says: \"" + greeting + "\"");
+                            {
+                                int viTalk = (int)(&v - &villagers[0]);
+                                items.push_back({talkLabel, [viTalk]() {
+                                    if (viTalk < 0 || viTalk >= (int)villagers.size()) return;
+                                    Villager& tv = villagers[viTalk];
+                                    if (!tv.alive) return;
+                                    int dist = std::max(std::abs(tv.x - player.x),
+                                                        std::abs(tv.y - player.y));
+                                    if (dist <= 1) {
+                                        if (tv.state == Villager::State::SLEEP)
+                                            panel.addMessage(tv.name + ": " + greetingFor(tv));
+                                        else
+                                            panel.startDialogue(tv.name, greetingFor(tv), buildDialogueOptions(viTalk));
+                                    } else {
+                                        // Walk up to them first — arrival triggers the
+                                        // greeting in updatePlayer(), same idea as chasing
+                                        // an enemy/hostile villager to attack.
+                                        talkTargetVillager    = &tv;
+                                        attackTarget          = nullptr;
+                                        attackTargetVillager  = nullptr;
+                                        pendingAct   = PendingAct::NONE;
+                                        currentPath  = findPath(player.x, player.y, tv.x, tv.y);
+                                        pathIndex    = 1;
+                                    }
                                 }});
-                            items.push_back({"Examine " + v.name,
+                            }
+                            items.push_back({"Examine",
                                 [vsnap = v]() {
                                     villagerExaminePanel.show(vsnap);
                                 }});
-                            bool canTrade = v.occupation != Occupation::NONE
-                                          && v.occupation != Occupation::ELDER;
-                            if (canTrade && !sleeping) {
-                                int vi = (int)(&v - &villagers[0]);
-                                items.push_back({"Trade with " + v.name
-                                                 + " (" + occupationName(v.occupation) + ")",
-                                    [vi]() { tradePanel.show(vi); }});
-                            }
+                            int vi = (int)(&v - &villagers[0]);
+                            // Trading now happens through the Talk dialogue (buildDialogueOptions),
+                            // not as its own menu item — one less redundant entry here.
+                            items.push_back({"Attack", [vi]() {
+                                if (vi < 0 || vi >= (int)villagers.size()) return;
+                                Villager& tv = villagers[vi];
+                                if (!tv.alive) return;
+                                int dist = std::max(std::abs(tv.x - player.x),
+                                                    std::abs(tv.y - player.y));
+                                if (dist <= 1) {
+                                    PartTarget part   = randomHitPart();
+                                    int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
+                                    if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
+                                    tv.takeDamage(damage, part);
+                                    panel.addMessage("You hit " + tv.name + "'s " + partName(part)
+                                                     + " for " + std::to_string(damage) + " damage.");
+                                    if (!tv.isAlive()) {
+                                        panel.addMessage(tv.name + " dies.");
+                                        dropVillagerLoot(tv);
+                                    } else {
+                                        villagerReactToAttack(tv);
+                                    }
+                                    onPlayerAct();
+                                } else {
+                                    // Walk toward them first — path recalculates each
+                                    // step via attackTargetVillager, same as chasing an enemy.
+                                    attackTargetVillager = &tv;
+                                    attackTarget          = nullptr;
+                                    talkTargetVillager     = nullptr;
+                                    pendingAct   = PendingAct::NONE;
+                                    currentPath  = findPath(player.x, player.y, tv.x, tv.y);
+                                    pathIndex    = 1;
+                                }
+                            }});
                             break; // one NPC per tile is enough
                         }
 
@@ -1504,6 +1817,7 @@ void handleInput(SDL_Event& event, bool& running) {
                         bool        corpseFreshHere = false;
                         bool        hasCorpseHere   = false;
                         for (const Corpse& c : corpses) {
+                            if (c.sectorX != playerSectorX || c.sectorY != playerSectorY) continue;
                             if (c.x == mx && c.y == my && map[my][mx].visible) {
                                 corpseNameHere  = c.name;
                                 corpseFreshHere = c.isFresh(worldTime.minutes);
@@ -1555,8 +1869,10 @@ void handleInput(SDL_Event& event, bool& running) {
 
                         if (map[my][mx].walkable()) {
                             items.push_back({"Move here", [mx, my]() {
-                                pendingAct   = PendingAct::NONE;
-                                attackTarget = nullptr;
+                                pendingAct           = PendingAct::NONE;
+                                attackTarget         = nullptr;
+                                attackTargetVillager = nullptr;
+                                talkTargetVillager    = nullptr;
                                 currentPath  = findPath(player.x, player.y, mx, my);
                                 pathIndex    = 1;
                             }});
@@ -1629,8 +1945,9 @@ void handleInput(SDL_Event& event, bool& running) {
                             }
                         }
 
-                        // Examine — tile info + items + corpse if present
-                        {
+                        // Examine — tile info + items + corpse if present. Skipped when a
+                        // villager is here — their own "Examine <name>" already covers it.
+                        if (!hasVillagerHere) {
                             bool hasCN = hasCorpseHere;
                             std::string cn = corpseNameHere;
                             bool cf = corpseFreshHere;
@@ -1649,7 +1966,7 @@ void handleInput(SDL_Event& event, bool& running) {
                             };
                             items.push_back(std::move(examItem));
                         }
-                        contextMenu.show(event.button.x, event.button.y, items);
+                        contextMenu.show(event.button.x, event.button.y, items, font);
                     } else {
                         currentPath.clear();
                         pathIndex = 0;
@@ -1730,8 +2047,57 @@ bool updatePlayer() {
         }
         currentPath.clear();
         pathIndex = 0;
-        pendingAct   = PendingAct::NONE;
-        attackTarget = nullptr;
+        pendingAct           = PendingAct::NONE;
+        attackTarget         = nullptr;
+        attackTargetVillager = nullptr;
+        talkTargetVillager   = nullptr;
+        onPlayerAct();
+        return true;
+    }
+
+    // Same, for a hostile villager blocking the path (neutral ones don't
+    // block/auto-attack — chasing one down never happens without a deliberate
+    // Attack first).
+    Villager* vBlocker = getVillagerAt(next.x, next.y);
+    if (vBlocker && vBlocker->alive && vBlocker->isHostile()) {
+        PartTarget part   = randomHitPart();
+        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
+        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
+        vBlocker->takeDamage(damage, part);
+        panel.addMessage("You hit " + vBlocker->name + "'s " + partName(part)
+                         + " for " + std::to_string(damage) + " damage.");
+        if (!vBlocker->isAlive()) {
+            panel.addMessage(vBlocker->name + " dies.");
+            dropVillagerLoot(*vBlocker);
+        } else {
+            villagerReactToAttack(*vBlocker);
+        }
+        currentPath.clear();
+        pathIndex = 0;
+        pendingAct           = PendingAct::NONE;
+        attackTarget         = nullptr;
+        attackTargetVillager = nullptr;
+        talkTargetVillager   = nullptr;
+        onPlayerAct();
+        return true;
+    }
+
+    // Reached the villager we were walking up to talk to — start the
+    // conversation instead of trying to step onto (through) them. Doesn't
+    // fire if they turned hostile en route (the block above catches that
+    // first and attacks instead).
+    if (talkTargetVillager && talkTargetVillager->alive &&
+        next.x == talkTargetVillager->x && next.y == talkTargetVillager->y) {
+        Villager& tv = *talkTargetVillager;
+        if (tv.state == Villager::State::SLEEP)
+            panel.addMessage(tv.name + ": " + greetingFor(tv));
+        else
+            panel.startDialogue(tv.name, greetingFor(tv),
+                                buildDialogueOptions((int)(&tv - &villagers[0])));
+        currentPath.clear();
+        pathIndex = 0;
+        pendingAct         = PendingAct::NONE;
+        talkTargetVillager = nullptr;
         onPlayerAct();
         return true;
     }
@@ -1748,13 +2114,33 @@ bool updatePlayer() {
     pathIndex++;
     onPlayerAct();
 
-    // If chasing an enemy, recalculate path to their current position each step.
+    // If chasing an enemy (or hostile villager), recalculate path to their
+    // current position each step.
     if (attackTarget) {
         if (!attackTarget->alive) {
             attackTarget = nullptr;
         } else {
             currentPath = findPath(player.x, player.y,
                                    attackTarget->x, attackTarget->y);
+            pathIndex = (currentPath.size() >= 2) ? 1 : (int)currentPath.size();
+        }
+    }
+    if (attackTargetVillager) {
+        if (!attackTargetVillager->alive) {
+            attackTargetVillager = nullptr;
+        } else {
+            currentPath = findPath(player.x, player.y,
+                                   attackTargetVillager->x, attackTargetVillager->y);
+            pathIndex = (currentPath.size() >= 2) ? 1 : (int)currentPath.size();
+        }
+    }
+    // Same, for walking up to talk — keeps aiming at them if they wander off mid-approach.
+    if (talkTargetVillager) {
+        if (!talkTargetVillager->alive) {
+            talkTargetVillager = nullptr;
+        } else {
+            currentPath = findPath(player.x, player.y,
+                                   talkTargetVillager->x, talkTargetVillager->y);
             pathIndex = (currentPath.size() >= 2) ? 1 : (int)currentPath.size();
         }
     }
@@ -1766,7 +2152,9 @@ bool updatePlayer() {
         lastHoverY = -1;
         previewPath.clear();
 
-        attackTarget = nullptr;
+        attackTarget         = nullptr;
+        attackTargetVillager = nullptr;
+        talkTargetVillager   = nullptr;
         if (pendingAct != PendingAct::NONE) {
             int dist = std::max(std::abs(player.x - pendingActX),
                                 std::abs(player.y - pendingActY));
@@ -1864,6 +2252,61 @@ void updateCamera() {
     if (cameraY > MAP_HEIGHT - tilesY) cameraY = MAP_HEIGHT - tilesY;
 }
 
+// Alt+Enter handler. Borderless fullscreen desktop <-> a fixed windowed size.
+// After switching, re-reads the real window size from SDL (rather than assuming),
+// then updates the SCREEN_WIDTH/HEIGHT globals that everything else lays out from.
+void toggleFullscreen() {
+    isFullscreen = !isFullscreen;
+    if (isFullscreen) {
+        SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    } else {
+        SDL_SetWindowFullscreen(window, 0);
+        SDL_SetWindowSize(window, WINDOWED_WIDTH, WINDOWED_HEIGHT);
+        SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
+    int w, h;
+    SDL_GetWindowSize(window, &w, &h);
+    applyScreenSize(w, h);
+    updateCamera();
+}
+
+// ------------------------------------------------------------------ menu hub
+//
+// Character/Body/Effects/Inventory/Craft/Map share one full-screen hub with
+// a tab strip on top. Exactly one of the underlying panels' own visibility
+// flags is ever true at a time — these three functions are the only place
+// that's allowed to flip them, so the hub's activeTab can't drift out of
+// sync with what's actually on screen.
+
+void openMenuTab(MenuTab t) {
+    ui.showStats = bodyPanel.visible = effectsPanel.visible = inventoryPanel.visible = false;
+    if (craftPanel.visible()) craftPanel.close();
+    if (overmap.visible)      overmap.close();
+
+    hub.activeTab = t;
+    switch (t) {
+        case MenuTab::CHARACTER: ui.showStats          = true; break;
+        case MenuTab::BODY:      bodyPanel.visible      = true; break;
+        case MenuTab::EFFECTS:   effectsPanel.visible   = true; break;
+        case MenuTab::INVENTORY: inventoryPanel.visible = true; break;
+        case MenuTab::CRAFT:     craftPanel.open();             break;
+        case MenuTab::MAP:       overmap.open(playerSectorX, playerSectorY); break;
+        default: break;
+    }
+}
+
+void closeMenuHub() {
+    ui.showStats = bodyPanel.visible = effectsPanel.visible = inventoryPanel.visible = false;
+    if (craftPanel.visible()) craftPanel.close();
+    if (overmap.visible)      overmap.close();
+    hub.activeTab = MenuTab::NONE;
+}
+
+void toggleMenuTab(MenuTab t) {
+    if (hub.activeTab == t) closeMenuHub();
+    else                    openMenuTab(t);
+}
+
 // ------------------------------------------------------------------ main
 
 int main(int argc, char* argv[]) {
@@ -1890,13 +2333,13 @@ int main(int argc, char* argv[]) {
     }
 
     // Scatter a few items on the ground near the player for testing
-    groundItems.push_back({player.x + 2, player.y,     Items::ironSword()});
-    groundItems.push_back({player.x - 2, player.y,     Items::goldRing()});
-    groundItems.push_back({player.x,     player.y + 2, Items::ironHelmet()});
-    groundItems.push_back({player.x + 1, player.y + 1, Items::leatherVest()});
-    groundItems.push_back({player.x - 1, player.y - 1, Items::leatherBoots()});
-    groundItems.push_back({player.x + 1, player.y,     Items::torch()});
-    groundItems.push_back({player.x - 1, player.y,     Items::lantern()});
+    groundItems.push_back({player.x + 2, player.y,     Items::ironSword(),   playerSectorX, playerSectorY});
+    groundItems.push_back({player.x - 2, player.y,     Items::goldRing(),    playerSectorX, playerSectorY});
+    groundItems.push_back({player.x,     player.y + 2, Items::ironHelmet(),  playerSectorX, playerSectorY});
+    groundItems.push_back({player.x + 1, player.y + 1, Items::leatherVest(), playerSectorX, playerSectorY});
+    groundItems.push_back({player.x - 1, player.y - 1, Items::leatherBoots(),playerSectorX, playerSectorY});
+    groundItems.push_back({player.x + 1, player.y,     Items::torch(),       playerSectorX, playerSectorY});
+    groundItems.push_back({player.x - 1, player.y,     Items::lantern(),     playerSectorX, playerSectorY});
 
     // Give everyone starting energy so they're ready to act immediately.
     player.energy = player.speed;
@@ -1906,12 +2349,23 @@ int main(int argc, char* argv[]) {
     inventoryPanel.onMessage = [](const std::string& msg) { panel.addMessage(msg); };
     inventoryPanel.onAct     = []() { onPlayerAct(); };
 
-    SDL_Window* window = SDL_CreateWindow("Greystone",
+    // Start borderless-fullscreen at the desktop's current resolution.
+    SDL_DisplayMode desktopMode;
+    SDL_GetCurrentDisplayMode(0, &desktopMode);
+    applyScreenSize(desktopMode.w, desktopMode.h);
+
+    window = SDL_CreateWindow("Greystone",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+        SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP);
+    isFullscreen = true;
+
+    // The window manager may not grant exactly desktopMode's size — re-read to be sure.
+    int actualW, actualH;
+    SDL_GetWindowSize(window, &actualW, &actualH);
+    applyScreenSize(actualW, actualH);
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    TTF_Font* font = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 16);
+    font = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 16);
 
     SDL_Surface* playerSurface = TTF_RenderText_Solid(font, player.symbol, player.color);
     playerTexture = SDL_CreateTextureFromSurface(renderer, playerSurface);
@@ -1932,6 +2386,14 @@ int main(int argc, char* argv[]) {
     while (running) {
         while (SDL_PollEvent(&event))
             handleInput(event, running);
+
+        // Craft/Map can close themselves internally (ESC in browse state,
+        // starting a craft, M inside the overmap's own key handler already
+        // routes through closeMenuHub() — but startCraft() flips CraftPanel's
+        // state directly) — reconcile so the hub doesn't stay "open" on an
+        // empty tab.
+        if (hub.activeTab == MenuTab::CRAFT && !craftPanel.visible()) hub.activeTab = MenuTab::NONE;
+        if (hub.activeTab == MenuTab::MAP   && !overmap.visible)      hub.activeTab = MenuTab::NONE;
 
         // Resume crafting from a partial item (set by ItemExaminePanel)
         if (itemExaminePanel.pendingResumeCraft) {
@@ -2026,7 +2488,7 @@ int main(int argc, char* argv[]) {
             else gok = false;
 
             if (gok && !player.addToContainer(gi))
-                groundItems.push_back({player.x, player.y, gi});
+                groundItems.push_back({player.x, player.y, gi, playerSectorX, playerSectorY});
             console.pendingGive.clear();
         }
 
@@ -2119,6 +2581,7 @@ int main(int argc, char* argv[]) {
 
         // Corpses render first — ground items and actors draw on top.
         for (const Corpse& c : corpses) {
+            if (c.sectorX != playerSectorX || c.sectorY != playerSectorY) continue;
             if (!map[c.y][c.x].visible) continue;
             int sx = (c.x - cameraX) * TILE_SIZE;
             int sy = (c.y - cameraY) * TILE_SIZE;
@@ -2139,10 +2602,12 @@ int main(int argc, char* argv[]) {
             // Count items per tile
             std::map<std::pair<int,int>, int> tileCount;
             for (const auto& gi : groundItems)
-                if (map[gi.y][gi.x].visible) tileCount[{gi.x, gi.y}]++;
+                if (gi.sectorX == playerSectorX && gi.sectorY == playerSectorY && map[gi.y][gi.x].visible)
+                    tileCount[{gi.x, gi.y}]++;
 
             std::set<std::pair<int,int>> rendered;
             for (const auto& gi : groundItems) {
+                if (gi.sectorX != playerSectorX || gi.sectorY != playerSectorY) continue;
                 if (!map[gi.y][gi.x].visible) continue;
                 auto key = std::make_pair(gi.x, gi.y);
                 if (!rendered.insert(key).second) continue; // already rendered this tile
@@ -2183,23 +2648,38 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        ui.renderStats(renderer, font);
         panel.render(renderer, font, player, worldTime);
-        bodyPanel.render(renderer, font, player);
-        effectsPanel.render(renderer, font, player);
+
+        // Character/Body/Effects/Inventory/Craft/Map share one full-screen
+        // hub with a tab strip on top — exactly one of them is visible.
+        if (hub.visible()) {
+            hub.renderBackground(renderer);
+            ui.renderStats(renderer, font);
+            bodyPanel.render(renderer, font, player);
+            effectsPanel.render(renderer, font, player);
+            inventoryPanel.render(renderer, font, player);
+            craftPanel.render(renderer, font, player);
+            overmap.render(renderer, font, playerSectorX, playerSectorY);
+            hub.renderTabBar(renderer, font);
+        }
+
+        // Remaining contextual popups (tied to a specific object/NPC, not
+        // "reference" screens) keep their own independent dim + rendering.
+        bool anyPopupOpen = tradePanel.visible || examinePanel.visible || itemExaminePanel.visible
+            || enemyExaminePanel.visible || villagerExaminePanel.visible || pickupPanel.visible
+            || waitPanel.visible || needsConfirmPanel.visible;
+        if (anyPopupOpen) PanelStyle::dimBackdrop(renderer);
+
         tradePanel.render(renderer, font, player, villagers);
         if (examinePanel.visible)
             examinePanel.render(renderer, font, map[examinePanel.tileY][examinePanel.tileX]);
-        inventoryPanel.render(renderer, font, player);
         itemExaminePanel.render(renderer, font);
         enemyExaminePanel.render(renderer, font);
         villagerExaminePanel.render(renderer, font);
-        craftPanel.render(renderer, font, player);
         pickupPanel.render(renderer, font);
         waitPanel.render(renderer, font, worldTime);
         needsConfirmPanel.render(renderer, font);
         contextMenu.render(renderer, font);
-        overmap.render(renderer, font, playerSectorX, playerSectorY);
         console.render(renderer, font);
 
         if (!player.isAlive()) {

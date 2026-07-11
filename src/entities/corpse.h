@@ -8,6 +8,7 @@ static constexpr int CORPSE_FRESH_MINUTES = 2 * 24 * 60; // fresh for 2 days (ne
 
 struct Corpse {
     int         x, y;
+    int         sectorX, sectorY; // which overmap sector this corpse belongs to
     std::string name;
     SDL_Color   color;
     int         diedAt;     // worldTime.minutes when killed
@@ -17,10 +18,12 @@ struct Corpse {
     bool decayed(int now) const { return now >= decaysAt; }
 };
 
-inline Corpse makeCorpse(const Actor& e, int nowMinutes) {
+inline Corpse makeCorpse(const Actor& e, int nowMinutes, int sectorX, int sectorY) {
     Corpse c;
     c.x        = e.x;
     c.y        = e.y;
+    c.sectorX  = sectorX;
+    c.sectorY  = sectorY;
     c.name     = e.name;
     // Dim to ~60% brightness so corpse is visible but clearly "dead".
     c.color    = {(Uint8)(e.color.r * 3 / 5),

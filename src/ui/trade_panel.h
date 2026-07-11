@@ -2,6 +2,7 @@
 #include "astar.h"
 #include "actor.h"
 #include "npc.h"
+#include "panel_style.h"
 #include "craft_panel.h" // reuse CraftPanel::countItems/consumeItems for Gold Coin bookkeeping
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -143,16 +144,10 @@ struct TradePanel {
 
         int X = panelX(), Y = panelY(merch, p), H = panelH(merch, p);
 
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 8, 8, 12, 248);
-        SDL_Rect bg = {X, Y, W, H};
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(r, 130, 110, 50, 255);
-        SDL_RenderDrawRect(r, &bg);
+        PanelStyle::frame(r, f, X, Y, W, H, nullptr);
 
         int ty = Y + 10;
-        txt(r, f, ("Trading with " + merch.name).c_str(), X + 12, ty, {200, 170, 60, 255});
+        txt(r, f, ("Trading with " + merch.name).c_str(), X + 12, ty, PanelStyle::TITLE);
         int gold = CraftPanel::countItems(p, "Gold Coin");
         std::string goldStr = "Gold: " + std::to_string(gold);
         int gw = textW(f, goldStr.c_str());

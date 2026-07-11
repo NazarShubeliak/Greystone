@@ -1,6 +1,8 @@
 #pragma once
 #include "astar.h"
 #include "actor.h"
+#include "panel_style.h"
+#include "menu_hub.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
@@ -15,54 +17,35 @@ struct EffectsPanel {
     void toggle() { visible = !visible; }
     void hide()   { visible = false; }
 
+    // Debuffs and buffs sit side by side across the full hub width instead
+    // of stacked in a small box.
     void render(SDL_Renderer* r, TTF_Font* f, const Player& p) {
         if (!visible) return;
 
         std::vector<Entry> debuffs, buffs;
         collect(p, debuffs, buffs);
 
-        const int W   = 400;
-        const int X   = (SCREEN_WIDTH - W) / 2;
-        const int PAD = 16;
-        const int ROW_H = 36;
-        int rows = std::max((int)debuffs.size(), 1) + std::max((int)buffs.size(), 1);
-        int H = 90 + rows * ROW_H;
-        const int Y = std::max(20, (MAP_VIEW_HEIGHT - H) / 2);
+        const int PAD  = 40;
+        const int GAP  = 40;
+        const int COLW = (SCREEN_WIDTH - PAD * 2 - GAP) / 2;
+        const int LX   = PAD;
+        const int RX   = PAD + COLW + GAP;
+        int ty = MenuHub::TAB_H + 24;
 
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 8, 8, 12, 248);
-        SDL_Rect bg = {X, Y, W, H};
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-
-        SDL_SetRenderDrawColor(r, 90, 80, 50, 255);
-        SDL_RenderDrawRect(r, &bg);
-        SDL_Rect inner = {X + 1, Y + 1, W - 2, H - 2};
-        SDL_SetRenderDrawColor(r, 45, 40, 25, 255);
-        SDL_RenderDrawRect(r, &inner);
-
-        int ty = Y + 10;
-        txt(r, f, "Effects", X + PAD, ty, {200, 190, 150, 255});
-        ty += 24;
-        hline(r, X, ty, W);
-        ty += 10;
-
-        txt(r, f, "Debuffs", X + PAD, ty, {215, 100, 80, 255});
-        ty += 22;
+        txt(r, f, "Debuffs", LX, ty, {215, 100, 80, 255});
+        int ly = ty + 26;
         if (debuffs.empty()) {
-            txt(r, f, "(none)", X + PAD + 8, ty, {110, 110, 110, 255});
-            ty += ROW_H;
+            txt(r, f, "(none)", LX + 8, ly, {110, 110, 110, 255});
         } else {
-            for (const Entry& e : debuffs) ty = drawEntry(r, f, e, X + PAD, ty, W - PAD * 2);
+            for (const Entry& e : debuffs) ly = drawEntry(r, f, e, LX, ly, COLW);
         }
 
-        ty += 4;
-        txt(r, f, "Buffs", X + PAD, ty, {100, 200, 120, 255});
-        ty += 22;
+        txt(r, f, "Buffs", RX, ty, {100, 200, 120, 255});
+        int ry = ty + 26;
         if (buffs.empty()) {
-            txt(r, f, "(none)", X + PAD + 8, ty, {110, 110, 110, 255});
+            txt(r, f, "(none)", RX + 8, ry, {110, 110, 110, 255});
         } else {
-            for (const Entry& e : buffs) ty = drawEntry(r, f, e, X + PAD, ty, W - PAD * 2);
+            for (const Entry& e : buffs) ry = drawEntry(r, f, e, RX, ry, COLW);
         }
     }
 
@@ -124,11 +107,6 @@ private:
         txt(r, f, e.name.c_str(), x + 8, y, e.color);
         txt(r, f, e.desc.c_str(), x + 16, y + 17, {170, 165, 155, 255});
         return y + 36;
-    }
-
-    static void hline(SDL_Renderer* r, int x, int y, int w) {
-        SDL_SetRenderDrawColor(r, 50, 48, 38, 255);
-        SDL_RenderDrawLine(r, x + 8, y, x + w - 8, y);
     }
 
     static void txt(SDL_Renderer* r, TTF_Font* f,

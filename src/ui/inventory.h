@@ -4,6 +4,7 @@
 #include "context_menu.h"
 #include "item_examine_panel.h"
 #include "astar.h"
+#include "menu_hub.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
@@ -30,10 +31,11 @@ struct InventoryPanel {
         const int LEFT_W  = 340;
         const int TITLE_H = 26;
         const int ROW_H   = 22;
+        const int TOP     = MenuHub::TAB_H;
 
         // ── Left panel: equipped slot clicked ──────────────────────
         if (mx < LEFT_W) {
-            int s = (my - TITLE_H) / ROW_H;
+            int s = (my - TOP - TITLE_H) / ROW_H;
             if (s < 0 || s >= (int)EquipSlot::SLOT_COUNT) return true;
             if (!p.worn[s].has_value()) return true;
 
@@ -70,7 +72,7 @@ struct InventoryPanel {
         if (cs < 0 || cs >= (int)EquipSlot::SLOT_COUNT) return true;
         if (!p.worn[cs].has_value()) return true;
 
-        int idx = (my - TITLE_H) / ROW_H;
+        int idx = (my - TOP - TITLE_H) / ROW_H;
         if (idx < 0 || idx >= (int)p.worn[cs]->contents.size()) return true;
 
         // Build context menu for this inventory item
@@ -163,6 +165,7 @@ struct InventoryPanel {
         const int ROW_H   = 22;
         const int PAD     = 10;
         const int FOOT_H  = 24;
+        const int TOP     = MenuHub::TAB_H; // clears the hub's tab strip
 
         SDL_Color gold  = {195, 165, 65, 255};
         SDL_Color white = {210, 210, 200, 255};
@@ -171,9 +174,9 @@ struct InventoryPanel {
 
         // ── Title bar ────────────────────────────────────────────────
         SDL_SetRenderDrawColor(r, 18, 16, 12, 255);
-        SDL_Rect titleBar = {0, 0, SCREEN_WIDTH, TITLE_H};
+        SDL_Rect titleBar = {0, TOP, SCREEN_WIDTH, TITLE_H};
         SDL_RenderFillRect(r, &titleBar);
-        txt(r, f, PAD, 5, "EQUIPPED", gold);
+        txt(r, f, PAD, TOP + 5, "EQUIPPED", gold);
         // Right panel title shows active container
         {
             int cs = p.activeContainerSlot;
@@ -184,15 +187,15 @@ struct InventoryPanel {
                     + " / " + std::to_string(cont.maxVolume) + " ml  |  "
                     + std::to_string(cont.usedWeight())
                     + " / " + std::to_string(cont.maxWeight) + " g]";
-                txt(r, f, LEFT_W + PAD, 5, hdr.c_str(), gold);
+                txt(r, f, LEFT_W + PAD, TOP + 5, hdr.c_str(), gold);
             } else {
-                txt(r, f, LEFT_W + PAD, 5, "No container selected", dim);
+                txt(r, f, LEFT_W + PAD, TOP + 5, "No container selected", dim);
             }
         }
 
         // ── Left panel: slots ─────────────────────────────────────────
         for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++) {
-            int ry = TITLE_H + s * ROW_H;
+            int ry = TOP + TITLE_H + s * ROW_H;
 
             // Highlight active container row
             if (s == p.activeContainerSlot && p.worn[s].has_value() && p.worn[s]->isContainer()) {
@@ -222,18 +225,18 @@ struct InventoryPanel {
 
         // Vertical divider
         SDL_SetRenderDrawColor(r, 65, 58, 38, 255);
-        SDL_RenderDrawLine(r, LEFT_W, 0, LEFT_W, SCREEN_HEIGHT - FOOT_H);
+        SDL_RenderDrawLine(r, LEFT_W, TOP, LEFT_W, SCREEN_HEIGHT - FOOT_H);
 
         // ── Right panel: active container contents ────────────────────
         int cs = p.activeContainerSlot;
         if (cs >= 0 && cs < (int)EquipSlot::SLOT_COUNT && p.worn[cs].has_value()) {
             const Item& cont = *p.worn[cs];
             if (cont.contents.empty()) {
-                txt(r, f, LEFT_W + PAD, TITLE_H + 8, "(empty)", dim);
+                txt(r, f, LEFT_W + PAD, TOP + TITLE_H + 8, "(empty)", dim);
             }
             for (int i = 0; i < (int)cont.contents.size(); i++) {
                 const Item& item = cont.contents[i];
-                int ry = TITLE_H + i * ROW_H;
+                int ry = TOP + TITLE_H + i * ROW_H;
                 SDL_Color col = typeVisuals[(int)item.type].color;
                 std::string label = item.name;
                 if (item.count > 1) label += " x" + std::to_string(item.count);
@@ -250,7 +253,7 @@ struct InventoryPanel {
                                    SCREEN_WIDTH - 1, ry + ROW_H - 1);
             }
         } else {
-            txt(r, f, LEFT_W + PAD, TITLE_H + 8,
+            txt(r, f, LEFT_W + PAD, TOP + TITLE_H + 8,
                 "Equip a bag or pouch to store items.", dim);
         }
 

@@ -161,6 +161,7 @@ inline bool addToContainer(Item& container, Item item) {
 struct GroundItem {
     int  x, y;
     Item item;
+    int  sectorX, sectorY; // which overmap sector this item belongs to
 };
 
 // ================================================================ Item factories
@@ -208,6 +209,17 @@ inline Item leatherVest() {
     i.volume      = 2000; i.weight = 800;
     i.defense     = 2;    i.slot   = EquipSlot::TORSO;
     i.value       = 12;
+    return i;
+}
+
+inline Item commonClothes() {
+    Item i;
+    i.name        = "Common Clothes";
+    i.description = "A homespun tunic and trousers. No protection, just modesty.";
+    i.type        = ItemType::ARMOR;
+    i.volume      = 900;  i.weight = 400;
+    i.defense     = 0;    i.slot   = EquipSlot::TORSO;
+    i.value       = 3;
     return i;
 }
 

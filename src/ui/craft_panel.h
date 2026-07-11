@@ -2,6 +2,8 @@
 #include "actor.h"
 #include "item.h"
 #include "astar.h"
+#include "panel_style.h"
+#include "menu_hub.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
@@ -159,20 +161,10 @@ struct CraftPanel {
         if (panelState == State::HIDDEN) return;
         dims();
 
-        // ── Background + border ──────────────────────────────────────────────
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 8, 8, 12, 248);
-        SDL_Rect bg = {PX, PY, PW, PH};
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(r, 80, 70, 40, 255);
-        SDL_RenderDrawRect(r, &bg);
-
-        // ── Title ────────────────────────────────────────────────────────────
-        txt(r, f, "CRAFTING", PX + 8, PY + 6, {200,180,100,255});
+        // ── Title (borderless — the hub already dims the background) ─────────
         txt(r, f, "ESC close  \xe2\x86\x91\xe2\x86\x93 select  Enter craft",
-            PX + PW - textW(f, "ESC close  \xe2\x86\x91\xe2\x86\x93 select  Enter craft") - 8,
-            PY + 6, {70,65,45,255});
+            PX + PW - textW(f, "ESC close  \xe2\x86\x91\xe2\x86\x93 select  Enter craft"),
+            PY + 6, {90,85,65,255});
 
         hline(r, PX, PY + HDR_H - 2, PW);
 
@@ -255,13 +247,7 @@ struct CraftPanel {
             const int CX = (SCREEN_WIDTH - CW) / 2;
             const int CY = (MAP_VIEW_HEIGHT - CH) / 2;
 
-            SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderDrawColor(r, 4, 4, 8, 252);
-            SDL_Rect cbg = {CX, CY, CW, CH};
-            SDL_RenderFillRect(r, &cbg);
-            SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-            SDL_SetRenderDrawColor(r, 100,90,50,255);
-            SDL_RenderDrawRect(r, &cbg);
+            PanelStyle::frame(r, f, CX, CY, CW, CH, nullptr);
 
             int cy = CY + 12;
             std::string q = "Craft " + rec.name + "?";
@@ -364,21 +350,27 @@ struct CraftPanel {
 
 private:
     // ── Layout constants (computed once per frame via dims()) ────────────────
-    static constexpr int PW       = 640;
-    static constexpr int PH       = 360;
     static constexpr int LIST_W   = 195;
     static constexpr int HDR_H    = 28;
     static constexpr int ROW_H    = 22;
-    static constexpr int LIST_ROWS= 14;
     static constexpr int LH       = 20;
 
+    // PW/PH/LIST_ROWS fill the hub's available space — recomputed by dims()
+    // (called every render()/handleClick()) so the panel grows with the window.
+    int PW = 0, PH = 0, LIST_ROWS = 1;
     int PX = 0, PY = 0;
     int craftBtnX = 0, craftBtnY = 0, craftBtnW = 110, craftBtnH = 26;
     int yesX = 0, noX = 0, btnY = 0, btnW = 100, btnH = 26;
 
     void dims() {
-        PX = (SCREEN_WIDTH    - PW) / 2;
-        PY = (MAP_VIEW_HEIGHT - PH) / 2;
+        const int PAD = 40;
+        PX = PAD;
+        PY = MenuHub::TAB_H + 16;
+        PW = SCREEN_WIDTH - PAD * 2;
+        PH = SCREEN_HEIGHT - PY - 20;
+        LIST_ROWS = (PH - HDR_H - 10) / ROW_H;
+        if (LIST_ROWS < 1) LIST_ROWS = 1;
+
         craftBtnX = PX + LIST_W + 12;
         craftBtnY = PY + PH - 44;
         const int CW = 360, CH = 140;

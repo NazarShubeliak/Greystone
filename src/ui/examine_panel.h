@@ -1,6 +1,7 @@
 #pragma once
 #include "map.h"
 #include "item.h"
+#include "panel_style.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
@@ -62,15 +63,9 @@ struct ExaminePanel {
         };
 
         // ── Background + border ──────────────────────────────────────────
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 12, 14, 18, 235);
-        SDL_Rect bg = {px, py, W, H};
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(r, 120, 100, 50, 255);
-        SDL_RenderDrawRect(r, &bg);
+        PanelStyle::frame(r, f, px, py, W, H, nullptr);
 
-        SDL_Color gold   = {200, 170,  80, 255};
+        SDL_Color gold   = PanelStyle::TITLE;
         SDL_Color white  = {215, 215, 205, 255};
         SDL_Color dim    = {145, 145, 130, 255};
         SDL_Color objCol = {180, 200,  70, 255};

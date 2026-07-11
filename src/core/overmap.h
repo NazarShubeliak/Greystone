@@ -1,6 +1,7 @@
 #pragma once
 #include "terrain.h"
 #include "astar.h"
+#include "menu_hub.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <cstdlib>
@@ -148,22 +149,25 @@ struct Overmap {
     void render(SDL_Renderer* r, TTF_Font* f, int playerSX, int playerSY) {
         if (!visible) return;
 
-        const int CS   = TILE_SIZE;
-        const int vW   = SCREEN_WIDTH    / CS;
-        const int vH   = MAP_VIEW_HEIGHT / CS;
+        const int CS    = TILE_SIZE;
+        const int TOP   = MenuHub::TAB_H; // hub's tab strip
+        const int TITH  = 26;             // this panel's own info bar, right below it
+        const int GRIDY = TOP + TITH;
+        const int vW   = SCREEN_WIDTH               / CS;
+        const int vH   = (MAP_VIEW_HEIGHT - GRIDY)   / CS;
         const int offX = camX - vW / 2;    // viewport centered on camera, not player
         const int offY = camY - vH / 2;
 
         // Clear map view area
         SDL_SetRenderDrawColor(r, 5, 5, 8, 255);
-        SDL_Rect mapArea = {0, 0, SCREEN_WIDTH, MAP_VIEW_HEIGHT};
+        SDL_Rect mapArea = {0, GRIDY, SCREEN_WIDTH, MAP_VIEW_HEIGHT - GRIDY};
         SDL_RenderFillRect(r, &mapArea);
 
         for (int vy = 0; vy < vH; vy++) {
             for (int vx = 0; vx < vW; vx++) {
                 int sx = offX + vx;
                 int sy = offY + vy;
-                SDL_Rect cell = {vx * CS, vy * CS, CS, CS};
+                SDL_Rect cell = {vx * CS, GRIDY + vy * CS, CS, CS};
 
                 if (sx < 0 || sx >= OVERMAP_W || sy < 0 || sy >= OVERMAP_H)
                     continue; // void outside world bounds
@@ -187,14 +191,14 @@ struct Overmap {
 
         // Camera crosshair — gold rectangle around the center cell.
         SDL_SetRenderDrawColor(r, 180, 150, 55, 255);
-        SDL_Rect crosshair = {(vW / 2) * CS, (vH / 2) * CS, CS, CS};
+        SDL_Rect crosshair = {(vW / 2) * CS, GRIDY + (vH / 2) * CS, CS, CS};
         SDL_RenderDrawRect(r, &crosshair);
 
         // Player marker (@) at actual player sector position.
         int pvx = playerSX - offX;
         int pvy = playerSY - offY;
         if (pvx >= 0 && pvx < vW && pvy >= 0 && pvy < vH) {
-            SDL_Rect pcell = {pvx * CS, pvy * CS, CS, CS};
+            SDL_Rect pcell = {pvx * CS, GRIDY + pvy * CS, CS, CS};
             SDL_RenderCopy(r, playerTex, nullptr, &pcell);
         }
 
@@ -244,10 +248,10 @@ struct Overmap {
             }
         }
 
-        // Title bar (semi-transparent strip)
+        // Info bar (semi-transparent strip), right below the hub's tab strip.
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(r, 0, 0, 0, 165);
-        SDL_Rect titleBar = {0, 0, SCREEN_WIDTH, 26};
+        SDL_Rect titleBar = {0, TOP, SCREEN_WIDTH, TITH};
         SDL_RenderFillRect(r, &titleBar);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
@@ -257,14 +261,13 @@ struct Overmap {
                             + biomeVisuals[bi].name;
         std::string playerInfo = std::string("@:[") + std::to_string(playerSX) + ","
                                + std::to_string(playerSY) + "]";
-        std::string title = "OVERMAP  " + camInfo + "   " + playerInfo
-                          + "   |   Arrows: pan   M: close";
+        std::string title = camInfo + "   " + playerInfo + "   |   Arrows: pan   M: close";
         SDL_Surface* ts = TTF_RenderText_Solid(f, title.c_str(), {175, 150, 65, 255});
         SDL_Texture* tt = SDL_CreateTextureFromSurface(r, ts);
         SDL_FreeSurface(ts);
         int tw, th;
         SDL_QueryTexture(tt, nullptr, nullptr, &tw, &th);
-        SDL_Rect tdst = {8, (26 - th) / 2, tw, th};
+        SDL_Rect tdst = {8, TOP + (TITH - th) / 2, tw, th};
         SDL_RenderCopy(r, tt, nullptr, &tdst);
         SDL_DestroyTexture(tt);
 

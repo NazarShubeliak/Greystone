@@ -1,5 +1,6 @@
 #pragma once
 #include "astar.h"
+#include "panel_style.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
@@ -69,17 +70,8 @@ struct ConfirmPanel {
         const int Y    = (MAP_VIEW_HEIGHT - H) / 2;
         const int PAD  = 14;
 
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 8, 8, 12, 248);
-        SDL_Rect bg = {X, Y, W, H};
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-
-        SDL_SetRenderDrawColor(r, 120, 60, 50, 255);
-        SDL_RenderDrawRect(r, &bg);
-        SDL_Rect inner = {X + 1, Y + 1, W - 2, H - 2};
-        SDL_SetRenderDrawColor(r, 45, 25, 20, 255);
-        SDL_RenderDrawRect(r, &inner);
+        // Warning tone (reddish accent) — this is always an interrupt/danger prompt.
+        PanelStyle::frame(r, f, X, Y, W, H, nullptr, {120, 60, 50, 255});
 
         wrapText(r, f, message, X + PAD, Y + 12, W - PAD * 2, {215, 190, 150, 255});
 

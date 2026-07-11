@@ -4,34 +4,27 @@
 #include <string>
 #include "actor.h"
 #include "astar.h"
+#include "panel_style.h"
+#include "menu_hub.h"
 
 struct BodyPanel {
     bool visible = false;
     void toggle() { visible = !visible; }
 
+    // Borderless, full width — the hub dims the background behind it.
     void render(SDL_Renderer* r, TTF_Font* f, const Player& p) {
         if (!visible) return;
 
-        const int W  = 380, H = 390;
-        const int X  = (SCREEN_WIDTH  - W) / 2;
-        const int Y  = (MAP_VIEW_HEIGHT - H) / 2;
-        const int LH = 18;
-
-        // Background + border
-        SDL_Rect bg = {X, Y, W, H};
-        SDL_SetRenderDrawColor(r, 12, 12, 12, 248);
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawColor(r, 110, 110, 110, 255);
-        SDL_RenderDrawRect(r, &bg);
-
-        // Title
-        txt(r, f, "BODY CONDITION", X + 115, Y + 7, {255, 215, 0, 255});
-        hline(r, X, Y + 26, W);
+        const int PAD = 40;
+        const int X   = PAD;
+        const int LH  = 18;
+        const int W   = SCREEN_WIDTH - PAD * 2;
+        int y = MenuHub::TAB_H + 24;
 
         // ---- Left: ASCII body art (decorative, gray) ----
-        const int AX = X + 55;   // art left edge
-        int ay = Y + 34;
-        const SDL_Color art = {70, 70, 70, 255};
+        const int AX = X + 20;
+        int ay = y;
+        const SDL_Color art = {80, 80, 80, 255};
 
         txt(r, f, "    ___    ", AX, ay, art); ay += LH;
         txt(r, f, "   (o o)   ", AX, ay, art); ay += LH;
@@ -48,12 +41,12 @@ struct BodyPanel {
         txt(r, f, " |_|   |_| ", AX, ay, art); ay += LH;
 
         // ---- Right: status rows ----
-        const int SX = X + 210;  // status column X
-        int sy = Y + 34;
+        const int SX = X + 260;  // status column X — more breathing room than the old cramped box
+        int sy = y;
 
         // Divider between art and status
         SDL_SetRenderDrawColor(r, 50, 50, 50, 255);
-        SDL_RenderDrawLine(r, X + 195, Y + 27, X + 195, Y + H - 30);
+        SDL_RenderDrawLine(r, X + 230, y - 6, X + 230, y + 13 * LH);
 
         // HEAD  (rows 1-2 of art)
         sy += LH * 1;   // align with "(o o)" line
@@ -74,28 +67,29 @@ struct BodyPanel {
         partRow(r, f, "LEG R", p.body.legR, p.medicineSkill, SX, sy);
 
         // ---- Needs section ----
-        hline(r, X, Y + H - 100, W);
-        int ny = Y + H - 94;
-        txt(r, f, "NEEDS", X + 163, ny, {200, 200, 200, 255});
+        int ny = y + 13 * LH + 30;
+        hline(r, X, ny, W);
+        ny += LH - 10;
+        txt(r, f, "NEEDS", X, ny, {200, 200, 200, 255});
         ny += LH + 2;
 
         needsBar(r, f, "Hunger", p.hunger,
                  {210, 80,  30, 255},  // full→empty: orange-red
                  {70,  150, 50, 255},  // full color (low hunger = good = green)
-                 X + 20, ny, W - 40);
+                 X, ny, W);
         ny += 22;
         needsBar(r, f, "Thirst", p.thirst,
                  {200, 60,  60, 255},  // full→empty: red
                  {60,  120, 220, 255}, // full color (low thirst = good = blue)
-                 X + 20, ny, W - 40);
-        ny += 22;
+                 X, ny, W);
+        ny += 30;
 
         // Footer: medicine skill notice
-        hline(r, X, Y + H - 28, W);
+        hline(r, X, ny, W);
         std::string footer = p.medicineSkill == 0
             ? "No medical training - estimates only"
             : "Medicine " + std::to_string(p.medicineSkill) + " - assessment accurate";
-        txt(r, f, footer.c_str(), X + 60, Y + H - 22, {80, 80, 80, 255});
+        txt(r, f, footer.c_str(), X, ny + 6, {90, 90, 90, 255});
     }
 
 private:
@@ -175,14 +169,17 @@ private:
                   const char* label, float value,
                   SDL_Color critCol, SDL_Color goodCol,
                   int x, int y, int barW) {
-        const int BAR_H  = 12;
-        const int LABEL_W = 58;
+        const int BAR_H = 12;
+        const int GAP   = 10;
 
-        // Label
+        // Label — bar starts after its *actual* rendered width, not a guessed one,
+        // so the state text drawn inside the bar never collides with the label.
         txt(r, f, label, x, y, {120, 120, 115, 255});
+        int labelW, labelH;
+        TTF_SizeText(f, label, &labelW, &labelH);
 
-        int bx = x + LABEL_W;
-        int bw = barW - LABEL_W;
+        int bx = x + labelW + GAP;
+        int bw = barW - (labelW + GAP);
 
         // Background
         SDL_SetRenderDrawColor(r, 35, 35, 35, 255);

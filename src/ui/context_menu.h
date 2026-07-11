@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <algorithm>
 
 struct MenuItem {
     std::string label;
@@ -16,14 +17,24 @@ struct ContextMenu {
     std::vector<MenuItem> items;
 
     const int ITEM_HEIGHT = 28;
-    const int MENU_WIDTH = 150;
+    const int MIN_WIDTH   = 150;
     const int PADDING = 8;
+    int menuWidth = MIN_WIDTH; // widened in show() to fit the longest label
 
-    void show(int screenX, int screenY, std::vector<MenuItem> menuItems) {
+    void show(int screenX, int screenY, std::vector<MenuItem> menuItems, TTF_Font* font = nullptr) {
         x = screenX;
         y = screenY;
         items = menuItems;
         visible = true;
+
+        menuWidth = MIN_WIDTH;
+        if (font) {
+            for (const MenuItem& it : items) {
+                int w = 0, h = 0;
+                TTF_SizeText(font, it.label.c_str(), &w, &h);
+                menuWidth = std::max(menuWidth, w + PADDING * 2);
+            }
+        }
     }
 
     void hide() {
@@ -44,7 +55,7 @@ struct ContextMenu {
 
         // Клік на пункт меню
         for (int i = 0; i < (int)items.size(); i++) {
-            SDL_Rect itemRect = {bounds.x, bounds.y + i * ITEM_HEIGHT, MENU_WIDTH, ITEM_HEIGHT};
+            SDL_Rect itemRect = {bounds.x, bounds.y + i * ITEM_HEIGHT, menuWidth, ITEM_HEIGHT};
             if (mx >= itemRect.x && mx <= itemRect.x + itemRect.w &&
                 my >= itemRect.y && my <= itemRect.y + itemRect.h) {
                 items[i].action();
@@ -70,7 +81,7 @@ struct ContextMenu {
 
         // Пункти
         for (int i = 0; i < (int)items.size(); i++) {
-            SDL_Rect itemRect = {bounds.x, bounds.y + i * ITEM_HEIGHT, MENU_WIDTH, ITEM_HEIGHT};
+            SDL_Rect itemRect = {bounds.x, bounds.y + i * ITEM_HEIGHT, menuWidth, ITEM_HEIGHT};
 
             // Підсвітка при hover — пізніше додамо
             SDL_Color color = {255, 255, 255, 255};
@@ -89,13 +100,13 @@ struct ContextMenu {
             if (i < (int)items.size() - 1) {
                 SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
                 SDL_RenderDrawLine(renderer, bounds.x, bounds.y + (i + 1) * ITEM_HEIGHT,
-                                   bounds.x + MENU_WIDTH, bounds.y + (i + 1) * ITEM_HEIGHT);
+                                   bounds.x + menuWidth, bounds.y + (i + 1) * ITEM_HEIGHT);
             }
         }
     }
 
 private:
     SDL_Rect getBounds() {
-        return {x, y, MENU_WIDTH, (int)items.size() * ITEM_HEIGHT};
+        return {x, y, menuWidth, (int)items.size() * ITEM_HEIGHT};
     }
 };

@@ -1,6 +1,7 @@
 #pragma once
 #include "item.h"
 #include "astar.h"
+#include "panel_style.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <vector>
@@ -131,15 +132,9 @@ struct PickupPanel {
         const int px = panelPx(), py = panelPy(), H = panelH();
 
         // Background + border
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(r, 12, 14, 18, 245);
-        SDL_Rect bg = {px, py, W, H};
-        SDL_RenderFillRect(r, &bg);
-        SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-        SDL_SetRenderDrawColor(r, 120, 100, 50, 255);
-        SDL_RenderDrawRect(r, &bg);
+        PanelStyle::frame(r, f, px, py, W, H, nullptr);
 
-        SDL_Color gold  = {200, 170,  80, 255};
+        SDL_Color gold  = PanelStyle::TITLE;
         SDL_Color white = {215, 215, 205, 255};
         SDL_Color dim   = {110, 110, 100, 255};
         SDL_Color green = { 80, 200,  80, 255};

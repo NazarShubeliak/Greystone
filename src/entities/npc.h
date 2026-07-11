@@ -89,7 +89,7 @@ struct Villager : Actor {
     int bedX = 0, bedY = 0;     // home bed object tile (blocksMove=true — not a valid path target)
     int sleepX = 0, sleepY = 0; // walkable tile adjacent to bed — actual path target
 
-    enum class State { WANDER, WALK_HOME, SLEEP, EAT, DRINK } state = State::SLEEP;
+    enum class State { WANDER, WALK_HOME, SLEEP, EAT, DRINK, FLEE, FIGHT } state = State::SLEEP;
 
     // Path used when walking home or to the well (recomputed via A* with doors open)
     std::vector<SDL_Point> homePath;
@@ -110,6 +110,20 @@ struct Villager : Actor {
     // one real container (no floating/invisible items). Eating pulls a food item out of
     // it; trading reads/writes it directly.
     std::optional<Item> bag;
+
+    // What they're wearing — separate from bag (carried goods), so they're
+    // never rendered as "naked with a backpack". Set once at spawn, drops
+    // alongside the bag on death.
+    std::optional<Item> outfit;
+
+    // Damage from a WEAPON-type item in bag, if any (e.g. Blacksmith stock) —
+    // mirrors Enemy::weaponDmg(), used when this villager fights back.
+    int weaponDmg() const {
+        if (!bag) return 0;
+        for (const Item& item : bag->contents)
+            if (item.type == ItemType::WEAPON) return item.damage;
+        return 0;
+    }
 
     Villager() : Actor(0, 0, "@", {220, 185, 90, 255}, 80, Race::HUMAN) {
         body = Body(25, 50, 35, 45);
