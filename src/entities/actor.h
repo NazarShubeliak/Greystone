@@ -139,8 +139,15 @@ struct BodyPart {
         return                      LimbState::DESTROYED;
     }
 
-    // canSever: true for limbs (not head/torso), sharp = slashing/piercing weapon
-    void applyDamage(int amount, bool sharp = false, bool canSever = false) {
+    // canSever: true for limbs (not head/torso), sharp = slashing/piercing weapon.
+    // forceBleed: sword-type hit — guarantees at least a light bleed on any hit,
+    // not just once the part is already badly damaged (docs/weapons.md).
+    // severChancePct: sever roll on a killing blow (default 40; axes roll higher).
+    // guaranteedDeepWound: Brutal Strike technique — forces the SEVERE-tier bleed
+    // and a bone break outright, regardless of how much HP the part has left.
+    void applyDamage(int amount, bool sharp = false, bool canSever = false,
+                      bool forceBleed = false, int severChancePct = 40,
+                      bool guaranteedDeepWound = false) {
         if (severed) return;
         hp = std::max(0, hp - amount);
 
@@ -149,13 +156,15 @@ struct BodyPart {
         // Bleeding starts at SEVERE threshold
         if (r <= 0.30f && r > 0.10f && bleed < 1.0f) bleed = 1.0f;
         if (r <= 0.10f              && bleed < 2.0f)  bleed = 2.0f;
+        if (forceBleed              && bleed < 1.0f)  bleed = 1.0f;
+        if (guaranteedDeepWound)                      bleed = std::max(bleed, 2.0f);
 
         // Bone break at SEVERE
-        if (!broken && r <= 0.30f) broken = true;
+        if (!broken && (r <= 0.30f || guaranteedDeepWound)) broken = true;
 
-        // Severing: 0 HP + sharp weapon = 40% chance
+        // Severing: 0 HP + sharp weapon = severChancePct chance
         if (canSever && hp == 0 && sharp)
-            if (rand() % 100 < 40) severed = true;
+            if (rand() % 100 < severChancePct) severed = true;
     }
 };
 
@@ -270,12 +279,27 @@ struct Actor {
     float hunger = 0.0f;    // 0 = full    → 1 = starving
     float thirst = 0.0f;    // 0 = hydrated → 1 = dying
 
+    // --- Stamina ---
+    // Resource for techniques and spells (docs/weapons.md, docs/magic.md). Lives here,
+    // not on Player, so enemies/villagers can eventually use techniques too (symmetry).
+    // Nothing spends it yet — that arrives with the first technique/spell; regen already
+    // runs via tickNeeds() so the bar isn't just sitting at max forever in the meantime.
+    float stamina    = 100.0f;
+    float maxStamina = 100.0f;
+
     // --- Social ---
     // Disposition to the player: -100 (enemy on sight) .. 0 (neutral) .. +100 (loyal ally)
     // Thresholds: <-50 attack on sight | -50..-20 hostile | -20..+20 neutral
     //             +20..+50 friendly    | >+50 ally (defends player)
     int factionId   = 0;
     int disposition = 0;
+
+    // --- Skills ---
+    // Shared progression for weapons AND magic (docs/weapons.md, docs/magic.md).
+    // Lives here, not on Player, so every enemy/villager has real skills too.
+    SkillLevel skills[(int)Skill::SKILL_COUNT];
+    SkillLevel& skill(Skill s) { return skills[(int)s]; }
+    const SkillLevel& skill(Skill s) const { return skills[(int)s]; }
 
     // ---- Constructor ----
     Actor(int x, int y, const char* symbol, SDL_Color color,
@@ -299,6 +323,9 @@ struct Actor {
         name = Names::generate(race);
         age  = Names::generateAge(race);
 
+        maxStamina = 50.0f + constitution * 5.0f;
+        stamina    = maxStamina;
+
         sync();
     }
 
@@ -313,11 +340,15 @@ struct Actor {
     // ---- Damage ----
     // target: which body part is hit (default torso)
     // sharp:  slashing/piercing weapons can sever limbs
+    // forceBleed/severChancePct/guaranteedDeepWound: weapon/technique effects,
+    // see BodyPart::applyDamage
     void takeDamage(int amount, PartTarget target = PartTarget::TORSO,
-                    bool sharp = false) {
+                    bool sharp = false, bool forceBleed = false, int severChancePct = 40,
+                    bool guaranteedDeepWound = false) {
         if (!alive) return;
         bool canSever = (target != PartTarget::HEAD && target != PartTarget::TORSO);
-        body.get(target).applyDamage(amount, sharp, canSever);
+        body.get(target).applyDamage(amount, sharp, canSever, forceBleed, severChancePct,
+                                      guaranteedDeepWound);
         sync();
     }
 
@@ -327,6 +358,8 @@ struct Actor {
         const RaceTraits& rt = raceTraits[(int)race];
         if (rt.needsFood)  hunger = std::min(1.0f, hunger + 0.000347f); // ~48h to starve
         if (rt.needsWater) thirst = std::min(1.0f, thirst + 0.000694f); // ~24h to dehydrate
+
+        stamina = std::min(maxStamina, stamina + 3.0f); // regen — nothing spends it yet
 
         // Bleeding drains torso HP
         if (rt.canBleed) {
@@ -343,6 +376,10 @@ struct Actor {
     bool canAct()      const { return energy >= 100; }
     void spendEnergy()       { energy -= 100; }
     bool isAlive()     const { return alive; }
+
+    // ---- Stamina helpers (consumers arrive with the first technique/spell) ----
+    bool hasStamina(float amount)  const { return stamina >= amount; }
+    void spendStamina(float amount)      { stamina = std::max(0.0f, stamina - amount); }
 
     // ---- Disposition helpers ----
     bool isHostile()   const { return disposition < -20; }
@@ -485,13 +522,17 @@ struct Player : Actor {
         return best;
     }
 
+    // Item in the attacking hand (HAND_R, or HAND_L as fallback), or nullptr if unarmed.
+    const Item* weaponItem() const {
+        if (worn[(int)EquipSlot::HAND_R].has_value()) return &*worn[(int)EquipSlot::HAND_R];
+        if (worn[(int)EquipSlot::HAND_L].has_value()) return &*worn[(int)EquipSlot::HAND_L];
+        return nullptr;
+    }
+
     // Weapon damage (HAND_R, or HAND_L as fallback, or base 1).
     int weaponDamage() const {
-        if (worn[(int)EquipSlot::HAND_R].has_value())
-            return worn[(int)EquipSlot::HAND_R]->damage;
-        if (worn[(int)EquipSlot::HAND_L].has_value())
-            return worn[(int)EquipSlot::HAND_L]->damage;
-        return 1; // unarmed
+        const Item* w = weaponItem();
+        return w ? w->damage : 1; // unarmed
     }
 
     bool hasChopTool() const {
@@ -549,11 +590,16 @@ struct Enemy : Actor {
     // real container (no floating/invisible items). Dropped in full on death.
     std::optional<Item> bag;
 
-    int weaponDmg() const {
-        if (!bag) return 0;
+    const Item* weaponItem() const {
+        if (!bag) return nullptr;
         for (const Item& item : bag->contents)
-            if (item.type == ItemType::WEAPON) return item.damage;
-        return 0;
+            if (item.type == ItemType::WEAPON) return &item;
+        return nullptr;
+    }
+
+    int weaponDmg() const {
+        const Item* w = weaponItem();
+        return w ? w->damage : 0;
     }
 
     Enemy(int x, int y, const char* sym, SDL_Color col,

@@ -28,6 +28,23 @@ struct CheatConsole {
     // Pending grow_plants — set by execute(), consumed by main.cpp.
     bool pendingGrowPlants = false;
 
+    // Pending setskill — skill token + target level, consumed by main.cpp.
+    std::string pendingSetSkill;
+    int         pendingSetSkillLevel = 0;
+
+    // Pending unlocktech — technique token, consumed by main.cpp.
+    std::string pendingUnlockTech;
+
+    // Lowercase, no-space tokens — order MUST match enum Skill (skill.h) so
+    // main.cpp can map token index -> Skill index directly.
+    static constexpr const char* SKILL_TOKENS[] = {
+        "sword","greatsword","axe","greataxe","mace","greatmace",
+        "dagger","spear","unarmed","shield","dualwield",
+        "fire","water","earth","air","life","death", nullptr
+    };
+    // Order MUST match enum TechniqueId (combat.h).
+    static constexpr const char* TECH_TOKENS[] = { "brutalstrike","lunge","backstab", nullptr };
+
     void open() {
         visible = true;
         input.clear();
@@ -102,7 +119,8 @@ struct CheatConsole {
             resultOk = true;
 
         } else if (cmd == "help") {
-            result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  gp  help";
+            result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  "
+                       "setskill <skill> <lvl>  unlocktech <name>  gp  help";
             resultOk = true;
 
         } else {
@@ -214,6 +232,44 @@ struct CheatConsole {
                 return;
             }
 
+            // setskill <skill> <level>
+            char skname[32]; int slevel;
+            if (sscanf(cmd.c_str(), "setskill %31s %d", skname, &slevel) == 2) {
+                for (int i = 0; skname[i]; i++) skname[i] = (char)tolower((unsigned char)skname[i]);
+                bool ok = false;
+                for (int i = 0; SKILL_TOKENS[i]; i++) if (strcmp(skname, SKILL_TOKENS[i]) == 0) { ok = true; break; }
+                if (!ok) {
+                    result   = "Unknown skill. Tab-complete or type 'setskill' for list.";
+                    resultOk = false;
+                } else if (slevel < 0 || slevel > 100) {
+                    result   = "Level must be 0-100.";
+                    resultOk = false;
+                } else {
+                    pendingSetSkill      = skname;
+                    pendingSetSkillLevel = slevel;
+                    result   = std::string("Set ") + skname + " to level " + std::to_string(slevel) + ".";
+                    resultOk = true;
+                }
+                return;
+            }
+
+            // unlocktech <name>
+            char tname[32];
+            if (sscanf(cmd.c_str(), "unlocktech %31s", tname) == 1) {
+                for (int i = 0; tname[i]; i++) tname[i] = (char)tolower((unsigned char)tname[i]);
+                bool ok = false;
+                for (int i = 0; TECH_TOKENS[i]; i++) if (strcmp(tname, TECH_TOKENS[i]) == 0) { ok = true; break; }
+                if (ok) {
+                    pendingUnlockTech = tname;
+                    result   = std::string("Unlocked ") + tname + " (skill raised to its required level if needed).";
+                    resultOk = true;
+                } else {
+                    result   = "Unknown technique. Use: brutalstrike  lunge  backstab";
+                    resultOk = false;
+                }
+                return;
+            }
+
             result  = "Unknown: " + cmd + "   (type 'help')";
             resultOk = false;
         }
@@ -225,7 +281,7 @@ struct CheatConsole {
             return input.rfind(prefix, 0) == 0;
         };
         if (input.empty())
-            return "Commands: rm  hm  tp  time  season  spawn  give  gp  help    (Tab autocompletes)";
+            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  unlocktech  gp  help    (Tab autocompletes)";
         if (input == "spawn" || starts("spawn "))
             return "spawn: goblin  orc  skeleton  wolf  bandit   e.g. spawn goblin 3";
         if (input == "give" || starts("give "))
@@ -236,9 +292,15 @@ struct CheatConsole {
             return "time HH:MM   e.g. time 14:30";
         if (input == "tp" || starts("tp "))
             return "tp X Y   (sector coords 0-99)";
+        if (input == "setskill" || starts("setskill "))
+            return "setskill <skill> <0-100>   skills: sword greatsword axe greataxe mace greatmace "
+                   "dagger spear unarmed shield dualwield fire water earth air life death   e.g. setskill axe 30";
+        if (input == "unlocktech" || starts("unlocktech "))
+            return "unlocktech: brutalstrike  lunge  backstab";
         // Partial command suggestions
         static const char* cmds[] = {
-            "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give","help", nullptr
+            "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",
+            "setskill","unlocktech","help", nullptr
         };
         std::string sugg;
         for (int i = 0; cmds[i]; i++) {
@@ -253,7 +315,8 @@ struct CheatConsole {
     void tabComplete() {
         // Complete top-level command
         static const char* cmds[] = {
-            "reveal_map","hide_map","tp","time","season","spawn","give","help", nullptr
+            "reveal_map","hide_map","tp","time","season","spawn","give",
+            "setskill","unlocktech","help", nullptr
         };
         if (input.find(' ') == std::string::npos) {
             for (int i = 0; cmds[i]; i++) {
@@ -288,6 +351,24 @@ struct CheatConsole {
             static const char* seasons[] = {"spring","summer","autumn","winter", nullptr};
             for (int i = 0; seasons[i]; i++)
                 if (std::string(seasons[i]).rfind(arg, 0) == 0) { input = "season " + std::string(seasons[i]); return; }
+        }
+        // Complete setskill argument (skill name only — leave the level for the user to type)
+        if (input.rfind("setskill ", 0) == 0) {
+            std::string arg = input.substr(9);
+            for (int i = 0; SKILL_TOKENS[i]; i++)
+                if (std::string(SKILL_TOKENS[i]).rfind(arg, 0) == 0) {
+                    input = "setskill " + std::string(SKILL_TOKENS[i]) + " ";
+                    return;
+                }
+        }
+        // Complete unlocktech argument
+        if (input.rfind("unlocktech ", 0) == 0) {
+            std::string arg = input.substr(11);
+            for (int i = 0; TECH_TOKENS[i]; i++)
+                if (std::string(TECH_TOKENS[i]).rfind(arg, 0) == 0) {
+                    input = "unlocktech " + std::string(TECH_TOKENS[i]);
+                    return;
+                }
         }
     }
 

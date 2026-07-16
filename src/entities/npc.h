@@ -116,13 +116,18 @@ struct Villager : Actor {
     // alongside the bag on death.
     std::optional<Item> outfit;
 
-    // Damage from a WEAPON-type item in bag, if any (e.g. Blacksmith stock) —
-    // mirrors Enemy::weaponDmg(), used when this villager fights back.
-    int weaponDmg() const {
-        if (!bag) return 0;
+    // Item from a WEAPON-type entry in bag, if any (e.g. Blacksmith stock) —
+    // mirrors Enemy::weaponItem(), used when this villager fights back.
+    const Item* weaponItem() const {
+        if (!bag) return nullptr;
         for (const Item& item : bag->contents)
-            if (item.type == ItemType::WEAPON) return item.damage;
-        return 0;
+            if (item.type == ItemType::WEAPON) return &item;
+        return nullptr;
+    }
+
+    int weaponDmg() const {
+        const Item* w = weaponItem();
+        return w ? w->damage : 0;
     }
 
     Villager() : Actor(0, 0, "@", {220, 185, 90, 255}, 80, Race::HUMAN) {

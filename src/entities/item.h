@@ -1,4 +1,5 @@
 #pragma once
+#include "skill.h"
 #include <SDL2/SDL.h>
 #include <string>
 #include <vector>
@@ -55,8 +56,10 @@ struct Item {
     int         weight = 500;    // grams
 
     // Weapon
-    int  damage    = 0;
-    bool twoHanded = false;
+    int   damage      = 0;
+    bool  twoHanded   = false;
+    Skill weaponSkill = Skill::UNARMED;  // which skill this weapon trains (docs/weapons.md)
+    bool  sharp        = false;          // slashing/piercing — can sever limbs (mechanic lives in combat.h)
 
     // Armor / Jewelry — which slot this item goes into
     EquipSlot slot    = EquipSlot::NONE;
@@ -70,6 +73,9 @@ struct Item {
     // Food / Drink
     int nutrition = 0;   // reduces hunger (0..100 scale)
     int hydration = 0;   // reduces thirst
+
+    // Medicine
+    bool curesBleed = false;  // stops all active bleeding on use (docs/weapons.md)
 
     // Jewelry passive bonuses
     int strBonus = 0;
@@ -176,6 +182,7 @@ inline Item ironSword() {
     i.volume      = 1500; i.weight = 1200;
     i.damage      = 8;    i.slot   = EquipSlot::HAND_R;
     i.value       = 25;
+    i.weaponSkill = Skill::SWORD; i.sharp = true;
     return i;
 }
 
@@ -187,6 +194,7 @@ inline Item woodenClub() {
     i.volume      = 2000; i.weight = 1800;
     i.damage      = 18;   i.slot   = EquipSlot::HAND_R;
     i.value       = 4;
+    i.weaponSkill = Skill::MACE;
     return i;
 }
 
@@ -373,6 +381,7 @@ inline Item crudeDagger() {
     i.type        = ItemType::WEAPON;
     i.slot        = EquipSlot::HAND_R;
     i.damage      = 3; i.volume = 150; i.weight = 180; i.value = 2;
+    i.weaponSkill = Skill::DAGGER; i.sharp = true;
     return i;
 }
 
@@ -384,6 +393,7 @@ inline Item warAxe() {
     i.slot        = EquipSlot::HAND_R;
     i.damage      = 12; i.volume = 2000; i.weight = 2100; i.value = 40;
     i.canChop     = true;
+    i.weaponSkill = Skill::AXE; i.sharp = true;
     return i;
 }
 
@@ -416,6 +426,7 @@ inline Item boneClub() {
     i.type        = ItemType::WEAPON;
     i.slot        = EquipSlot::HAND_R;
     i.damage      = 4; i.volume = 500; i.weight = 450; i.value = 1;
+    i.weaponSkill = Skill::MACE;
     return i;
 }
 
@@ -468,6 +479,7 @@ inline Item stoneKnife() {
     i.type        = ItemType::WEAPON;
     i.slot        = EquipSlot::HAND_R;
     i.volume      = 400; i.weight = 320; i.damage = 14; i.value = 5;
+    i.weaponSkill = Skill::DAGGER; i.sharp = true;
     return i;
 }
 
@@ -479,6 +491,7 @@ inline Item crudeAxe() {
     i.slot        = EquipSlot::HAND_R;
     i.volume      = 1800; i.weight = 1500; i.damage = 22; i.value = 8;
     i.canChop     = true;
+    i.weaponSkill = Skill::AXE; i.sharp = true;
     return i;
 }
 
@@ -498,6 +511,7 @@ inline Item herbalPoultice() {
     i.type        = ItemType::MISC;
     i.volume      = 150; i.weight = 80; i.value = 8;
     i.maxStack    = 20;
+    i.curesBleed  = true;
     return i;
 }
 

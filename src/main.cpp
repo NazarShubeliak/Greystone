@@ -17,10 +17,14 @@
 #include "map.h"
 #include "npc.h"
 #include "villager_examine_panel.h"
+#include "combat.h"
 #include "craft_panel.h"
 #include "wait_panel.h"
 #include "confirm_panel.h"
 #include "effects_panel.h"
+#include "skills_panel.h"
+#include "hotbar.h"
+#include "techniques_panel.h"
 #include "trade_panel.h"
 #include "panel_style.h"
 #include "menu_hub.h"
@@ -68,6 +72,15 @@ Villager* attackTargetVillager = nullptr;
 // attackTargetVillager, but starts a dialogue instead of a fight on arrival.
 Villager* talkTargetVillager = nullptr;
 
+// Set by useHotbarSlot() when a technique needs a target picked manually:
+// every tile within the technique's range gets painted
+// (renderTechniqueTargeting(), near the main render loop) and input is
+// swallowed until the player clicks a tile or cancels (see the
+// techniqueTargeting block in handleInput(), and resolveTechniqueTargeting()/
+// cancelTechniqueTargeting() near useHotbarSlot()).
+bool techniqueTargeting  = false;
+int  techniqueTargetSlot = -1;
+
 int hoverX = 0, hoverY = 0;
 int lastHoverX = -1, lastHoverY = -1;
 std::vector<SDL_Point> previewPath;
@@ -82,6 +95,9 @@ UI ui;
 BottomPanel panel;
 BodyPanel bodyPanel;
 EffectsPanel effectsPanel;
+SkillsPanel  skillsPanel;
+Hotbar          hotbar;
+TechniquesPanel techniquesPanel;
 TradePanel   tradePanel;
 ContextMenu contextMenu;
 ExaminePanel examinePanel;
@@ -116,28 +132,17 @@ int playerSectorX = 50;
 int playerSectorY = 50;
 
 // ------------------------------------------------------------------ helpers
+//
+// randomHitPart()/partName() and the resolveAttack() formula now live in combat.h
+// (shared by every attacker/defender pair — see docs/weapons.md).
 
-// Weighted random body part hit (CDDA-style distribution).
-PartTarget randomHitPart() {
-    int r = rand() % 100;
-    if (r < 10) return PartTarget::HEAD;
-    if (r < 55) return PartTarget::TORSO;
-    if (r < 67) return PartTarget::ARM_L;
-    if (r < 79) return PartTarget::ARM_R;
-    if (r < 89) return PartTarget::LEG_L;
-                return PartTarget::LEG_R;
-}
-
-const char* partName(PartTarget t) {
-    switch (t) {
-        case PartTarget::HEAD:  return "head";
-        case PartTarget::TORSO: return "torso";
-        case PartTarget::ARM_L: return "left arm";
-        case PartTarget::ARM_R: return "right arm";
-        case PartTarget::LEG_L: return "left leg";
-        case PartTarget::LEG_R: return "right leg";
-    }
-    return "body";
+// Prints the "Your X skill increased to N!" message when an attack result leveled
+// up the attacker's skill. Only called from the player-attacks-* call sites (NPCs
+// level up silently — not worth the log spam).
+void reportSkillUp(const AttackResult& r) {
+    if (r.leveledUp)
+        panel.addMessage(std::string("Your ") + skillName(r.skillUsed)
+                         + " skill increased to " + std::to_string(r.newSkillLevel) + "!");
 }
 
 Enemy* getEnemyAt(int x, int y) {
@@ -350,19 +355,18 @@ void enemyAct(Enemy& enemy) {
 
     SDL_Point next = path[1];
     if (next.x == player.x && next.y == player.y) {
-        PartTarget part   = randomHitPart();
-        int        rawDmg = 3 + (enemy.strength - 10) / 2 + enemy.weaponDmg();
-        if (part == PartTarget::HEAD) rawDmg = (int)(rawDmg * 1.5f);
-        int damage = std::max(1, rawDmg - player.totalDefense());
-        player.takeDamage(damage, part);
-        std::string withWeapon;
-        if (enemy.bag)
-            for (const Item& item : enemy.bag->contents)
-                if (item.type == ItemType::WEAPON) { withWeapon = " with " + item.name; break; }
-        panel.addMessage(enemy.name + " hits your " + partName(part)
-                         + withWeapon + " for " + std::to_string(damage) + " damage.");
-        if (!player.isAlive())
-            panel.addMessage("You have been slain by " + enemy.name + ".");
+        const Item* weapon = enemy.weaponItem();
+        AttackResult r = resolveAttack(enemy, player, enemy.strength, enemy.dexterity,
+                                        player.effectiveDex(), player.totalDefense(), weapon);
+        if (!r.hit) {
+            panel.addMessage(enemy.name + " swings and misses you.");
+        } else {
+            std::string withWeapon = weapon ? (" with " + weapon->name) : "";
+            panel.addMessage(enemy.name + " hits your " + partName(r.part)
+                             + withWeapon + " for " + std::to_string(r.damage) + " damage.");
+            if (!player.isAlive())
+                panel.addMessage("You have been slain by " + enemy.name + ".");
+        }
     } else if (!isTileOccupied(next.x, next.y)) {
         enemy.x = next.x;
         enemy.y = next.y;
@@ -472,19 +476,18 @@ void villagerCombatAct(Villager& v) {
 
     SDL_Point next = path[1];
     if (next.x == player.x && next.y == player.y) {
-        PartTarget part   = randomHitPart();
-        int        rawDmg = 3 + (v.strength - 10) / 2 + v.weaponDmg();
-        if (part == PartTarget::HEAD) rawDmg = (int)(rawDmg * 1.5f);
-        int damage = std::max(1, rawDmg - player.totalDefense());
-        player.takeDamage(damage, part);
-        std::string withWeapon;
-        if (v.bag)
-            for (const Item& item : v.bag->contents)
-                if (item.type == ItemType::WEAPON) { withWeapon = " with " + item.name; break; }
-        panel.addMessage(v.name + " hits your " + partName(part)
-                         + withWeapon + " for " + std::to_string(damage) + " damage.");
-        if (!player.isAlive())
-            panel.addMessage("You have been slain by " + v.name + ".");
+        const Item* weapon = v.weaponItem();
+        AttackResult r = resolveAttack(v, player, v.strength, v.dexterity,
+                                        player.effectiveDex(), player.totalDefense(), weapon);
+        if (!r.hit) {
+            panel.addMessage(v.name + " swings and misses you.");
+        } else {
+            std::string withWeapon = weapon ? (" with " + weapon->name) : "";
+            panel.addMessage(v.name + " hits your " + partName(r.part)
+                             + withWeapon + " for " + std::to_string(r.damage) + " damage.");
+            if (!player.isAlive())
+                panel.addMessage("You have been slain by " + v.name + ".");
+        }
     } else if (!isTileOccupied(next.x, next.y)) {
         v.x = next.x;
         v.y = next.y;
@@ -558,9 +561,10 @@ void tickEnemyNeeds() {
 }
 
 // Called after every player action.
-// Spends 100 energy, then ticks the world until the player can act again.
+// Spends 100 energy (+extraEnergy, for techniques that cost more time than a
+// plain attack), then ticks the world until the player can act again.
 // Result: player.energy >= 100 when this returns.
-void onPlayerAct() {
+void onPlayerAct(int extraEnergy = 0) {
     int prevMinutes = worldTime.minutes;
     int prevSeason  = worldTime.season();
     worldTime.advance();
@@ -590,7 +594,7 @@ void onPlayerAct() {
     int prevThirstLv = player.thirstLevel();
 
     int hpBefore = player.hp;
-    player.energy -= 100;
+    player.energy -= (100 + extraEnergy);
     while (player.energy < 100)
         tickWorld();
 
@@ -1378,6 +1382,164 @@ void doTeleport(int newSX, int newSY) {
                      + std::to_string(newSY) + "] - " + biomeVisuals[bi].name + ".");
 }
 
+// ------------------------------------------------------------------ techniques
+//
+// Right-click-menu-triggered technique attacks. Unlike the plain "Attack" option
+// these require the player to already be adjacent — no auto-walk-then-technique
+// chase yet, that's a follow-up once techniques prove out.
+
+// Per-technique modifiers fed into resolveAttack(); shared by both target types below.
+// unaware is an input here (caller already knows — only a sleeping Villager counts
+// right now) since Backstab's damage bonus only applies when it's actually true.
+static void techniqueModifiers(TechniqueId id, bool unaware, int& hitBonus,
+                               float& dmgMult, bool& deepWound) {
+    hitBonus  = (id == TechniqueId::LUNGE)                    ? 25   : 0;
+    dmgMult   = (id == TechniqueId::BACKSTAB && unaware)      ? 2.0f : 1.0f;
+    deepWound = (id == TechniqueId::BRUTAL_STRIKE);
+}
+
+void useTechniqueOnEnemy(Enemy* enemy, int ex, int ey, TechniqueId id) {
+    if (!enemy || !enemy->alive) return;
+    const Technique& t = techniqueInfo(id);
+    int dist = std::max(std::abs(ex - player.x), std::abs(ey - player.y));
+    if (dist > t.range) {
+        panel.addMessage("You need to be right next to them to use " + std::string(t.name) + ".");
+        return;
+    }
+    if (!player.hasStamina(t.staminaCost)) {
+        panel.addMessage("Not enough stamina for " + std::string(t.name) + "!");
+        return;
+    }
+    player.spendStamina(t.staminaCost);
+
+    int hitBonus; float dmgMult; bool deepWound;
+    techniqueModifiers(id, false, hitBonus, dmgMult, deepWound); // enemies: no "unaware" tracking yet
+
+    const Item*  weapon = player.weaponItem();
+    AttackResult r = resolveAttack(player, *enemy, player.effectiveStr(), player.effectiveDex(),
+                                    enemy->dexterity, 0, weapon, false, hitBonus, dmgMult, deepWound);
+    if (!r.hit) {
+        panel.addMessage(std::string(t.name) + "! You miss " + enemy->name + ".");
+    } else {
+        panel.addMessage(std::string(t.name) + "! You hit " + enemy->name + "'s " + partName(r.part)
+                         + " for " + std::to_string(r.damage) + " damage.");
+        reportSkillUp(r);
+        if (!enemy->isAlive()) {
+            panel.addMessage(enemy->name + " dies.");
+            dropEnemyLoot(*enemy);
+        }
+    }
+    onPlayerAct(t.extraEnergy);
+}
+
+void useTechniqueOnVillager(int vi, TechniqueId id) {
+    if (vi < 0 || vi >= (int)villagers.size()) return;
+    Villager& v = villagers[vi];
+    if (!v.alive) return;
+    const Technique& t = techniqueInfo(id);
+    int dist = std::max(std::abs(v.x - player.x), std::abs(v.y - player.y));
+    if (dist > t.range) {
+        panel.addMessage("You need to be right next to them to use " + std::string(t.name) + ".");
+        return;
+    }
+    if (!player.hasStamina(t.staminaCost)) {
+        panel.addMessage("Not enough stamina for " + std::string(t.name) + "!");
+        return;
+    }
+    player.spendStamina(t.staminaCost);
+
+    bool unaware = (v.state == Villager::State::SLEEP);
+    int hitBonus; float dmgMult; bool deepWound;
+    techniqueModifiers(id, unaware, hitBonus, dmgMult, deepWound);
+
+    const Item*  weapon = player.weaponItem();
+    AttackResult r = resolveAttack(player, v, player.effectiveStr(), player.effectiveDex(),
+                                    v.dexterity, 0, weapon, unaware, hitBonus, dmgMult, deepWound);
+    if (id == TechniqueId::BACKSTAB && !unaware)
+        panel.addMessage(v.name + " notices you coming — the strike lands clean, but without the element of surprise.");
+    if (!r.hit) {
+        panel.addMessage(std::string(t.name) + "! You miss " + v.name + ".");
+    } else {
+        panel.addMessage(std::string(t.name) + "! You hit " + v.name + "'s " + partName(r.part)
+                         + " for " + std::to_string(r.damage) + " damage.");
+        reportSkillUp(r);
+        if (!v.isAlive()) {
+            panel.addMessage(v.name + " dies.");
+            dropVillagerLoot(v);
+        } else {
+            villagerReactToAttack(v);
+        }
+    }
+    onPlayerAct(t.extraEnergy);
+}
+
+// Ends technique-targeting mode. msg empty = a target was found and the attack
+// already fired (or the mode is being torn down silently); non-empty = shown
+// as a log message (cancelled / out of range / nothing there).
+void cancelTechniqueTargeting(const std::string& msg) {
+    techniqueTargeting  = false;
+    techniqueTargetSlot = -1;
+    if (!msg.empty()) panel.addMessage(msg);
+}
+
+// Called with the tile the player clicked while targeting mode is active
+// (see the techniqueTargeting block in handleInput()). Only a tile within the
+// technique's range and actually holding an enemy or villager is a valid pick;
+// anything else cancels rather than silently doing nothing, so a stray click
+// doesn't leave the player stuck in targeting mode.
+void resolveTechniqueTargeting(int mx, int my) {
+    TechniqueId id = (TechniqueId)hotbar.slots[techniqueTargetSlot];
+    const Technique& t = techniqueInfo(id);
+
+    if (mx < 0 || mx >= MAP_WIDTH || my < 0 || my >= MAP_HEIGHT) {
+        cancelTechniqueTargeting("Out of range.");
+        return;
+    }
+    int dist = std::max(std::abs(mx - player.x), std::abs(my - player.y));
+    if (dist > t.range || !map[my][mx].visible) {
+        cancelTechniqueTargeting("Out of range.");
+        return;
+    }
+
+    if (Enemy* enemy = getEnemyAt(mx, my)) {
+        cancelTechniqueTargeting("");
+        useTechniqueOnEnemy(enemy, mx, my, id);
+        return;
+    }
+    if (Villager* v = getVillagerAt(mx, my)) {
+        int vi = (int)(v - &villagers[0]);
+        cancelTechniqueTargeting("");
+        useTechniqueOnVillager(vi, id);
+        return;
+    }
+    cancelTechniqueTargeting("No target there.");
+}
+
+// Triggered by the hotbar (number key or mouse click on a slot). Doesn't pick
+// a target itself anymore — it enters targeting mode so the player clicks who
+// to hit among whatever's actually in range (renderTechniqueTargeting() paints
+// the range, resolveTechniqueTargeting() above resolves the click).
+void useHotbarSlot(int slot) {
+    if (slot < 0 || slot >= Hotbar::SLOT_COUNT) return;
+    int raw = hotbar.slots[slot];
+    if (raw < 0) { panel.addMessage("That hotbar slot is empty."); return; }
+    TechniqueId id = (TechniqueId)raw;
+    const Technique& t = techniqueInfo(id);
+    if (!techniqueUnlocked(player, id)) {
+        panel.addMessage("You haven't learned " + std::string(t.name) + " yet.");
+        return;
+    }
+    if (!player.hasStamina(t.staminaCost)) {
+        panel.addMessage("Not enough stamina for " + std::string(t.name) + "!");
+        return;
+    }
+
+    techniqueTargeting  = true;
+    techniqueTargetSlot = slot;
+    panel.addMessage("Select a target for " + std::string(t.name)
+                     + " (right-click or Esc to cancel).");
+}
+
 // ------------------------------------------------------------------ input
 
 void handleInput(SDL_Event& event, bool& running) {
@@ -1402,6 +1564,25 @@ void handleInput(SDL_Event& event, bool& running) {
 
     // Console intercepts all input while open (except the backtick above).
     if (console.handleEvent(event, overmap, worldTime)) return;
+
+    // Technique targeting intercepts input while active — the highlighted-range
+    // picker started by useHotbarSlot(). Left-click on a painted tile resolves
+    // it; right-click or Esc cancels without spending the technique.
+    if (techniqueTargeting) {
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+            cancelTechniqueTargeting("Cancelled.");
+        }
+        if (event.type == SDL_MOUSEBUTTONDOWN) {
+            if (event.button.button == SDL_BUTTON_RIGHT) {
+                cancelTechniqueTargeting("Cancelled.");
+            } else if (event.button.button == SDL_BUTTON_LEFT) {
+                int mx = event.button.x / TILE_SIZE + cameraX;
+                int my = event.button.y / TILE_SIZE + cameraY;
+                resolveTechniqueTargeting(mx, my);
+            }
+        }
+        return;
+    }
 
     // Hub tab strip takes priority over whichever tab's own input handling
     // below, so clicking a tab always switches — even out of Craft/Map,
@@ -1504,6 +1685,8 @@ void handleInput(SDL_Event& event, bool& running) {
             if (k == SDLK_c) { closeMenuHub();                       return; }
             if (k == SDLK_o) { openMenuTab(MenuTab::CHARACTER);      return; }
             if (k == SDLK_b) { openMenuTab(MenuTab::BODY);           return; }
+            if (k == SDLK_k) { openMenuTab(MenuTab::SKILLS);         return; }
+            if (k == SDLK_y) { openMenuTab(MenuTab::TECHNIQUES);     return; }
             if (k == SDLK_i) { openMenuTab(MenuTab::INVENTORY);      return; }
             if (k == SDLK_m) { openMenuTab(MenuTab::MAP);            return; }
 
@@ -1541,6 +1724,8 @@ void handleInput(SDL_Event& event, bool& running) {
                 case SDLK_o:     openMenuTab(MenuTab::CHARACTER); break;
                 case SDLK_b:     openMenuTab(MenuTab::BODY);      break;
                 case SDLK_s:     openMenuTab(MenuTab::EFFECTS);   break;
+                case SDLK_k:     openMenuTab(MenuTab::SKILLS);    break;
+                case SDLK_y:     openMenuTab(MenuTab::TECHNIQUES); break;
                 case SDLK_i:     openMenuTab(MenuTab::INVENTORY); break;
                 case SDLK_c:     openMenuTab(MenuTab::CRAFT);     break;
                 case SDLK_UP:    overmap.moveCam( 0, -1); break;
@@ -1557,6 +1742,8 @@ void handleInput(SDL_Event& event, bool& running) {
         if (event.key.keysym.sym == SDLK_o)      toggleMenuTab(MenuTab::CHARACTER);
         if (event.key.keysym.sym == SDLK_b)      toggleMenuTab(MenuTab::BODY);
         if (event.key.keysym.sym == SDLK_s)      toggleMenuTab(MenuTab::EFFECTS);
+        if (event.key.keysym.sym == SDLK_k)      toggleMenuTab(MenuTab::SKILLS);
+        if (event.key.keysym.sym == SDLK_y)      toggleMenuTab(MenuTab::TECHNIQUES);
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
         if (event.key.keysym.sym == SDLK_m)      toggleMenuTab(MenuTab::MAP);
         if (event.key.keysym.sym == SDLK_i)      toggleMenuTab(MenuTab::INVENTORY);
@@ -1579,6 +1766,12 @@ void handleInput(SDL_Event& event, bool& running) {
             if (event.key.keysym.sym == SDLK_ESCAPE) closeMenuHub();
             return;
         }
+        // Hotbar: 1-9 use whatever technique is bound to that slot. Not while
+        // mid-wait or a modal popup (context menu/pickup) is up front of the map.
+        if (!isWaiting && !pickupPanel.visible && !contextMenu.visible) {
+            SDL_Keycode k = event.key.keysym.sym;
+            if (k >= SDLK_1 && k <= SDLK_9) useHotbarSlot((int)(k - SDLK_1));
+        }
         if (event.key.keysym.sym == SDLK_SPACE &&
             !pickupPanel.visible && !contextMenu.visible)
             onPlayerAct();  // wait one turn
@@ -1589,13 +1782,17 @@ void handleInput(SDL_Event& event, bool& running) {
         int mouseX = event.button.x / TILE_SIZE + cameraX;
         int mouseY = event.button.y / TILE_SIZE + cameraY;
 
-        // Character/Body/Effects have no click handling of their own — swallow
-        // clicks so they don't fall through to map movement/attacks. Inventory
-        // handles its own clicks further below; Craft/Map already returned
-        // earlier in this function.
+        // Character/Body/Effects/Skills have no click handling of their own —
+        // swallow clicks so they don't fall through to map movement/attacks.
+        // Inventory/Techniques handle their own clicks further below; Craft/Map
+        // already returned earlier in this function.
         if (hub.activeTab == MenuTab::CHARACTER || hub.activeTab == MenuTab::BODY ||
-            hub.activeTab == MenuTab::EFFECTS)
+            hub.activeTab == MenuTab::EFFECTS   || hub.activeTab == MenuTab::SKILLS)
             return;
+        if (techniquesPanel.visible) {
+            techniquesPanel.handleClick(event.button.x, event.button.y, player, hotbar);
+            return;
+        }
         if (itemExaminePanel.visible) {
             itemExaminePanel.handleClick(event.button.x, event.button.y);
             return;
@@ -1636,21 +1833,32 @@ void handleInput(SDL_Event& event, bool& running) {
         }
 
         if (event.button.button == SDL_BUTTON_LEFT) {
+            // Hotbar overlays the bottom of the map view — a click there uses
+            // that slot instead of being read as a move/attack on the tile behind it.
+            int hbSlot = hotbar.slotAt(event.button.x, event.button.y);
+            if (hbSlot >= 0) {
+                useHotbarSlot(hbSlot);
+                return;
+            }
             if (mouseX >= 0 && mouseX < MAP_WIDTH && mouseY >= 0 && mouseY < MAP_HEIGHT) {
                 Enemy* enemy = getEnemyAt(mouseX, mouseY);
                 int attackDist = std::max(std::abs(mouseX - player.x),
                                           std::abs(mouseY - player.y));
                 if (enemy && map[mouseY][mouseX].visible) {
                     if (attackDist <= 1) {
-                        PartTarget part   = randomHitPart();
-                        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-                        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
-                        enemy->takeDamage(damage, part);
-                        panel.addMessage("You hit " + enemy->name + "'s " + partName(part)
-                                         + " for " + std::to_string(damage) + " damage.");
-                        if (!enemy->isAlive()) {
-                            panel.addMessage(enemy->name + " dies.");
-                            dropEnemyLoot(*enemy);
+                        const Item*  weapon = player.weaponItem();
+                        AttackResult r = resolveAttack(player, *enemy, player.effectiveStr(),
+                                                        player.effectiveDex(), enemy->dexterity, 0, weapon);
+                        if (!r.hit) {
+                            panel.addMessage("You swing and miss " + enemy->name + ".");
+                        } else {
+                            panel.addMessage("You hit " + enemy->name + "'s " + partName(r.part)
+                                             + " for " + std::to_string(r.damage) + " damage.");
+                            reportSkillUp(r);
+                            if (!enemy->isAlive()) {
+                                panel.addMessage(enemy->name + " dies.");
+                                dropEnemyLoot(*enemy);
+                            }
                         }
                         onPlayerAct();
                     } else {
@@ -1670,17 +1878,23 @@ void handleInput(SDL_Event& event, bool& running) {
                     // right-click "Attack" menu, so a stray click never kills
                     // an innocent by accident.
                     if (attackDist <= 1) {
-                        PartTarget part   = randomHitPart();
-                        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-                        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
-                        v->takeDamage(damage, part);
-                        panel.addMessage("You hit " + v->name + "'s " + partName(part)
-                                         + " for " + std::to_string(damage) + " damage.");
-                        if (!v->isAlive()) {
-                            panel.addMessage(v->name + " dies.");
-                            dropVillagerLoot(*v);
+                        const Item*  weapon  = player.weaponItem();
+                        bool         unaware = v->state == Villager::State::SLEEP;
+                        AttackResult r = resolveAttack(player, *v, player.effectiveStr(),
+                                                        player.effectiveDex(), v->dexterity, 0,
+                                                        weapon, unaware);
+                        if (!r.hit) {
+                            panel.addMessage("You swing and miss " + v->name + ".");
                         } else {
-                            villagerReactToAttack(*v);
+                            panel.addMessage("You hit " + v->name + "'s " + partName(r.part)
+                                             + " for " + std::to_string(r.damage) + " damage.");
+                            reportSkillUp(r);
+                            if (!v->isAlive()) {
+                                panel.addMessage(v->name + " dies.");
+                                dropVillagerLoot(*v);
+                            } else {
+                                villagerReactToAttack(*v);
+                            }
                         }
                         onPlayerAct();
                     } else {
@@ -1704,20 +1918,24 @@ void handleInput(SDL_Event& event, bool& running) {
                 Enemy* enemy = getEnemyAt(mouseX, mouseY);
                 if (enemy && map[mouseY][mouseX].visible) {
                     int ex = mouseX, ey = mouseY;
-                    contextMenu.show(event.button.x, event.button.y, {
-                        {"Attack", [enemy, ex, ey]() {
+                    std::vector<MenuItem> enemyOpts;
+                    enemyOpts.push_back({"Attack", [enemy, ex, ey]() {
                             int dist = std::max(std::abs(ex - player.x),
                                                 std::abs(ey - player.y));
                             if (dist <= 1) {
-                                PartTarget part   = randomHitPart();
-                                int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-                                if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
-                                enemy->takeDamage(damage, part);
-                                panel.addMessage("You hit " + enemy->name + "'s " + partName(part)
-                                                 + " for " + std::to_string(damage) + " damage.");
-                                if (!enemy->isAlive()) {
-                                    panel.addMessage(enemy->name + " dies.");
-                                    dropEnemyLoot(*enemy);
+                                const Item*  weapon = player.weaponItem();
+                                AttackResult r = resolveAttack(player, *enemy, player.effectiveStr(),
+                                                                player.effectiveDex(), enemy->dexterity, 0, weapon);
+                                if (!r.hit) {
+                                    panel.addMessage("You swing and miss " + enemy->name + ".");
+                                } else {
+                                    panel.addMessage("You hit " + enemy->name + "'s " + partName(r.part)
+                                                     + " for " + std::to_string(r.damage) + " damage.");
+                                    reportSkillUp(r);
+                                    if (!enemy->isAlive()) {
+                                        panel.addMessage(enemy->name + " dies.");
+                                        dropEnemyLoot(*enemy);
+                                    }
                                 }
                                 onPlayerAct();
                             } else {
@@ -1727,11 +1945,25 @@ void handleInput(SDL_Event& event, bool& running) {
                                 currentPath  = findPath(player.x, player.y, ex, ey);
                                 pathIndex    = 1;
                             }
-                        }},
-                        {"Examine", [enemy]() {
-                            enemyExaminePanel.show(*enemy);
-                        }}
-                    }, font);
+                    }});
+                    // Techniques only show up once the equipped weapon's skill is high
+                    // enough — same "unlocked by use" spirit as everything else in Skill.
+                    const Item* pw = player.weaponItem();
+                    if (pw) {
+                        for (int i = 0; i < (int)TechniqueId::TECHNIQUE_COUNT; i++) {
+                            TechniqueId id = (TechniqueId)i;
+                            const Technique& t = techniqueInfo(id);
+                            if (id == TechniqueId::BACKSTAB) continue; // needs an unaware target — villager-only for now
+                            if (pw->weaponSkill != t.skill || !techniqueUnlocked(player, id)) continue;
+                            enemyOpts.push_back({t.name, [enemy, ex, ey, id]() {
+                                useTechniqueOnEnemy(enemy, ex, ey, id);
+                            }});
+                        }
+                    }
+                    enemyOpts.push_back({"Examine", [enemy]() {
+                        enemyExaminePanel.show(*enemy);
+                    }});
+                    contextMenu.show(event.button.x, event.button.y, enemyOpts, font);
                 } else {
                     // Non-enemy tile: show context menu if explored
                     if (map[mouseY][mouseX].explored) {
@@ -1785,17 +2017,23 @@ void handleInput(SDL_Event& event, bool& running) {
                                 int dist = std::max(std::abs(tv.x - player.x),
                                                     std::abs(tv.y - player.y));
                                 if (dist <= 1) {
-                                    PartTarget part   = randomHitPart();
-                                    int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-                                    if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
-                                    tv.takeDamage(damage, part);
-                                    panel.addMessage("You hit " + tv.name + "'s " + partName(part)
-                                                     + " for " + std::to_string(damage) + " damage.");
-                                    if (!tv.isAlive()) {
-                                        panel.addMessage(tv.name + " dies.");
-                                        dropVillagerLoot(tv);
+                                    const Item*  weapon  = player.weaponItem();
+                                    bool         unaware = tv.state == Villager::State::SLEEP;
+                                    AttackResult r = resolveAttack(player, tv, player.effectiveStr(),
+                                                                    player.effectiveDex(), tv.dexterity, 0,
+                                                                    weapon, unaware);
+                                    if (!r.hit) {
+                                        panel.addMessage("You swing and miss " + tv.name + ".");
                                     } else {
-                                        villagerReactToAttack(tv);
+                                        panel.addMessage("You hit " + tv.name + "'s " + partName(r.part)
+                                                         + " for " + std::to_string(r.damage) + " damage.");
+                                        reportSkillUp(r);
+                                        if (!tv.isAlive()) {
+                                            panel.addMessage(tv.name + " dies.");
+                                            dropVillagerLoot(tv);
+                                        } else {
+                                            villagerReactToAttack(tv);
+                                        }
                                     }
                                     onPlayerAct();
                                 } else {
@@ -1809,6 +2047,22 @@ void handleInput(SDL_Event& event, bool& running) {
                                     pathIndex    = 1;
                                 }
                             }});
+                            // Techniques — same weapon-skill gate as the enemy menu, plus
+                            // Backstab (dagger-only) shows up while this villager sleeps.
+                            {
+                                const Item* pw = player.weaponItem();
+                                if (pw) {
+                                    for (int ti = 0; ti < (int)TechniqueId::TECHNIQUE_COUNT; ti++) {
+                                        TechniqueId id = (TechniqueId)ti;
+                                        const Technique& t = techniqueInfo(id);
+                                        if (pw->weaponSkill != t.skill || !techniqueUnlocked(player, id)) continue;
+                                        if (id == TechniqueId::BACKSTAB && v.state != Villager::State::SLEEP) continue;
+                                        items.push_back({t.name, [vi, id]() {
+                                            useTechniqueOnVillager(vi, id);
+                                        }});
+                                    }
+                                }
+                            }
                             break; // one NPC per tile is enough
                         }
 
@@ -2035,15 +2289,19 @@ bool updatePlayer() {
     // Attack enemy blocking the path instead of moving.
     Enemy* blocker = getEnemyAt(next.x, next.y);
     if (blocker && blocker->alive) {
-        PartTarget part   = randomHitPart();
-        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
-        blocker->takeDamage(damage, part);
-        panel.addMessage("You hit " + blocker->name + "'s " + partName(part)
-                         + " for " + std::to_string(damage) + " damage.");
-        if (!blocker->isAlive()) {
-            panel.addMessage(blocker->name + " dies.");
-            dropEnemyLoot(*blocker);
+        const Item*  weapon = player.weaponItem();
+        AttackResult r = resolveAttack(player, *blocker, player.effectiveStr(),
+                                        player.effectiveDex(), blocker->dexterity, 0, weapon);
+        if (!r.hit) {
+            panel.addMessage("You swing and miss " + blocker->name + ".");
+        } else {
+            panel.addMessage("You hit " + blocker->name + "'s " + partName(r.part)
+                             + " for " + std::to_string(r.damage) + " damage.");
+            reportSkillUp(r);
+            if (!blocker->isAlive()) {
+                panel.addMessage(blocker->name + " dies.");
+                dropEnemyLoot(*blocker);
+            }
         }
         currentPath.clear();
         pathIndex = 0;
@@ -2060,17 +2318,21 @@ bool updatePlayer() {
     // Attack first).
     Villager* vBlocker = getVillagerAt(next.x, next.y);
     if (vBlocker && vBlocker->alive && vBlocker->isHostile()) {
-        PartTarget part   = randomHitPart();
-        int        damage = 5 + (player.effectiveStr() - 10) / 2 + player.weaponDamage() - 1;
-        if (part == PartTarget::HEAD) damage = (int)(damage * 1.5f);
-        vBlocker->takeDamage(damage, part);
-        panel.addMessage("You hit " + vBlocker->name + "'s " + partName(part)
-                         + " for " + std::to_string(damage) + " damage.");
-        if (!vBlocker->isAlive()) {
-            panel.addMessage(vBlocker->name + " dies.");
-            dropVillagerLoot(*vBlocker);
+        const Item*  weapon = player.weaponItem();
+        AttackResult r = resolveAttack(player, *vBlocker, player.effectiveStr(),
+                                        player.effectiveDex(), vBlocker->dexterity, 0, weapon);
+        if (!r.hit) {
+            panel.addMessage("You swing and miss " + vBlocker->name + ".");
         } else {
-            villagerReactToAttack(*vBlocker);
+            panel.addMessage("You hit " + vBlocker->name + "'s " + partName(r.part)
+                             + " for " + std::to_string(r.damage) + " damage.");
+            reportSkillUp(r);
+            if (!vBlocker->isAlive()) {
+                panel.addMessage(vBlocker->name + " dies.");
+                dropVillagerLoot(*vBlocker);
+            } else {
+                villagerReactToAttack(*vBlocker);
+            }
         }
         currentPath.clear();
         pathIndex = 0;
@@ -2279,24 +2541,28 @@ void toggleFullscreen() {
 // sync with what's actually on screen.
 
 void openMenuTab(MenuTab t) {
-    ui.showStats = bodyPanel.visible = effectsPanel.visible = inventoryPanel.visible = false;
+    ui.showStats = bodyPanel.visible = effectsPanel.visible = skillsPanel.visible
+                 = techniquesPanel.visible = inventoryPanel.visible = false;
     if (craftPanel.visible()) craftPanel.close();
     if (overmap.visible)      overmap.close();
 
     hub.activeTab = t;
     switch (t) {
-        case MenuTab::CHARACTER: ui.showStats          = true; break;
-        case MenuTab::BODY:      bodyPanel.visible      = true; break;
-        case MenuTab::EFFECTS:   effectsPanel.visible   = true; break;
-        case MenuTab::INVENTORY: inventoryPanel.visible = true; break;
-        case MenuTab::CRAFT:     craftPanel.open();             break;
-        case MenuTab::MAP:       overmap.open(playerSectorX, playerSectorY); break;
+        case MenuTab::CHARACTER:  ui.showStats          = true; break;
+        case MenuTab::BODY:       bodyPanel.visible      = true; break;
+        case MenuTab::EFFECTS:    effectsPanel.visible   = true; break;
+        case MenuTab::SKILLS:     skillsPanel.visible    = true; break;
+        case MenuTab::TECHNIQUES: techniquesPanel.visible = true; break;
+        case MenuTab::INVENTORY:  inventoryPanel.visible = true; break;
+        case MenuTab::CRAFT:      craftPanel.open();             break;
+        case MenuTab::MAP:        overmap.open(playerSectorX, playerSectorY); break;
         default: break;
     }
 }
 
 void closeMenuHub() {
-    ui.showStats = bodyPanel.visible = effectsPanel.visible = inventoryPanel.visible = false;
+    ui.showStats = bodyPanel.visible = effectsPanel.visible = skillsPanel.visible
+                 = techniquesPanel.visible = inventoryPanel.visible = false;
     if (craftPanel.visible()) craftPanel.close();
     if (overmap.visible)      overmap.close();
     hub.activeTab = MenuTab::NONE;
@@ -2305,6 +2571,38 @@ void closeMenuHub() {
 void toggleMenuTab(MenuTab t) {
     if (hub.activeTab == t) closeMenuHub();
     else                    openMenuTab(t);
+}
+
+// Paints every visible tile within the pending technique's range while
+// techniqueTargeting is active (set by useHotbarSlot()) — red tint over a
+// tile that actually holds a valid target, dim yellow otherwise, so the
+// player can see who's reachable before clicking (resolveTechniqueTargeting()
+// handles the click itself).
+void renderTechniqueTargeting(SDL_Renderer* r) {
+    if (!techniqueTargeting) return;
+    TechniqueId id = (TechniqueId)hotbar.slots[techniqueTargetSlot];
+    const Technique& t = techniqueInfo(id);
+
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    for (int y = player.y - t.range; y <= player.y + t.range; y++) {
+        for (int x = player.x - t.range; x <= player.x + t.range; x++) {
+            if (x == player.x && y == player.y) continue;
+            if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
+            if (!map[y][x].visible) continue;
+
+            int sx = (x - cameraX) * TILE_SIZE;
+            int sy = (y - cameraY) * TILE_SIZE;
+            if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+
+            bool hasTarget = getEnemyAt(x, y) || getVillagerAt(x, y);
+            SDL_Color col = hasTarget ? SDL_Color{200, 60, 50, 255} : SDL_Color{200, 170, 60, 255};
+            SDL_SetRenderDrawColor(r, col.r, col.g, col.b, hasTarget ? 90 : 45);
+
+            SDL_Rect rect = {sx, sy, TILE_SIZE, TILE_SIZE};
+            SDL_RenderFillRect(r, &rect);
+        }
+    }
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 }
 
 // ------------------------------------------------------------------ main
@@ -2492,6 +2790,30 @@ int main(int argc, char* argv[]) {
             console.pendingGive.clear();
         }
 
+        if (!console.pendingSetSkill.empty()) {
+            for (int i = 0; CheatConsole::SKILL_TOKENS[i]; i++) {
+                if (console.pendingSetSkill == CheatConsole::SKILL_TOKENS[i]) {
+                    SkillLevel& sk = player.skill((Skill)i);
+                    sk.level = console.pendingSetSkillLevel;
+                    sk.exp   = 0;
+                    break;
+                }
+            }
+            console.pendingSetSkill.clear();
+        }
+
+        if (!console.pendingUnlockTech.empty()) {
+            for (int i = 0; CheatConsole::TECH_TOKENS[i]; i++) {
+                if (console.pendingUnlockTech == CheatConsole::TECH_TOKENS[i]) {
+                    const Technique& t = techniqueInfo((TechniqueId)i);
+                    SkillLevel& sk = player.skill(t.skill);
+                    if (sk.level < t.minLevel) { sk.level = t.minLevel; sk.exp = 0; }
+                    break;
+                }
+            }
+            console.pendingUnlockTech.clear();
+        }
+
         if (console.pendingGrowPlants) {
             console.pendingGrowPlants = false;
             for (int my = 0; my < MAP_HEIGHT; my++)
@@ -2648,15 +2970,23 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        renderTechniqueTargeting(renderer);
+
         panel.render(renderer, font, player, worldTime);
 
-        // Character/Body/Effects/Inventory/Craft/Map share one full-screen
-        // hub with a tab strip on top — exactly one of them is visible.
+        // Hotbar overlays the bottom of the map viewport during free-roam play —
+        // hidden while the full-screen hub has taken over the view instead.
+        if (!hub.visible()) hotbar.render(renderer, font, player);
+
+        // Character/Body/Effects/Skills/Techniques/Inventory/Craft/Map share one
+        // full-screen hub with a tab strip on top — exactly one of them is visible.
         if (hub.visible()) {
             hub.renderBackground(renderer);
             ui.renderStats(renderer, font);
             bodyPanel.render(renderer, font, player);
             effectsPanel.render(renderer, font, player);
+            skillsPanel.render(renderer, font, player);
+            techniquesPanel.render(renderer, font, player, hotbar);
             inventoryPanel.render(renderer, font, player);
             craftPanel.render(renderer, font, player);
             overmap.render(renderer, font, playerSectorX, playerSectorY);

@@ -157,8 +157,11 @@ struct EnemyExaminePanel {
             ty += LH;
             for (const Item& item : snapshot.bag->contents) {
                 std::string itemLine = "  " + item.name;
-                if (item.type == ItemType::WEAPON)
-                    itemLine += "  (dmg " + std::to_string(item.damage) + ")";
+                if (item.type == ItemType::WEAPON) {
+                    itemLine += "  (dmg " + std::to_string(item.damage) + ", "
+                              + skillName(item.weaponSkill) + " "
+                              + std::to_string(snapshot.skills[(int)item.weaponSkill].level) + ")";
+                }
                 else if (item.type == ItemType::ARMOR)
                     itemLine += "  (def " + std::to_string(item.defense) + ")";
                 txt(r, f, itemLine.c_str(), X + PAD, ty, {160,155,135,255});

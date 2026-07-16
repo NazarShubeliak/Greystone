@@ -4,9 +4,9 @@
 #include "astar.h"
 #include "panel_style.h"
 
-// Which of the six "reference" screens (Character/Body/Effects/Inventory/
-// Craft/Map) is currently showing full-screen. NONE = hub closed.
-enum class MenuTab { NONE, CHARACTER, BODY, EFFECTS, INVENTORY, CRAFT, MAP };
+// Which of the eight "reference" screens (Character/Body/Effects/Skills/
+// Techniques/Inventory/Craft/Map) is currently showing full-screen. NONE = hub closed.
+enum class MenuTab { NONE, CHARACTER, BODY, EFFECTS, SKILLS, TECHNIQUES, INVENTORY, CRAFT, MAP };
 
 // Thin coordinator, not a rendering system of its own: main.cpp still calls
 // each screen's existing render()/handleClick()/handleKey() — this only
@@ -28,19 +28,22 @@ struct MenuHub {
     }
 
     struct TabDef { MenuTab tab; const char* label; };
-    static constexpr TabDef TABS[6] = {
-        {MenuTab::CHARACTER, "Character"},
-        {MenuTab::BODY,      "Body"},
-        {MenuTab::EFFECTS,   "Effects"},
-        {MenuTab::INVENTORY, "Inventory"},
-        {MenuTab::CRAFT,     "Craft"},
-        {MenuTab::MAP,       "Map"},
+    static constexpr int TAB_COUNT = 8;
+    static constexpr TabDef TABS[TAB_COUNT] = {
+        {MenuTab::CHARACTER,  "Character"},
+        {MenuTab::BODY,       "Body"},
+        {MenuTab::EFFECTS,    "Effects"},
+        {MenuTab::SKILLS,     "Skills"},
+        {MenuTab::TECHNIQUES, "Techniques"},
+        {MenuTab::INVENTORY,  "Inventory"},
+        {MenuTab::CRAFT,      "Craft"},
+        {MenuTab::MAP,        "Map"},
     };
 
     // Shared geometry for both hit-testing and drawing, so they can never disagree.
-    void layout(TTF_Font* f, SDL_Rect out[6]) const {
+    void layout(TTF_Font* f, SDL_Rect out[TAB_COUNT]) const {
         int x = 16;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             int w, h;
             TTF_SizeText(f, TABS[i].label, &w, &h);
             const int hpad = 18;
@@ -51,9 +54,9 @@ struct MenuHub {
 
     MenuTab tabAt(TTF_Font* f, int mx, int my) const {
         if (my < 0 || my >= TAB_H) return MenuTab::NONE;
-        SDL_Rect rects[6];
+        SDL_Rect rects[TAB_COUNT];
         layout(f, rects);
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < TAB_COUNT; i++)
             if (mx >= rects[i].x && mx < rects[i].x + rects[i].w) return TABS[i].tab;
         return MenuTab::NONE;
     }
@@ -71,9 +74,9 @@ struct MenuHub {
         SDL_Rect bar = {0, 0, SCREEN_WIDTH, TAB_H};
         SDL_RenderFillRect(r, &bar);
 
-        SDL_Rect rects[6];
+        SDL_Rect rects[TAB_COUNT];
         layout(f, rects);
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             bool active = (TABS[i].tab == activeTab);
             if (active) {
                 SDL_SetRenderDrawColor(r, PanelStyle::ACCENT.r / 3, PanelStyle::ACCENT.g / 3,

@@ -200,6 +200,16 @@ private:
 
         std::string nrgStr = "NRG: " + std::to_string(p.energy);
         renderText(r, f, nrgStr.c_str(), x, Y, {80, 180, 255, 255});
+        x += textWidth(f, nrgStr.c_str()) + GAP;
+
+        // Stamina — dims when low so a spent-out bar reads at a glance, once
+        // techniques/spells actually start spending it.
+        float staRatio = p.maxStamina > 0 ? p.stamina / p.maxStamina : 0.0f;
+        SDL_Color staCol = staRatio > 0.5f ? SDL_Color{130, 210, 140, 255} :
+                            staRatio > 0.25f ? SDL_Color{200, 190, 90, 255} :
+                                               SDL_Color{210, 120, 80, 255};
+        std::string staStr = "STA: " + std::to_string((int)p.stamina);
+        renderText(r, f, staStr.c_str(), x, Y, staCol);
 
         // Time + date
         int h = wt.hour();

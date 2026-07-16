@@ -16,6 +16,14 @@ inline void give(Enemy& e, Item item) {
     addToContainer(*e.bag, std::move(item));
 }
 
+// Starting combat competence — these creatures have presumably fought before
+// spawning in front of the player, unlike a villager who picks up a weapon for
+// the first time at level 0. Random within [minLevel, maxLevel] so two goblins
+// aren't identical.
+inline void trainSkill(Enemy& e, Skill s, int minLevel, int maxLevel) {
+    e.skill(s).level = minLevel + rand() % (maxLevel - minLevel + 1);
+}
+
 // Fast, fragile. Dangerous only in groups.
 inline Enemy goblin(int x, int y) {
     Enemy e(x, y, "g", {60, 170, 60, 255},
@@ -31,6 +39,7 @@ inline Enemy goblin(int x, int y) {
     give(e, Items::crudeDagger());
     give(e, Items::mushroom());   // a small ration — goblins forage
     give(e, Items::waterFlask());
+    trainSkill(e, Skill::DAGGER, 15, 20); // scrappy but has used that dagger before
     return e;
 }
 
@@ -50,6 +59,7 @@ inline Enemy orcWarrior(int x, int y) {
     give(e, Items::ironHelmet());
     give(e, Items::bread());
     give(e, Items::waterFlask());
+    trainSkill(e, Skill::AXE, 25, 35); // seasoned warrior, not a fresh recruit
     return e;
 }
 
@@ -67,6 +77,7 @@ inline Enemy skeleton(int x, int y) {
     e.sync();
     give(e, Items::boneClub());
     // Undead — no food/water ration; Race::SKELETON doesn't need either.
+    trainSkill(e, Skill::MACE, 20, 28); // mindless, but the arm remembers how to swing
     return e;
 }
 
@@ -84,6 +95,7 @@ inline Enemy wolf(int x, int y) {
     e.fleeHpPct   = 0.25f;   // flees below 25% HP
     e.disposition = -60;
     e.sync();
+    trainSkill(e, Skill::UNARMED, 15, 25); // a lifetime of hunting with tooth and claw
     return e;
 }
 
@@ -103,6 +115,7 @@ inline Enemy bandit(int x, int y) {
     give(e, Items::leatherVest());
     give(e, Items::bread());
     give(e, Items::waterFlask());
+    trainSkill(e, Skill::SWORD, 25, 35); // outlaws who've survived this long know how to fight
     return e;
 }
 
