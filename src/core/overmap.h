@@ -125,7 +125,7 @@ struct Overmap {
 
     void initTextures(SDL_Renderer* r, TTF_Font* f) {
         auto make = [&](const char* sym, SDL_Color col) -> SDL_Texture* {
-            SDL_Surface* s = TTF_RenderText_Solid(f, sym, col);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(f, sym, col);
             SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
             SDL_FreeSurface(s);
             return t;
@@ -224,7 +224,7 @@ struct Overmap {
 
             int ty = BY + 8;
             auto line = [&](const char* text, SDL_Color col) {
-                SDL_Surface* s = TTF_RenderText_Solid(f, text, col);
+                SDL_Surface* s = TTF_RenderUTF8_Solid(f, text, col);
                 if (!s) return;
                 SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
                 SDL_FreeSurface(s);
@@ -262,7 +262,7 @@ struct Overmap {
         std::string playerInfo = std::string("@:[") + std::to_string(playerSX) + ","
                                + std::to_string(playerSY) + "]";
         std::string title = camInfo + "   " + playerInfo + "   |   Arrows: pan   M: close";
-        SDL_Surface* ts = TTF_RenderText_Solid(f, title.c_str(), {175, 150, 65, 255});
+        SDL_Surface* ts = TTF_RenderUTF8_Solid(f, title.c_str(), {175, 150, 65, 255});
         SDL_Texture* tt = SDL_CreateTextureFromSurface(r, ts);
         SDL_FreeSurface(ts);
         int tw, th;
@@ -279,7 +279,7 @@ struct Overmap {
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
         const char* legend = ".: Plains   %: Forest   ~: Swamp   .: Desert   .: Tundra   &: Cursed Lands   ?: Unexplored";
-        SDL_Surface* ls = TTF_RenderText_Solid(f, legend, {75, 75, 70, 255});
+        SDL_Surface* ls = TTF_RenderUTF8_Solid(f, legend, {75, 75, 70, 255});
         SDL_Texture* lt = SDL_CreateTextureFromSurface(r, ls);
         SDL_FreeSurface(ls);
         int lw, lh;

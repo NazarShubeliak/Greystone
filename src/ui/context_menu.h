@@ -86,7 +86,7 @@ struct ContextMenu {
             // Підсвітка при hover — пізніше додамо
             SDL_Color color = {255, 255, 255, 255};
 
-            SDL_Surface* s = TTF_RenderText_Solid(font, items[i].label.c_str(), color);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(font, items[i].label.c_str(), color);
             SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
             SDL_FreeSurface(s);
 

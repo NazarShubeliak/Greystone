@@ -142,7 +142,7 @@ struct PickupPanel {
 
         auto drawText = [&](const std::string& text, SDL_Color col, int x, int y) {
             if (text.empty()) return;
-            SDL_Surface* s = TTF_RenderText_Solid(f, text.c_str(), col);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(f, text.c_str(), col);
             if (!s) return;
             SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
             SDL_FreeSurface(s);
@@ -212,7 +212,7 @@ struct PickupPanel {
         std::string btnLabel = "Pick Up (" + std::to_string(selCount) + " selected)";
         // Center label in button
         {
-            SDL_Surface* s = TTF_RenderText_Solid(f, btnLabel.c_str(), btnHover ? white : SDL_Color{160, 200, 160, 255});
+            SDL_Surface* s = TTF_RenderUTF8_Solid(f, btnLabel.c_str(), btnHover ? white : SDL_Color{160, 200, 160, 255});
             if (s) {
                 SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
                 SDL_FreeSurface(s);

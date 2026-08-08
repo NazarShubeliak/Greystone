@@ -2,30 +2,47 @@
 #include "astar.h"
 #include "actor.h"
 #include "combat.h"
+#include "magic.h"
 #include "panel_style.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <string>
 
-// Classic-RPG action bar: 9 slots, keys 1-9 or a click use whatever technique
-// (later: spell too) is bound to that slot. Purely a UI/input surface — it only
-// holds which TechniqueId sits in each slot and draws itself; main.cpp's
-// useHotbarSlot() does the actual "find a target and attack" work, reusing
-// useTechniqueOnEnemy()/useTechniqueOnVillager() (it needs the enemies/villagers
-// globals, which this header has no business knowing about).
+// Classic-RPG action bar: 9 slots, keys 1-9 or a click use whatever technique or
+// spell is bound to that slot. Purely a UI/input surface — it only holds which
+// action sits in each slot and draws itself; main.cpp's useHotbarSlot() does the
+// actual "find a target and attack/cast" work.
+//
+// A slot stays a plain int (docs/magic.md: spells "sit on the already-built
+// hotbar below, no structural changes") — values below SPELL_SLOT_OFFSET are a
+// (int)TechniqueId, values at or above it are SPELL_SLOT_OFFSET + (int)SpellId.
+// TECHNIQUE_COUNT/SPELL_COUNT are both tiny, so there's no risk of collision.
 struct Hotbar {
     static constexpr int SLOT_COUNT = 9;
     static constexpr int SLOT_SIZE  = 42;
     static constexpr int SLOT_GAP   = 6;
+    static constexpr int SPELL_SLOT_OFFSET = 1000;
 
-    int slots[SLOT_COUNT] = { -1, -1, -1, -1, -1, -1, -1, -1, -1 }; // -1 = empty, else (int)TechniqueId
+    int slots[SLOT_COUNT] = { -1, -1, -1, -1, -1, -1, -1, -1, -1 }; // -1 = empty
+
+    static bool       isSpellSlot(int raw)  { return raw >= SPELL_SLOT_OFFSET; }
+    static SpellId     spellOf(int raw)     { return (SpellId)(raw - SPELL_SLOT_OFFSET); }
+    static TechniqueId techniqueOf(int raw) { return (TechniqueId)raw; }
 
     bool assign(int slot, TechniqueId id) {
         if (slot < 0 || slot >= SLOT_COUNT) return false;
-        // Clicking the same technique into the slot it's already in clears it —
+        // Clicking the same action into the slot it's already in clears it —
         // this is the panel's "toggle" affordance, no separate clear button needed.
         if (slots[slot] == (int)id) slots[slot] = -1;
         else                        slots[slot] = (int)id;
+        return true;
+    }
+
+    bool assign(int slot, SpellId id) {
+        if (slot < 0 || slot >= SLOT_COUNT) return false;
+        int raw = SPELL_SLOT_OFFSET + (int)id;
+        if (slots[slot] == raw) slots[slot] = -1;
+        else                    slots[slot] = raw;
         return true;
     }
 
@@ -54,9 +71,25 @@ struct Hotbar {
         for (int i = 0; i < SLOT_COUNT; i++) {
             SDL_Rect rect = slotRect(i);
 
-            bool empty = slots[i] < 0;
-            TechniqueId id = empty ? TechniqueId::TECHNIQUE_COUNT : (TechniqueId)slots[i];
-            bool ready = !empty && techniqueUsable(p, id);
+            int  raw   = slots[i];
+            bool empty = raw < 0;
+
+            const char* name  = nullptr;
+            float       cost  = 0.0f;
+            bool        ready = false;
+            if (!empty) {
+                if (isSpellSlot(raw)) {
+                    const Spell& s = spellInfo(spellOf(raw));
+                    name  = s.name;
+                    cost  = s.staminaCost;
+                    ready = spellUsable(p, spellOf(raw));
+                } else {
+                    const Technique& t = techniqueInfo(techniqueOf(raw));
+                    name  = t.name;
+                    cost  = t.staminaCost;
+                    ready = techniqueUsable(p, techniqueOf(raw));
+                }
+            }
 
             SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
             SDL_SetRenderDrawColor(r, PanelStyle::BG.r, PanelStyle::BG.g, PanelStyle::BG.b, 235);
@@ -74,14 +107,13 @@ struct Hotbar {
             txt(r, f, numStr.c_str(), rect.x + 3, rect.y + 1, {150, 145, 130, 255});
 
             if (!empty) {
-                const Technique& t = techniqueInfo(id);
-                std::string label = shortLabel(t.name);
+                std::string label = shortLabel(name);
                 SDL_Color labelCol = ready ? SDL_Color{225, 210, 150, 255}
                                            : SDL_Color{130, 110, 95, 255};
                 txt(r, f, label.c_str(), rect.x + 3, rect.y + 16, labelCol);
 
-                std::string cost = std::to_string((int)t.staminaCost);
-                txt(r, f, cost.c_str(), rect.x + 3, rect.y + 29, {110, 160, 200, 255});
+                std::string costStr = std::to_string((int)cost);
+                txt(r, f, costStr.c_str(), rect.x + 3, rect.y + 29, {110, 160, 200, 255});
             }
         }
     }
@@ -96,7 +128,7 @@ private:
 
     static void txt(SDL_Renderer* r, TTF_Font* f,
                     const char* text, int x, int y, SDL_Color col) {
-        SDL_Surface* s = TTF_RenderText_Solid(f, text, col);
+        SDL_Surface* s = TTF_RenderUTF8_Solid(f, text, col);
         if (!s) return;
         SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
         SDL_FreeSurface(s);

@@ -44,7 +44,7 @@ struct ExaminePanel {
 
         // ── Helpers ──────────────────────────────────────────────────────
         auto txt = [&](const std::string& text, SDL_Color col) {
-            SDL_Surface* s = TTF_RenderText_Solid(f, text.c_str(), col);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(f, text.c_str(), col);
             if (!s) return;
             SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
             SDL_FreeSurface(s);
@@ -184,7 +184,7 @@ struct ExaminePanel {
         txt(total, {220, 220, 200, 255});
 
         // Close hint
-        SDL_Surface* hs = TTF_RenderText_Solid(f, "Click or E to close", {65, 65, 60, 255});
+        SDL_Surface* hs = TTF_RenderUTF8_Solid(f, "Click or E to close", {65, 65, 60, 255});
         if (hs) {
             SDL_Texture* ht = SDL_CreateTextureFromSurface(r, hs);
             SDL_FreeSurface(hs);

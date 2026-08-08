@@ -18,6 +18,7 @@
 #include "npc.h"
 #include "villager_examine_panel.h"
 #include "combat.h"
+#include "magic.h"
 #include "craft_panel.h"
 #include "wait_panel.h"
 #include "confirm_panel.h"
@@ -25,6 +26,7 @@
 #include "skills_panel.h"
 #include "hotbar.h"
 #include "techniques_panel.h"
+#include "spells_panel.h"
 #include "trade_panel.h"
 #include "panel_style.h"
 #include "menu_hub.h"
@@ -53,6 +55,17 @@ std::vector<Corpse>   corpses;
 std::vector<Villager> villagers;
 int villageWellX = -1, villageWellY = -1; // walkable tile beside the well, set in spawnVillagers()
 
+// A tile currently on fire from a manualArea spell (Wall of Fire) — burns
+// dmgPerTurn into whoever's standing there once per player action
+// (tickFireHazards()) until turnsLeft counts down to zero. See
+// confirmWallTargeting() for how these get created.
+struct FireHazardTile {
+    int x, y;
+    int turnsLeft;
+    int dmgPerTurn;
+};
+std::vector<FireHazardTile> fireHazards;
+
 std::vector<SDL_Point> currentPath;
 int pathIndex = 0;
 Uint32 lastMoveTime = 0;
@@ -72,14 +85,79 @@ Villager* attackTargetVillager = nullptr;
 // attackTargetVillager, but starts a dialogue instead of a fight on arrival.
 Villager* talkTargetVillager = nullptr;
 
-// Set by useHotbarSlot() when a technique needs a target picked manually:
-// every tile within the technique's range gets painted
-// (renderTechniqueTargeting(), near the main render loop) and input is
-// swallowed until the player clicks a tile or cancels (see the
-// techniqueTargeting block in handleInput(), and resolveTechniqueTargeting()/
-// cancelTechniqueTargeting() near useHotbarSlot()).
-bool techniqueTargeting  = false;
-int  techniqueTargetSlot = -1;
+// Set by useHotbarSlot() when a technique or spell needs a target picked
+// manually: every tile within its range gets painted (renderHotbarTargeting(),
+// near the main render loop) and input is swallowed until the player clicks a
+// tile or cancels (see the hotbarTargeting block in handleInput(), and
+// resolveHotbarTargeting()/cancelHotbarTargeting() near useHotbarSlot()).
+bool hotbarTargeting  = false;
+int  hotbarTargetSlot = -1;
+
+// Separate targeting mode for manualArea spells (Wall of Fire): instead of
+// one click resolving the cast immediately, the player toggles any number of
+// tiles within range on/off (toggleWallTile(), in the wallTargeting block of
+// handleInput()) and confirms with Enter (confirmWallTargeting()) or cancels
+// with Esc/right-click. Mutually exclusive with hotbarTargeting — only one
+// targeting mode is ever active at a time.
+bool wallTargeting  = false;
+int  wallTargetSlot = -1;
+std::vector<SDL_Point> wallSelection;
+
+// Two-phase targeting for throwsWall spells (Wall Throw): first click picks
+// which existing O_WALL to hurl (within a generous fixed pick radius, not
+// the spell's normal range), second click picks the target (within the
+// spell's normal range). Doesn't fit hotbarTargeting (one click) or
+// wallTargeting (open-ended multi-select) — needs exactly two clicks with
+// different validity rules each. Mutually exclusive with both of those.
+bool wallThrowTargeting     = false;
+int  wallThrowSlot          = -1;
+bool wallThrowPickingSource = true;
+int  wallThrowSrcX = -1, wallThrowSrcY = -1;
+
+// Purely cosmetic: a spell's projectile flying from caster to target after a
+// cast resolves (damage is already applied — see useSpellAtTile()).
+// Advanced by wall-clock time (SDL_GetTicks()) each frame, independent of the
+// turn system, and drawn by renderSpellProjectile() near the main render loop.
+struct SpellProjectile {
+    bool        active    = false;
+    float       fromX = 0, fromY = 0, toX = 0, toY = 0;
+    Uint32      startTime = 0;
+    Uint32      duration  = 160;
+    const char* symbol    = "*";
+    SDL_Color   color     = {255, 255, 255, 255};
+};
+SpellProjectile spellProjectile;
+
+// Purely cosmetic: a fading tile-radius flash marking a BURST spell's blast
+// area (Fireball, Explosion) — so the player can actually see how big the
+// splash was, not just read it in the tooltip. Timed to appear once the
+// projectile above finishes its flight (delay), then fades out over
+// duration. Drawn by renderSpellBurst() near the main render loop.
+struct SpellBurst {
+    bool        active    = false;
+    int         cx = 0, cy = 0;   // impact tile, blast center
+    int         radius    = 0;
+    Uint32      startTime = 0;
+    Uint32      delay     = 160;  // matches SpellProjectile::duration
+    Uint32      duration  = 260;
+    SDL_Color   color     = {255, 255, 255, 255};
+};
+SpellBurst spellBurst;
+
+// Purely cosmetic: a knocked-back actor's own glyph sliding from its old
+// tile to its new one, so a Gust/Vortex push actually reads as a shove
+// instead of the target just silently teleporting one tile over. A vector,
+// not a single slot like SpellBurst — Vortex can knock back several actors
+// in one cast and each gets its own streak. Drawn by renderKnockbackFlashes()
+// near the main render loop, pruned once its short flight is done.
+struct KnockbackFlash {
+    float       fromX, fromY, toX, toY;
+    Uint32      startTime;
+    const char* symbol;
+    SDL_Color   color;
+};
+std::vector<KnockbackFlash> knockbackFlashes;
+constexpr Uint32 KNOCKBACK_FLASH_DURATION = 150;
 
 int hoverX = 0, hoverY = 0;
 int lastHoverX = -1, lastHoverY = -1;
@@ -98,6 +176,7 @@ EffectsPanel effectsPanel;
 SkillsPanel  skillsPanel;
 Hotbar          hotbar;
 TechniquesPanel techniquesPanel;
+SpellsPanel     spellsPanel;
 TradePanel   tradePanel;
 ContextMenu contextMenu;
 ExaminePanel examinePanel;
@@ -497,6 +576,7 @@ void villagerCombatAct(Villager& v) {
 void updateVillagers();    // forward declaration — defined after checkSectorTransition
 void tickVillagerNeeds();  // forward declaration — defined after updateVillagers
 void tickEnemyNeeds();     // forward declaration — defined below, called once per player action
+void tickFireHazards();    // forward declaration — defined near Wall of Fire casting, called once per player action
 void interruptCrafting(bool playerHit); // forward declaration — defined in villager section
 
 // One world tick: give everyone energy, then let enemies spend theirs.
@@ -602,6 +682,7 @@ void onPlayerAct(int extraEnergy = 0) {
     player.tickNeeds();
     tickVillagerNeeds();
     tickEnemyNeeds();
+    tickFireHazards();
     if (player.hunger >= 1.0f) {
         player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
         player.sync();
@@ -1124,15 +1205,23 @@ void tickVillagerNeeds() {
 
     for (Villager& v : villagers) {
         if (!v.alive) continue;
+        // Can kill via bleed-out on its own (tickNeeds() drains torso HP from any
+        // open wound every call, not just on the hour) — so the alive-check below
+        // must NOT be gated behind hourCrossed, or a villager who takes a bleeding
+        // wound and flees instead of dying outright silently vanishes with no
+        // corpse/loot the next time this runs before the hour ticks over.
         v.tickNeeds(); // inherited from Actor — same rate constants as the player
 
-        if (!hourCrossed) continue;
-        bool wasThirstDeath = v.thirst >= 1.0f; // check before takeDamage() may push it further
-        if (v.hunger >= 1.0f) v.takeDamage(1, PartTarget::TORSO);
-        if (v.thirst >= 1.0f) v.takeDamage(2, PartTarget::TORSO);
+        if (hourCrossed) {
+            if (v.hunger >= 1.0f) v.takeDamage(1, PartTarget::TORSO);
+            if (v.thirst >= 1.0f) v.takeDamage(2, PartTarget::TORSO);
+        }
+
         if (!v.alive) {
-            panel.addMessage(v.name + " has died of " +
-                             (wasThirstDeath ? "dehydration." : "starvation."));
+            std::string cause = v.thirst >= 1.0f ? "has died of dehydration."
+                               : v.hunger >= 1.0f ? "has died of starvation."
+                                                    : "has bled to death.";
+            panel.addMessage(v.name + " " + cause);
             // Everything they had (and wore) drops — same rule as enemy loot, nothing vanishes.
             dropVillagerLoot(v);
         }
@@ -1212,6 +1301,55 @@ void walkAdjacentTo(int tx, int ty) {
     pendingActX = tx; pendingActY = ty;
     currentPath = findPath(player.x, player.y, bestX, bestY);
     pathIndex   = 1;
+}
+
+// Clears the object at (tx,ty) and scatters the resources destroying it
+// would yield — shared by interactWithObject() (player chopping/mining) and
+// applySpellObjectDamage() (any spell breaking scenery) so both paths give
+// the same loot for the same object type.
+void destroyWorldObject(int tx, int ty, int oid) {
+    Tile& tile = map[ty][tx];
+    tile.objectId = -1;
+    tile.objectHp = 0;
+
+    auto drop = [&](Item item) {
+        groundItems.push_back({tx, ty, std::move(item), playerSectorX, playerSectorY});
+    };
+
+    switch (oid) {
+        case O_TREE:
+            for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::woodLog());
+            for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::branch());
+            panel.addMessage("The tree falls with a crash!");
+            break;
+        case O_DEAD_TREE:
+            for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::woodLog());
+            drop(Items::branch());
+            panel.addMessage("The dead tree splinters and collapses.");
+            break;
+        case O_ROCK:
+            for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::stonePiece());
+            panel.addMessage("The rock breaks apart.");
+            break;
+        case O_BOULDER:
+            for (int k = 0; k < rand() % 3 + 4; k++) drop(Items::stonePiece());
+            panel.addMessage("The boulder finally shatters!");
+            break;
+        case O_FALLEN_LOG:
+            for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::woodLog());
+            panel.addMessage("You chop the log into sections.");
+            break;
+        case O_WALL:
+            for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::stonePiece());
+            panel.addMessage("The wall crumbles into rubble!");
+            break;
+        default:
+            panel.addMessage("The " + std::string(objectDefs[oid].name) + " breaks apart.");
+            break;
+    }
+
+    currentPath.clear(); pathIndex = 0; previewPath.clear();
+    updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
 }
 
 void interactWithObject(int tx, int ty) {
@@ -1305,43 +1443,7 @@ void interactWithObject(int tx, int ty) {
     tile.objectHp -= hitDmg;
 
     if (tile.objectHp <= 0) {
-        tile.objectId = -1;
-        tile.objectHp = 0;
-
-        auto drop = [&](Item item) {
-            groundItems.push_back({tx, ty, std::move(item), playerSectorX, playerSectorY});
-        };
-
-        switch (oid) {
-            case O_TREE:
-                for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::woodLog());
-                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::branch());
-                panel.addMessage("The tree falls with a crash!");
-                break;
-            case O_DEAD_TREE:
-                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::woodLog());
-                drop(Items::branch());
-                panel.addMessage("The dead tree splinters and collapses.");
-                break;
-            case O_ROCK:
-                for (int k = 0; k < rand() % 2 + 2; k++) drop(Items::stonePiece());
-                panel.addMessage("The rock breaks apart.");
-                break;
-            case O_BOULDER:
-                for (int k = 0; k < rand() % 3 + 4; k++) drop(Items::stonePiece());
-                panel.addMessage("The boulder finally shatters!");
-                break;
-            case O_FALLEN_LOG:
-                for (int k = 0; k < rand() % 2 + 1; k++) drop(Items::woodLog());
-                panel.addMessage("You chop the log into sections.");
-                break;
-            default:
-                panel.addMessage("The " + std::string(objectDefs[oid].name) + " breaks apart.");
-                break;
-        }
-
-        currentPath.clear(); pathIndex = 0; previewPath.clear();
-        updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
+        destroyWorldObject(tx, ty, oid);
     } else {
         panel.addMessage("You strike the " + std::string(od.name)
                        + ". (" + std::to_string(tile.objectHp)
@@ -1473,57 +1575,457 @@ void useTechniqueOnVillager(int vi, TechniqueId id) {
     onPlayerAct(t.extraEnergy);
 }
 
-// Ends technique-targeting mode. msg empty = a target was found and the attack
-// already fired (or the mode is being torn down silently); non-empty = shown
-// as a log message (cancelled / out of range / nothing there).
-void cancelTechniqueTargeting(const std::string& msg) {
-    techniqueTargeting  = false;
-    techniqueTargetSlot = -1;
+// Purely cosmetic flight from caster to target — see SpellProjectile's comment
+// near its declaration for why this doesn't gate damage resolution.
+void spawnSpellProjectile(int fromX, int fromY, int toX, int toY, const Spell& s) {
+    spellProjectile.active    = true;
+    spellProjectile.fromX     = (float)fromX;
+    spellProjectile.fromY     = (float)fromY;
+    spellProjectile.toX       = (float)toX;
+    spellProjectile.toY       = (float)toY;
+    spellProjectile.startTime = SDL_GetTicks();
+    spellProjectile.symbol    = s.symbol;
+    spellProjectile.color     = s.color;
+}
+
+// See SpellBurst's comment near its declaration. delay defaults to matching
+// a normal projectile's flight time; ground-magic callers (Stone Wall/
+// Architect) that never spawn a projectile pass 0 for an instant flash.
+void spawnSpellBurst(int cx, int cy, int radius, SDL_Color color, Uint32 delay = 160) {
+    spellBurst.active    = true;
+    spellBurst.cx         = cx;
+    spellBurst.cy         = cy;
+    spellBurst.radius     = radius;
+    spellBurst.startTime  = SDL_GetTicks();
+    spellBurst.delay      = delay;
+    spellBurst.color      = color;
+}
+
+// See KnockbackFlash's comment near its declaration.
+void spawnKnockbackFlash(const Actor& who, int fromX, int fromY, int toX, int toY) {
+    knockbackFlashes.push_back({(float)fromX, (float)fromY, (float)toX, (float)toY,
+                                 SDL_GetTicks(), who.symbol, who.color});
+}
+
+// A fire spell landing on empty, flammable ground gets a chance to scorch it
+// instead of just fizzling — docs/magic.md: "Іскра... підпалює траву". Purely
+// a cosmetic ground-cover swap (no spreading/DoT fire hazard yet, no tile
+// system exists for that). Returns true if this tile actually caught.
+bool tryIgniteGround(int x, int y) {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) return false;
+    Tile& t = map[y][x];
+    bool flammable = t.groundId == G_GRASS || t.groundId == G_TALL_GRASS
+                   || t.groundId == G_MOSS  || t.groundId == G_LEAVES;
+    if (!flammable) return false;
+    if (rand() % 100 >= 30) return false;
+    t.groundId = G_SCORCHED;
+    return true;
+}
+
+// How much of a spell's raw damage actually gets through to a struck
+// object's material — docs/magic.md doesn't spec numbers for this, these are
+// our own calibration: fire chews through wood fast, barely scratches stone,
+// and does something in-between to worked metal (heats it, doesn't consume
+// it). Other schools don't model a material interaction yet — full damage
+// until one does, same "no gap left unhandled" default as elsewhere.
+inline float materialResistance(Skill school, Material mat) {
+    if (school == Skill::FIRE) {
+        switch (mat) {
+            case Material::WOOD:  return 1.6f;
+            case Material::STONE: return 0.15f;
+            case Material::METAL: return 0.4f;
+            default:               return 1.0f;
+        }
+    }
+    return 1.0f;
+}
+
+// Any object caught in a spell's footprint takes real damage, scaled by how
+// well its material resists that school (materialResistance() above) — a
+// Fireball chews through a wooden door fast but barely dents a stone wall.
+// Deterministic, unlike tryIgniteGround()'s cosmetic chance-roll — this is a
+// real hit, same as chopping/mining, just from magic instead of a tool.
+// Objects with durability 0 (the well) are the indestructible sentinel and
+// just absorb the shot, matching interactWithObject()'s special-cased
+// protection for them. Reuses destroyWorldObject() on a kill, so a
+// magic-felled tree/log drops the same loot an axe would. Returns true if
+// there was an object here at all (whether or not it broke), so the caller
+// knows not to also roll a ground-scorch on the same tile.
+bool applySpellObjectDamage(int x, int y, const Spell& s) {
+    if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) return false;
+    Tile& t = map[y][x];
+    if (t.objectId < 0) return false;
+    int oid = t.objectId;
+    const ObjectDef& od = objectDefs[oid];
+    if (od.durability <= 0) return true; // indestructible — shot is absorbed, nothing happens
+
+    float resist = materialResistance(s.school, od.material);
+    float spread = 0.85f + (rand() % 31) / 100.0f; // ±15%
+    int   dmg    = std::max(1, (int)(s.baseDamage * resist * spread));
+    t.objectHp  -= dmg;
+
+    if (t.objectHp <= 0) {
+        // destroyWorldObject() prints its own "it breaks/falls/shatters" message —
+        // no separate "destroyed!" announcement here, same as interactWithObject().
+        destroyWorldObject(x, y, oid);
+    } else {
+        panel.addMessage(std::string(s.name) + " hits the " + od.name + " for "
+                         + std::to_string(dmg) + " damage.");
+    }
+    return true;
+}
+
+// A Water spell touching an active fire-wall tile snuffs it out early — the
+// natural counter to Wall of Fire/Fireball scorch marks. Returns true if
+// there was fire there to put out.
+bool tryExtinguishFire(int x, int y) {
+    for (auto it = fireHazards.begin(); it != fireHazards.end(); ++it) {
+        if (it->x == x && it->y == y) { fireHazards.erase(it); return true; }
+    }
+    return false;
+}
+
+// Pushes target one tile directly away from (fromX,fromY) — Air's signature
+// control effect (docs/magic.md: "Порив — Відштовхнути ворога на 1 тайл").
+// Generic over Actor so it works for enemy/villager/player alike, matching
+// the world-symmetry rule. No-ops silently (returns false, no message of its
+// own — the caller decides what, if anything, to say) if the destination
+// tile is off-map, unwalkable, or already occupied by someone else.
+bool tryKnockback(Actor& target, int fromX, int fromY) {
+    int dx = target.x - fromX, dy = target.y - fromY;
+    int sx = (dx > 0) - (dx < 0);
+    int sy = (dy > 0) - (dy < 0);
+    if (sx == 0 && sy == 0) return false; // caster and target share a tile — no direction to push
+    int nx = target.x + sx, ny = target.y + sy;
+    if (nx < 0 || nx >= MAP_WIDTH || ny < 0 || ny >= MAP_HEIGHT) return false;
+    if (!map[ny][nx].walkable()) return false;
+    if (getEnemyAt(nx, ny) || getVillagerAt(nx, ny)) return false;
+    if (player.x == nx && player.y == ny) return false;
+    spawnKnockbackFlash(target, target.x, target.y, nx, ny);
+    target.x = nx;
+    target.y = ny;
+    return true;
+}
+
+// Casts any spell (POINT/BURST) at a clicked tile — no actor has to be
+// standing there, and that includes the player: if the blast reaches the
+// caster's own tile (a BURST cast at your own feet, or a large enough
+// radius that circles back), it hits them too, same formula as any other
+// target — no free pass for self-inflicted splash. POINT only affects the
+// exact impact tile; BURST covers every tile within aoeRadius of it. Any
+// touched tile with nobody on it still deals real damage to whatever object
+// sits there (applySpellObjectDamage(), scaled by material) and, failing
+// that, gets a shot at scorching the ground cover (tryIgniteGround()) if the
+// spell's school is Fire — a shot into empty ground is never wasted.
+// rainCall/buildsWall/reclaimsWall spells short-circuit all of the above —
+// see their own branches near the top of the function body. manualArea/
+// manualBuild spells (Wall of Fire, Architect) don't go through here at all
+// — see confirmWallTargeting(); throwsWall (Wall Throw) doesn't either — see
+// castWallThrow()/resolveWallThrowClick().
+void useSpellAtTile(int tx, int ty, SpellId id) {
+    const Spell& s = spellInfo(id);
+    if (!player.hasStamina(s.staminaCost)) {
+        panel.addMessage("Not enough stamina to cast " + std::string(s.name) + "!");
+        return;
+    }
+    player.spendStamina(s.staminaCost);
+
+    SpellCastRoll roll = rollSpellCast(player, id);
+    if (roll.backfired) {
+        panel.addMessage(std::string(s.name) + " backfires, hurting your "
+                         + partName(PartTarget::ARM_R) + " for "
+                         + std::to_string(roll.selfDamage) + " damage!");
+        if (!player.isAlive()) panel.addMessage("The backfire kills you.");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+
+    // Ground magic (buildsWall/reclaimsWall) never flies through the air —
+    // no projectile for those. throwsWall (Wall Throw) doesn't come through
+    // here at all anymore — see castWallThrow()/resolveWallThrowClick().
+    bool groundMagic = s.buildsWall || s.reclaimsWall;
+    if (!groundMagic) {
+        spawnSpellProjectile(player.x, player.y, tx, ty, s);
+        if (s.shape == SpellShape::BURST) spawnSpellBurst(tx, ty, s.aoeRadius, s.color);
+    }
+
+    // rainCall (Rain Call) and buildsWall (Stone Wall) don't hit actors at
+    // all — pure map/hazard effects, resolved and returned here before the
+    // normal footprint/damage logic ever runs.
+    if (s.rainCall) {
+        int extinguished = 0;
+        for (int y = ty - s.aoeRadius; y <= ty + s.aoeRadius; y++) {
+            for (int x = tx - s.aoeRadius; x <= tx + s.aoeRadius; x++) {
+                if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
+                if (std::max(std::abs(x - tx), std::abs(y - ty)) > s.aoeRadius) continue;
+                if (tryExtinguishFire(x, y)) extinguished++;
+                if (map[y][x].groundId == G_SCORCHED) map[y][x].groundId = G_GRASS;
+            }
+        }
+        panel.addMessage(extinguished > 0 ? "Rain pours down, dousing the flames!"
+                                           : "Rain pours down over the area.");
+        if (roll.leveledUp)
+            panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                             + std::to_string(roll.newSkillLevel) + "!");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+    if (s.buildsWall) {
+        bool blocked = !map[ty][tx].walkable() || map[ty][tx].objectId >= 0
+                     || getEnemyAt(tx, ty) || getVillagerAt(tx, ty)
+                     || (tx == player.x && ty == player.y);
+        if (blocked) {
+            panel.addMessage(std::string(s.name) + " fizzles — the ground there isn't clear.");
+        } else {
+            map[ty][tx].objectId = O_WALL;
+            map[ty][tx].objectHp = objectDefs[O_WALL].durability;
+            spawnSpellBurst(tx, ty, 0, s.color, 0); // ground shudders right where it rises — no thrown dart
+            panel.addMessage("A slab of stone rises from the earth!");
+            updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
+        }
+        if (roll.leveledUp)
+            panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                             + std::to_string(roll.newSkillLevel) + "!");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+    if (s.reclaimsWall) {
+        if (map[ty][tx].objectId != O_WALL) {
+            panel.addMessage(std::string(s.name) + " fizzles — there's no stone wall there.");
+        } else {
+            map[ty][tx].objectId = -1;
+            map[ty][tx].objectHp = 0;
+            spawnSpellBurst(tx, ty, 0, s.color, 0);
+            panel.addMessage("The wall sinks back into the earth.");
+            updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
+        }
+        if (roll.leveledUp)
+            panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                             + std::to_string(roll.newSkillLevel) + "!");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+    std::vector<SDL_Point> footprint;
+    if (s.shape == SpellShape::BURST) {
+        for (int y = ty - s.aoeRadius; y <= ty + s.aoeRadius; y++)
+            for (int x = tx - s.aoeRadius; x <= tx + s.aoeRadius; x++)
+                if (x >= 0 && x < MAP_WIDTH && y >= 0 && y < MAP_HEIGHT &&
+                    std::max(std::abs(x - tx), std::abs(y - ty)) <= s.aoeRadius)
+                    footprint.push_back({x, y});
+    } else { // POINT
+        footprint.push_back({tx, ty});
+    }
+
+    std::vector<Enemy*>    hitEnemies;
+    std::vector<Villager*> hitVillagers;
+    bool hitPlayer      = false;
+    bool hitObject      = false;
+    bool ignitedAny     = false;
+    bool extinguishedAny = false;
+    for (const SDL_Point& t : footprint) {
+        if (s.school == Skill::WATER && tryExtinguishFire(t.x, t.y)) extinguishedAny = true;
+        if (t.x == player.x && t.y == player.y) { hitPlayer = true; continue; }
+        if (Enemy* e = getEnemyAt(t.x, t.y)) { hitEnemies.push_back(e); continue; }
+        if (Villager* v = getVillagerAt(t.x, t.y)) { hitVillagers.push_back(v); continue; }
+        if (applySpellObjectDamage(t.x, t.y, s)) { hitObject = true; continue; }
+        if (s.school == Skill::FIRE && tryIgniteGround(t.x, t.y)) ignitedAny = true;
+    }
+
+    if (extinguishedAny) panel.addMessage("Steam hisses as the flames go out.");
+
+    if (!hitPlayer && !hitObject && hitEnemies.empty() && hitVillagers.empty()) {
+        panel.addMessage("You cast " + std::string(s.name)
+                         + (ignitedAny ? " — flames catch on whatever's there."
+                                       : " — it lands on empty ground."));
+    }
+
+    if (hitPlayer) {
+        SpellResult r = resolveSpellHit(player, player, id);
+        panel.addMessage("Your own " + std::string(s.name) + " engulfs your "
+                         + partName(r.part) + " for " + std::to_string(r.damage) + " damage!");
+        if (!player.isAlive()) panel.addMessage("You are consumed by your own spell.");
+    }
+
+    for (Enemy* e : hitEnemies) {
+        SpellResult r = resolveSpellHit(player, *e, id);
+        panel.addMessage(std::string(s.name) + " hits " + e->name + "'s "
+                         + partName(r.part) + " for " + std::to_string(r.damage) + " damage.");
+        if (!e->isAlive()) {
+            panel.addMessage(e->name + " dies" + (s.school == Skill::FIRE ? ", charred." : "."));
+            dropEnemyLoot(*e);
+        } else if (s.knockback && tryKnockback(*e, player.x, player.y)) {
+            panel.addMessage(e->name + " is thrown back by the wind!");
+        }
+    }
+    for (Villager* v : hitVillagers) {
+        SpellResult r = resolveSpellHit(player, *v, id);
+        panel.addMessage(std::string(s.name) + " hits " + v->name + "'s "
+                         + partName(r.part) + " for " + std::to_string(r.damage) + " damage.");
+        if (!v->isAlive()) {
+            panel.addMessage(v->name + " dies" + (s.school == Skill::FIRE ? ", charred." : "."));
+            dropVillagerLoot(*v);
+        } else {
+            villagerReactToAttack(*v);
+            if (s.knockback && tryKnockback(*v, player.x, player.y)) {
+                panel.addMessage(v->name + " is thrown back by the wind!");
+            }
+        }
+    }
+
+    if (roll.leveledUp)
+        panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                         + std::to_string(roll.newSkillLevel) + "!");
+
+    onPlayerAct(s.extraEnergy);
+}
+
+// Resolves a selfCast spell (Create Water) immediately — no targeting mode,
+// no click to wait on, no travel. Still spends stamina and rolls the usual
+// single backfire per docs/magic.md's "невдалі касти на низькій навичці",
+// same as any other spell; only the "there's an impact point" part is
+// skipped. Only Create Water exists here so far — add more selfCast spells
+// with their own branch as they show up rather than inventing a generic
+// "utility effect" field for a single spell.
+void useSelfSpell(SpellId id) {
+    const Spell& s = spellInfo(id);
+    if (!player.hasStamina(s.staminaCost)) {
+        panel.addMessage("Not enough stamina to cast " + std::string(s.name) + "!");
+        return;
+    }
+    player.spendStamina(s.staminaCost);
+
+    SpellCastRoll roll = rollSpellCast(player, id);
+    if (roll.backfired) {
+        panel.addMessage(std::string(s.name) + " backfires, hurting your "
+                         + partName(PartTarget::ARM_R) + " for "
+                         + std::to_string(roll.selfDamage) + " damage!");
+        if (!player.isAlive()) panel.addMessage("The backfire kills you.");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+
+    if (id == SpellId::CREATE_WATER) {
+        bool wasThirsty = player.thirst > 0.0f;
+        player.thirst = std::max(0.0f, player.thirst - 0.5f);
+        panel.addMessage(wasThirsty
+            ? "You conjure a stream of water from the air and drink deeply."
+            : "You conjure water from the air, but you're not thirsty.");
+    }
+
+    if (roll.leveledUp)
+        panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                         + std::to_string(roll.newSkillLevel) + "!");
+
+    onPlayerAct(s.extraEnergy);
+}
+
+// Ends hotbar-targeting mode (technique or spell). msg empty = a target was
+// found and the action already fired (or the mode is being torn down
+// silently); non-empty = shown as a log message (cancelled / out of range /
+// nothing there).
+void cancelHotbarTargeting(const std::string& msg) {
+    hotbarTargeting  = false;
+    hotbarTargetSlot = -1;
     if (!msg.empty()) panel.addMessage(msg);
 }
 
-// Called with the tile the player clicked while targeting mode is active
-// (see the techniqueTargeting block in handleInput()). Only a tile within the
-// technique's range and actually holding an enemy or villager is a valid pick;
-// anything else cancels rather than silently doing nothing, so a stray click
-// doesn't leave the player stuck in targeting mode.
-void resolveTechniqueTargeting(int mx, int my) {
-    TechniqueId id = (TechniqueId)hotbar.slots[techniqueTargetSlot];
-    const Technique& t = techniqueInfo(id);
+// Called with the tile the player clicked while targeting mode is active (see
+// the hotbarTargeting block in handleInput()). Must be within the bound
+// action's range. Techniques (melee) still need an enemy or villager on that
+// exact tile; spells never require one — they always land, see
+// useSpellAtTile(). Anything invalid cancels rather than silently doing
+// nothing, so a stray click doesn't leave the player stuck in targeting mode.
+void resolveHotbarTargeting(int mx, int my) {
+    int raw = hotbar.slots[hotbarTargetSlot];
+    bool isSpell = Hotbar::isSpellSlot(raw);
+    int  range   = isSpell ? spellInfo(Hotbar::spellOf(raw)).range
+                            : techniqueInfo(Hotbar::techniqueOf(raw)).range;
 
     if (mx < 0 || mx >= MAP_WIDTH || my < 0 || my >= MAP_HEIGHT) {
-        cancelTechniqueTargeting("Out of range.");
+        cancelHotbarTargeting("Out of range.");
         return;
     }
     int dist = std::max(std::abs(mx - player.x), std::abs(my - player.y));
-    if (dist > t.range || !map[my][mx].visible) {
-        cancelTechniqueTargeting("Out of range.");
+    if (dist > range || !map[my][mx].visible) {
+        cancelHotbarTargeting("Out of range.");
+        return;
+    }
+
+    // Spells always land wherever the player clicks — no actor has to be
+    // standing on that exact tile (see useSpellAtTile()). Techniques are
+    // melee, so they still need a real target under the cursor.
+    if (isSpell) {
+        cancelHotbarTargeting("");
+        useSpellAtTile(mx, my, Hotbar::spellOf(raw));
         return;
     }
 
     if (Enemy* enemy = getEnemyAt(mx, my)) {
-        cancelTechniqueTargeting("");
-        useTechniqueOnEnemy(enemy, mx, my, id);
+        cancelHotbarTargeting("");
+        useTechniqueOnEnemy(enemy, mx, my, Hotbar::techniqueOf(raw));
         return;
     }
     if (Villager* v = getVillagerAt(mx, my)) {
         int vi = (int)(v - &villagers[0]);
-        cancelTechniqueTargeting("");
-        useTechniqueOnVillager(vi, id);
+        cancelHotbarTargeting("");
+        useTechniqueOnVillager(vi, Hotbar::techniqueOf(raw));
         return;
     }
-    cancelTechniqueTargeting("No target there.");
+    cancelHotbarTargeting("No target there.");
 }
 
 // Triggered by the hotbar (number key or mouse click on a slot). Doesn't pick
-// a target itself anymore — it enters targeting mode so the player clicks who
-// to hit among whatever's actually in range (renderTechniqueTargeting() paints
-// the range, resolveTechniqueTargeting() above resolves the click).
+// a target itself — it enters targeting mode so the player clicks who to hit
+// among whatever's actually in range (renderHotbarTargeting() paints the
+// range, resolveHotbarTargeting() above resolves the click).
 void useHotbarSlot(int slot) {
     if (slot < 0 || slot >= Hotbar::SLOT_COUNT) return;
     int raw = hotbar.slots[slot];
     if (raw < 0) { panel.addMessage("That hotbar slot is empty."); return; }
-    TechniqueId id = (TechniqueId)raw;
+
+    if (Hotbar::isSpellSlot(raw)) {
+        SpellId id = Hotbar::spellOf(raw);
+        const Spell& s = spellInfo(id);
+        if (!spellUnlocked(player, id)) {
+            panel.addMessage("You haven't learned " + std::string(s.name) + " yet.");
+            return;
+        }
+        if (!player.hasStamina(s.staminaCost)) {
+            panel.addMessage("Not enough stamina to cast " + std::string(s.name) + "!");
+            return;
+        }
+
+        if (s.manualArea || s.manualBuild) {
+            wallTargeting  = true;
+            wallTargetSlot = slot;
+            wallSelection.clear();
+            panel.addMessage("Click tiles to mark " + std::string(s.name)
+                             + " (Enter to cast, right-click/Esc to cancel).");
+            return;
+        }
+
+        if (s.selfCast) {
+            useSelfSpell(id);
+            return;
+        }
+
+        if (s.throwsWall) {
+            wallThrowTargeting     = true;
+            wallThrowSlot          = slot;
+            wallThrowPickingSource = true;
+            wallThrowSrcX = wallThrowSrcY = -1;
+            panel.addMessage("Click a stone wall to hurl (right-click/Esc to cancel).");
+            return;
+        }
+
+        hotbarTargeting  = true;
+        hotbarTargetSlot = slot;
+        panel.addMessage("Select a target for " + std::string(s.name)
+                         + " (right-click or Esc to cancel).");
+        return;
+    }
+
+    TechniqueId id = Hotbar::techniqueOf(raw);
     const Technique& t = techniqueInfo(id);
     if (!techniqueUnlocked(player, id)) {
         panel.addMessage("You haven't learned " + std::string(t.name) + " yet.");
@@ -1534,10 +2036,334 @@ void useHotbarSlot(int slot) {
         return;
     }
 
-    techniqueTargeting  = true;
-    techniqueTargetSlot = slot;
+    hotbarTargeting  = true;
+    hotbarTargetSlot = slot;
     panel.addMessage("Select a target for " + std::string(t.name)
                      + " (right-click or Esc to cancel).");
+}
+
+// ------------------------------------------------------------------ Wall of Fire (manualArea)
+//
+// Separate multi-tile targeting flow for manualArea spells — see wallTargeting's
+// comment near its declaration. useHotbarSlot() enters this mode instead of the
+// normal single-click hotbarTargeting when the bound spell has manualArea set.
+
+// Ends wallTargeting. msg empty = the cast already resolved (or the mode is
+// being torn down silently before resolving); non-empty = shown as a log
+// message (cancelled).
+void cancelWallTargeting(const std::string& msg) {
+    wallTargeting  = false;
+    wallTargetSlot = -1;
+    wallSelection.clear();
+    if (!msg.empty()) panel.addMessage(msg);
+}
+
+// Adds or removes one tile from the in-progress selection — clicking an
+// already-marked tile un-marks it, mirroring Hotbar::assign()'s toggle
+// affordance. Reports the running tile count and stamina cost so the player
+// can see exactly what a bigger wall will cost before confirming.
+void toggleWallTile(int mx, int my) {
+    if (wallTargetSlot < 0) return;
+    int raw = hotbar.slots[wallTargetSlot];
+    if (raw < 0 || !Hotbar::isSpellSlot(raw)) { cancelWallTargeting(""); return; }
+    const Spell& s = spellInfo(Hotbar::spellOf(raw));
+
+    if (mx < 0 || mx >= MAP_WIDTH || my < 0 || my >= MAP_HEIGHT) return;
+    int dist = std::max(std::abs(mx - player.x), std::abs(my - player.y));
+    if (dist > s.range || !map[my][mx].visible) {
+        panel.addMessage("Out of range.");
+        return;
+    }
+
+    auto it = std::find_if(wallSelection.begin(), wallSelection.end(),
+                            [&](const SDL_Point& p) { return p.x == mx && p.y == my; });
+    if (it != wallSelection.end()) wallSelection.erase(it);
+    else                           wallSelection.push_back({mx, my});
+
+    float cost = s.staminaCost * wallSelection.size();
+    panel.addMessage(std::to_string(wallSelection.size()) + " tile"
+                     + (wallSelection.size() == 1 ? "" : "s") + " marked — "
+                     + std::to_string((int)cost) + " stamina. (Enter to cast)");
+}
+
+// Adds/refreshes one burning tile — an already-burning tile just has its
+// timer and damage reset rather than stacking a second entry, so re-marking
+// the same tile in a later cast doesn't create duplicate hazards on it.
+void igniteFireHazardTile(int x, int y, int turns, int dmgPerTurn) {
+    for (FireHazardTile& f : fireHazards) {
+        if (f.x == x && f.y == y) { f.turnsLeft = turns; f.dmgPerTurn = dmgPerTurn; return; }
+    }
+    fireHazards.push_back({x, y, turns, dmgPerTurn});
+}
+
+// Confirms the current wallSelection and casts — spends staminaCost per
+// marked tile, rolls the usual single backfire for the whole cast, then
+// either (manualBuild, Architect) raises a wall on every clear marked tile,
+// or (manualArea, Wall of Fire) ignites every marked tile — immediate hit if
+// someone's standing there, including the caster if they marked their own
+// tile; applySpellObjectDamage/tryIgniteGround if not — and lights a
+// lingering FireHazardTile on each so tickFireHazards() keeps burning it for
+// hazardTurns more player actions.
+void confirmWallTargeting() {
+    int slot = wallTargetSlot;
+    std::vector<SDL_Point> tiles = wallSelection;
+    cancelWallTargeting("");
+
+    if (slot < 0) return;
+    if (tiles.empty()) { panel.addMessage("You need to mark at least one tile."); return; }
+
+    int raw = hotbar.slots[slot];
+    if (raw < 0 || !Hotbar::isSpellSlot(raw)) return;
+    SpellId id = Hotbar::spellOf(raw);
+    const Spell& s = spellInfo(id);
+
+    float totalCost = s.staminaCost * tiles.size();
+    if (!player.hasStamina(totalCost)) {
+        panel.addMessage("Not enough stamina to hold " + std::to_string(tiles.size())
+                         + " tiles of " + std::string(s.name) + " (needs "
+                         + std::to_string((int)totalCost) + ").");
+        return;
+    }
+    player.spendStamina(totalCost);
+
+    SpellCastRoll roll = rollSpellCast(player, id);
+    if (roll.backfired) {
+        panel.addMessage(std::string(s.name) + " backfires, hurting your "
+                         + partName(PartTarget::ARM_R) + " for "
+                         + std::to_string(roll.selfDamage) + " damage!");
+        if (!player.isAlive()) panel.addMessage("The backfire kills you.");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+
+    // manualBuild (Architect) raises a permanent wall on every clear marked
+    // tile instead of igniting a FireHazardTile — construction, not
+    // destruction, so it skips the rest of this function entirely.
+    if (s.manualBuild) {
+        int built = 0;
+        for (const SDL_Point& t : tiles) {
+            bool blocked = !map[t.y][t.x].walkable() || map[t.y][t.x].objectId >= 0
+                         || getEnemyAt(t.x, t.y) || getVillagerAt(t.x, t.y)
+                         || (t.x == player.x && t.y == player.y);
+            if (blocked) continue;
+            map[t.y][t.x].objectId = O_WALL;
+            map[t.y][t.x].objectHp = objectDefs[O_WALL].durability;
+            spawnSpellBurst(t.x, t.y, 0, s.color, 0);
+            built++;
+        }
+        panel.addMessage(built > 0
+            ? "You raise " + std::to_string(built) + " slab" + (built == 1 ? "" : "s")
+              + " of stone from the earth!"
+            : "The earth doesn't stir — every marked tile was already occupied.");
+        updateVisibility(worldTime.viewRadius(player.totalLightRadius()), (int)(worldTime.darkness() * 7.0f));
+        if (roll.leveledUp)
+            panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                             + std::to_string(roll.newSkillLevel) + "!");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+
+    int  hitCount   = 0;
+    bool ignitedAny = false;
+    for (const SDL_Point& t : tiles) {
+        igniteFireHazardTile(t.x, t.y, s.hazardTurns, s.baseDamage);
+
+        if (t.x == player.x && t.y == player.y) {
+            SpellResult r = resolveSpellHit(player, player, id);
+            panel.addMessage("Your own " + std::string(s.name) + " engulfs your "
+                             + partName(r.part) + " for " + std::to_string(r.damage) + " damage!");
+            hitCount++;
+            if (!player.isAlive()) panel.addMessage("You are consumed by your own spell.");
+            continue;
+        }
+        if (Enemy* e = getEnemyAt(t.x, t.y)) {
+            SpellResult r = resolveSpellHit(player, *e, id);
+            panel.addMessage(std::string(s.name) + " engulfs " + e->name + "'s "
+                             + partName(r.part) + " for " + std::to_string(r.damage) + " damage.");
+            hitCount++;
+            if (!e->isAlive()) { panel.addMessage(e->name + " dies, charred."); dropEnemyLoot(*e); }
+            continue;
+        }
+        if (Villager* v = getVillagerAt(t.x, t.y)) {
+            SpellResult r = resolveSpellHit(player, *v, id);
+            panel.addMessage(std::string(s.name) + " engulfs " + v->name + "'s "
+                             + partName(r.part) + " for " + std::to_string(r.damage) + " damage.");
+            hitCount++;
+            if (!v->isAlive()) { panel.addMessage(v->name + " dies, charred."); dropVillagerLoot(*v); }
+            else villagerReactToAttack(*v);
+            continue;
+        }
+        if (applySpellObjectDamage(t.x, t.y, s)) { hitCount++; continue; }
+        if (s.school == Skill::FIRE && tryIgniteGround(t.x, t.y)) ignitedAny = true;
+    }
+
+    panel.addMessage("A wall of fire roars up across " + std::to_string(tiles.size()) + " tile"
+                     + (tiles.size() == 1 ? "" : "s") + "."
+                     + (hitCount == 0 && ignitedAny ? " Flames catch on whatever's there." : ""));
+
+    if (roll.leveledUp)
+        panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                         + std::to_string(roll.newSkillLevel) + "!");
+
+    onPlayerAct(s.extraEnergy);
+}
+
+// Burns whoever's standing in an active fire-wall tile, once per player
+// action (same cadence as tickEnemyNeeds()/tickVillagerNeeds()), then ages
+// the tile down and clears it once its turns run out.
+void tickFireHazards() {
+    for (auto it = fireHazards.begin(); it != fireHazards.end(); ) {
+        FireHazardTile& f = *it;
+
+        if (player.x == f.x && player.y == f.y && player.isAlive()) {
+            player.takeDamage(f.dmgPerTurn, randomHitPart());
+            panel.addMessage("The flames burn you for " + std::to_string(f.dmgPerTurn) + " damage!");
+            if (!player.isAlive()) panel.addMessage("The fire consumes you.");
+        }
+        if (Enemy* e = getEnemyAt(f.x, f.y)) {
+            bool wasAlive = e->isAlive();
+            e->takeDamage(f.dmgPerTurn, randomHitPart());
+            if (wasAlive && !e->isAlive()) {
+                panel.addMessage(e->name + " burns to death in the flames.");
+                dropEnemyLoot(*e);
+            }
+        }
+        if (Villager* v = getVillagerAt(f.x, f.y)) {
+            bool wasAlive = v->isAlive();
+            v->takeDamage(f.dmgPerTurn, randomHitPart());
+            if (wasAlive && !v->isAlive()) {
+                panel.addMessage(v->name + " burns to death in the flames.");
+                dropVillagerLoot(*v);
+            } else {
+                villagerReactToAttack(*v);
+            }
+        }
+
+        f.turnsLeft--;
+        if (f.turnsLeft <= 0) it = fireHazards.erase(it);
+        else                  ++it;
+    }
+}
+
+// ------------------------------------------------------------------ Wall Throw (two-phase)
+//
+// Separate two-click targeting flow for throwsWall spells (Wall Throw) —
+// see wallThrowTargeting's comment near its declaration. useHotbarSlot()
+// enters this mode instead of hotbarTargeting/wallTargeting when the bound
+// spell has throwsWall set.
+
+// Ends wallThrowTargeting. msg empty = the cast already resolved (or the
+// mode is being torn down silently before resolving); non-empty = shown as
+// a log message (cancelled / invalid pick).
+void cancelWallThrowTargeting(const std::string& msg) {
+    wallThrowTargeting     = false;
+    wallThrowSlot          = -1;
+    wallThrowPickingSource = true;
+    wallThrowSrcX = wallThrowSrcY = -1;
+    if (!msg.empty()) panel.addMessage(msg);
+}
+
+// Actually resolves a Wall Throw once both the source wall and the target
+// tile are known — spends stamina, rolls the usual single backfire, then
+// un-makes the wall and hurls it. Same resolution useSpellAtTile() used to
+// do inline for this spell before picking the wall became a player choice.
+void castWallThrow(int wallX, int wallY, int tx, int ty, SpellId id) {
+    const Spell& s = spellInfo(id);
+    if (!player.hasStamina(s.staminaCost)) {
+        panel.addMessage("Not enough stamina to cast " + std::string(s.name) + "!");
+        return;
+    }
+    player.spendStamina(s.staminaCost);
+
+    SpellCastRoll roll = rollSpellCast(player, id);
+    if (roll.backfired) {
+        panel.addMessage(std::string(s.name) + " backfires, hurting your "
+                         + partName(PartTarget::ARM_R) + " for "
+                         + std::to_string(roll.selfDamage) + " damage!");
+        if (!player.isAlive()) panel.addMessage("The backfire kills you.");
+        onPlayerAct(s.extraEnergy);
+        return;
+    }
+
+    map[wallY][wallX].objectId = -1;
+    map[wallY][wallX].objectHp = 0;
+    spawnSpellProjectile(wallX, wallY, tx, ty, s); // flies from the wall, not the caster
+
+    if (tx == player.x && ty == player.y) {
+        SpellResult r = resolveSpellHit(player, player, id);
+        panel.addMessage(std::string("The flying wall slams into your own ") + partName(r.part)
+                         + " for " + std::to_string(r.damage) + " damage!");
+        if (!player.isAlive()) panel.addMessage("You are crushed by your own spell.");
+    } else if (Enemy* e = getEnemyAt(tx, ty)) {
+        SpellResult r = resolveSpellHit(player, *e, id);
+        panel.addMessage("The flying wall slams into " + e->name + "'s " + partName(r.part)
+                         + " for " + std::to_string(r.damage) + " damage!");
+        if (!e->isAlive()) { panel.addMessage(e->name + " is crushed."); dropEnemyLoot(*e); }
+        else if (s.knockback && tryKnockback(*e, wallX, wallY))
+            panel.addMessage(e->name + " is thrown back by the impact!");
+    } else if (Villager* v = getVillagerAt(tx, ty)) {
+        SpellResult r = resolveSpellHit(player, *v, id);
+        panel.addMessage("The flying wall slams into " + v->name + "'s " + partName(r.part)
+                         + " for " + std::to_string(r.damage) + " damage!");
+        if (!v->isAlive()) { panel.addMessage(v->name + " is crushed."); dropVillagerLoot(*v); }
+        else {
+            villagerReactToAttack(*v);
+            if (s.knockback && tryKnockback(*v, wallX, wallY))
+                panel.addMessage(v->name + " is thrown back by the impact!");
+        }
+    } else {
+        applySpellObjectDamage(tx, ty, s);
+        panel.addMessage("The wall crashes into the ground.");
+    }
+
+    if (roll.leveledUp)
+        panel.addMessage(std::string(skillName(roll.skillUsed)) + " skill increased to "
+                         + std::to_string(roll.newSkillLevel) + "!");
+    onPlayerAct(s.extraEnergy);
+}
+
+// Handles one click while wallThrowTargeting is active. Phase 1 (picking the
+// source) accepts any O_WALL within WALL_THROW_PICK_RADIUS of the player —
+// a much more generous radius than the spell's own range, since that range
+// is for aiming at the target, not for how far you can reach for ammunition.
+// Phase 2 (picking the target) uses the spell's normal range and, once
+// clicked, actually casts via castWallThrow(). An invalid pick at either
+// phase cancels the whole thing rather than re-prompting.
+void resolveWallThrowClick(int mx, int my) {
+    if (wallThrowSlot < 0) { cancelWallThrowTargeting(""); return; }
+    int raw = hotbar.slots[wallThrowSlot];
+    if (raw < 0 || !Hotbar::isSpellSlot(raw)) { cancelWallThrowTargeting(""); return; }
+    SpellId id = Hotbar::spellOf(raw);
+    const Spell& s = spellInfo(id);
+
+    if (mx < 0 || mx >= MAP_WIDTH || my < 0 || my >= MAP_HEIGHT || !map[my][mx].visible) {
+        cancelWallThrowTargeting("Out of range.");
+        return;
+    }
+
+    if (wallThrowPickingSource) {
+        const int WALL_THROW_PICK_RADIUS = 10;
+        int dist = std::max(std::abs(mx - player.x), std::abs(my - player.y));
+        if (dist > WALL_THROW_PICK_RADIUS || map[my][mx].objectId != O_WALL) {
+            cancelWallThrowTargeting("That's not a stone wall within reach.");
+            return;
+        }
+        wallThrowSrcX = mx;
+        wallThrowSrcY = my;
+        wallThrowPickingSource = false;
+        panel.addMessage("Now click a target to hurl the wall at (right-click/Esc to cancel).");
+        return;
+    }
+
+    int dist = std::max(std::abs(mx - player.x), std::abs(my - player.y));
+    if (dist > s.range) {
+        cancelWallThrowTargeting("Out of range.");
+        return;
+    }
+
+    int wallX = wallThrowSrcX, wallY = wallThrowSrcY;
+    cancelWallThrowTargeting("");
+    castWallThrow(wallX, wallY, mx, my, id);
 }
 
 // ------------------------------------------------------------------ input
@@ -1565,20 +2391,63 @@ void handleInput(SDL_Event& event, bool& running) {
     // Console intercepts all input while open (except the backtick above).
     if (console.handleEvent(event, overmap, worldTime)) return;
 
-    // Technique targeting intercepts input while active — the highlighted-range
-    // picker started by useHotbarSlot(). Left-click on a painted tile resolves
-    // it; right-click or Esc cancels without spending the technique.
-    if (techniqueTargeting) {
+    // Hotbar targeting intercepts input while active — the highlighted-range
+    // picker started by useHotbarSlot() for a technique or spell. Left-click on
+    // a painted tile resolves it; right-click or Esc cancels without spending
+    // the action.
+    if (hotbarTargeting) {
         if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
-            cancelTechniqueTargeting("Cancelled.");
+            cancelHotbarTargeting("Cancelled.");
         }
         if (event.type == SDL_MOUSEBUTTONDOWN) {
             if (event.button.button == SDL_BUTTON_RIGHT) {
-                cancelTechniqueTargeting("Cancelled.");
+                cancelHotbarTargeting("Cancelled.");
             } else if (event.button.button == SDL_BUTTON_LEFT) {
                 int mx = event.button.x / TILE_SIZE + cameraX;
                 int my = event.button.y / TILE_SIZE + cameraY;
-                resolveTechniqueTargeting(mx, my);
+                resolveHotbarTargeting(mx, my);
+            }
+        }
+        return;
+    }
+
+    // Wall-of-Fire multi-tile targeting intercepts input while active — left-click
+    // toggles a tile in/out of the selection, Enter confirms and casts, right-click
+    // or Esc cancels the whole thing without spending anything.
+    if (wallTargeting) {
+        if (event.type == SDL_KEYDOWN) {
+            if (event.key.keysym.sym == SDLK_ESCAPE) {
+                cancelWallTargeting("Cancelled.");
+            } else if (event.key.keysym.sym == SDLK_RETURN || event.key.keysym.sym == SDLK_KP_ENTER) {
+                confirmWallTargeting();
+            }
+        }
+        if (event.type == SDL_MOUSEBUTTONDOWN) {
+            if (event.button.button == SDL_BUTTON_RIGHT) {
+                cancelWallTargeting("Cancelled.");
+            } else if (event.button.button == SDL_BUTTON_LEFT) {
+                int mx = event.button.x / TILE_SIZE + cameraX;
+                int my = event.button.y / TILE_SIZE + cameraY;
+                toggleWallTile(mx, my);
+            }
+        }
+        return;
+    }
+
+    // Wall Throw's two-click targeting (pick the wall, then pick the
+    // target) intercepts input the same way — see wallThrowTargeting's
+    // comment near its declaration.
+    if (wallThrowTargeting) {
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+            cancelWallThrowTargeting("Cancelled.");
+        }
+        if (event.type == SDL_MOUSEBUTTONDOWN) {
+            if (event.button.button == SDL_BUTTON_RIGHT) {
+                cancelWallThrowTargeting("Cancelled.");
+            } else if (event.button.button == SDL_BUTTON_LEFT) {
+                int mx = event.button.x / TILE_SIZE + cameraX;
+                int my = event.button.y / TILE_SIZE + cameraY;
+                resolveWallThrowClick(mx, my);
             }
         }
         return;
@@ -1687,6 +2556,7 @@ void handleInput(SDL_Event& event, bool& running) {
             if (k == SDLK_b) { openMenuTab(MenuTab::BODY);           return; }
             if (k == SDLK_k) { openMenuTab(MenuTab::SKILLS);         return; }
             if (k == SDLK_y) { openMenuTab(MenuTab::TECHNIQUES);     return; }
+            if (k == SDLK_p) { openMenuTab(MenuTab::MAGIC);          return; }
             if (k == SDLK_i) { openMenuTab(MenuTab::INVENTORY);      return; }
             if (k == SDLK_m) { openMenuTab(MenuTab::MAP);            return; }
 
@@ -1726,6 +2596,7 @@ void handleInput(SDL_Event& event, bool& running) {
                 case SDLK_s:     openMenuTab(MenuTab::EFFECTS);   break;
                 case SDLK_k:     openMenuTab(MenuTab::SKILLS);    break;
                 case SDLK_y:     openMenuTab(MenuTab::TECHNIQUES); break;
+                case SDLK_p:     openMenuTab(MenuTab::MAGIC);      break;
                 case SDLK_i:     openMenuTab(MenuTab::INVENTORY); break;
                 case SDLK_c:     openMenuTab(MenuTab::CRAFT);     break;
                 case SDLK_UP:    overmap.moveCam( 0, -1); break;
@@ -1744,6 +2615,7 @@ void handleInput(SDL_Event& event, bool& running) {
         if (event.key.keysym.sym == SDLK_s)      toggleMenuTab(MenuTab::EFFECTS);
         if (event.key.keysym.sym == SDLK_k)      toggleMenuTab(MenuTab::SKILLS);
         if (event.key.keysym.sym == SDLK_y)      toggleMenuTab(MenuTab::TECHNIQUES);
+        if (event.key.keysym.sym == SDLK_p)      toggleMenuTab(MenuTab::MAGIC);
         if (event.key.keysym.sym == SDLK_e)      examinePanel.hide();
         if (event.key.keysym.sym == SDLK_m)      toggleMenuTab(MenuTab::MAP);
         if (event.key.keysym.sym == SDLK_i)      toggleMenuTab(MenuTab::INVENTORY);
@@ -1791,6 +2663,10 @@ void handleInput(SDL_Event& event, bool& running) {
             return;
         if (techniquesPanel.visible) {
             techniquesPanel.handleClick(event.button.x, event.button.y, player, hotbar);
+            return;
+        }
+        if (spellsPanel.visible) {
+            spellsPanel.handleClick(event.button.x, event.button.y, player, hotbar);
             return;
         }
         if (itemExaminePanel.visible) {
@@ -2478,7 +3354,7 @@ void renderDeathScreen(SDL_Renderer* renderer, TTF_Font* font) {
     TTF_Font* bigFont = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 48);
     if (bigFont) {
         auto renderCentered = [&](const char* text, int y, SDL_Color col) {
-            SDL_Surface* s = TTF_RenderText_Solid(bigFont, text, col);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(bigFont, text, col);
             SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
             SDL_FreeSurface(s);
             int w, h;
@@ -2493,7 +3369,7 @@ void renderDeathScreen(SDL_Renderer* renderer, TTF_Font* font) {
     }
 
     // Subtitle
-    SDL_Surface* s = TTF_RenderText_Solid(font, "Press Escape to quit", {150, 150, 150, 255});
+    SDL_Surface* s = TTF_RenderUTF8_Solid(font, "Press Escape to quit", {150, 150, 150, 255});
     SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
     SDL_FreeSurface(s);
     int w, h;
@@ -2542,7 +3418,7 @@ void toggleFullscreen() {
 
 void openMenuTab(MenuTab t) {
     ui.showStats = bodyPanel.visible = effectsPanel.visible = skillsPanel.visible
-                 = techniquesPanel.visible = inventoryPanel.visible = false;
+                 = techniquesPanel.visible = spellsPanel.visible = inventoryPanel.visible = false;
     if (craftPanel.visible()) craftPanel.close();
     if (overmap.visible)      overmap.close();
 
@@ -2553,6 +3429,7 @@ void openMenuTab(MenuTab t) {
         case MenuTab::EFFECTS:    effectsPanel.visible   = true; break;
         case MenuTab::SKILLS:     skillsPanel.visible    = true; break;
         case MenuTab::TECHNIQUES: techniquesPanel.visible = true; break;
+        case MenuTab::MAGIC:      spellsPanel.visible    = true; break;
         case MenuTab::INVENTORY:  inventoryPanel.visible = true; break;
         case MenuTab::CRAFT:      craftPanel.open();             break;
         case MenuTab::MAP:        overmap.open(playerSectorX, playerSectorY); break;
@@ -2562,7 +3439,7 @@ void openMenuTab(MenuTab t) {
 
 void closeMenuHub() {
     ui.showStats = bodyPanel.visible = effectsPanel.visible = skillsPanel.visible
-                 = techniquesPanel.visible = inventoryPanel.visible = false;
+                 = techniquesPanel.visible = spellsPanel.visible = inventoryPanel.visible = false;
     if (craftPanel.visible()) craftPanel.close();
     if (overmap.visible)      overmap.close();
     hub.activeTab = MenuTab::NONE;
@@ -2573,19 +3450,20 @@ void toggleMenuTab(MenuTab t) {
     else                    openMenuTab(t);
 }
 
-// Paints every visible tile within the pending technique's range while
-// techniqueTargeting is active (set by useHotbarSlot()) — red tint over a
-// tile that actually holds a valid target, dim yellow otherwise, so the
-// player can see who's reachable before clicking (resolveTechniqueTargeting()
-// handles the click itself).
-void renderTechniqueTargeting(SDL_Renderer* r) {
-    if (!techniqueTargeting) return;
-    TechniqueId id = (TechniqueId)hotbar.slots[techniqueTargetSlot];
-    const Technique& t = techniqueInfo(id);
+// Paints every visible tile within the pending action's range while
+// hotbarTargeting is active (set by useHotbarSlot()) — red tint over a tile
+// that actually holds a valid target, dim yellow otherwise, so the player can
+// see who's reachable before clicking (resolveHotbarTargeting() handles the
+// click itself).
+void renderHotbarTargeting(SDL_Renderer* r) {
+    if (!hotbarTargeting) return;
+    int raw   = hotbar.slots[hotbarTargetSlot];
+    int range = Hotbar::isSpellSlot(raw) ? spellInfo(Hotbar::spellOf(raw)).range
+                                          : techniqueInfo(Hotbar::techniqueOf(raw)).range;
 
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    for (int y = player.y - t.range; y <= player.y + t.range; y++) {
-        for (int x = player.x - t.range; x <= player.x + t.range; x++) {
+    for (int y = player.y - range; y <= player.y + range; y++) {
+        for (int x = player.x - range; x <= player.x + range; x++) {
             if (x == player.x && y == player.y) continue;
             if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
             if (!map[y][x].visible) continue;
@@ -2603,6 +3481,177 @@ void renderTechniqueTargeting(SDL_Renderer* r) {
         }
     }
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+}
+
+// While wallTargeting is active: dim tint over every in-range candidate tile
+// (mirrors renderHotbarTargeting()'s range paint), bright fill in the spell's
+// own color over tiles already marked in wallSelection, so the player can see
+// the shape they're building before confirming with Enter.
+void renderWallTargeting(SDL_Renderer* r) {
+    if (!wallTargeting) return;
+    int raw = hotbar.slots[wallTargetSlot];
+    if (raw < 0 || !Hotbar::isSpellSlot(raw)) return;
+    const Spell& s = spellInfo(Hotbar::spellOf(raw));
+
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    for (int y = player.y - s.range; y <= player.y + s.range; y++) {
+        for (int x = player.x - s.range; x <= player.x + s.range; x++) {
+            if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
+            if (!map[y][x].visible) continue;
+            if (std::max(std::abs(x - player.x), std::abs(y - player.y)) > s.range) continue;
+
+            int sx = (x - cameraX) * TILE_SIZE;
+            int sy = (y - cameraY) * TILE_SIZE;
+            if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+
+            bool marked = std::find_if(wallSelection.begin(), wallSelection.end(),
+                              [&](const SDL_Point& p) { return p.x == x && p.y == y; })
+                          != wallSelection.end();
+            SDL_Color col = marked ? s.color : SDL_Color{200, 170, 60, 255};
+            SDL_SetRenderDrawColor(r, col.r, col.g, col.b, marked ? 150 : 45);
+
+            SDL_Rect rect = {sx, sy, TILE_SIZE, TILE_SIZE};
+            SDL_RenderFillRect(r, &rect);
+        }
+    }
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+}
+
+// While wallThrowTargeting is active: phase 1 paints every O_WALL within
+// pick range in red (the only valid picks) and everything else dim, phase 2
+// switches to the spell's normal range with actors highlighted, same visual
+// language as renderHotbarTargeting().
+void renderWallThrowTargeting(SDL_Renderer* r) {
+    if (!wallThrowTargeting) return;
+    int raw = hotbar.slots[wallThrowSlot];
+    if (raw < 0 || !Hotbar::isSpellSlot(raw)) return;
+    const Spell& s = spellInfo(Hotbar::spellOf(raw));
+
+    const int WALL_THROW_PICK_RADIUS = 10;
+    int radius = wallThrowPickingSource ? WALL_THROW_PICK_RADIUS : s.range;
+
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    for (int y = player.y - radius; y <= player.y + radius; y++) {
+        for (int x = player.x - radius; x <= player.x + radius; x++) {
+            if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
+            if (!map[y][x].visible) continue;
+            if (std::max(std::abs(x - player.x), std::abs(y - player.y)) > radius) continue;
+
+            int sx = (x - cameraX) * TILE_SIZE;
+            int sy = (y - cameraY) * TILE_SIZE;
+            if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+
+            bool valid = wallThrowPickingSource
+                ? (map[y][x].objectId == O_WALL)
+                : (getEnemyAt(x, y) || getVillagerAt(x, y));
+            SDL_Color col = valid ? SDL_Color{200, 60, 50, 255} : s.color;
+            SDL_SetRenderDrawColor(r, col.r, col.g, col.b, valid ? 110 : 40);
+
+            SDL_Rect rect = {sx, sy, TILE_SIZE, TILE_SIZE};
+            SDL_RenderFillRect(r, &rect);
+        }
+    }
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+}
+
+// Draws every active fire-wall tile (fireHazards) with a subtle flicker
+// (alternating alpha via wall-clock time) so it visibly persists turn to
+// turn, unlike the fading one-shot SpellBurst flash.
+void renderFireHazards(SDL_Renderer* r) {
+    if (fireHazards.empty()) return;
+    bool  bright = (SDL_GetTicks() / 150) % 2 == 0;
+    Uint8 alpha  = bright ? 130 : 90;
+
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 230, 90, 20, alpha);
+    for (const FireHazardTile& f : fireHazards) {
+        if (!map[f.y][f.x].visible) continue;
+        int sx = (f.x - cameraX) * TILE_SIZE;
+        int sy = (f.y - cameraY) * TILE_SIZE;
+        if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+        SDL_Rect rect = {sx, sy, TILE_SIZE, TILE_SIZE};
+        SDL_RenderFillRect(r, &rect);
+    }
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+}
+
+// Draws the cosmetic flying-projectile overlay (see SpellProjectile's comment)
+// and clears it once its short flight duration has elapsed.
+void renderSpellProjectile(SDL_Renderer* r, TTF_Font* f) {
+    if (!spellProjectile.active) return;
+    Uint32 elapsed = SDL_GetTicks() - spellProjectile.startTime;
+    if (elapsed >= spellProjectile.duration) { spellProjectile.active = false; return; }
+
+    float t  = elapsed / (float)spellProjectile.duration;
+    float fx = spellProjectile.fromX + (spellProjectile.toX - spellProjectile.fromX) * t;
+    float fy = spellProjectile.fromY + (spellProjectile.toY - spellProjectile.fromY) * t;
+    int sx = (int)((fx - cameraX) * TILE_SIZE);
+    int sy = (int)((fy - cameraY) * TILE_SIZE);
+    if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) return;
+
+    SDL_Surface* s = TTF_RenderUTF8_Solid(f, spellProjectile.symbol, spellProjectile.color);
+    if (!s) return;
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(r, s);
+    SDL_FreeSurface(s);
+    SDL_Rect dst = {sx, sy, TILE_SIZE, TILE_SIZE};
+    SDL_RenderCopy(r, tex, nullptr, &dst);
+    SDL_DestroyTexture(tex);
+}
+
+// Draws the fading blast-radius flash (see SpellBurst's comment) once the
+// projectile's flight delay has passed, then clears it after its duration.
+void renderSpellBurst(SDL_Renderer* r) {
+    if (!spellBurst.active) return;
+    Uint32 elapsed = SDL_GetTicks() - spellBurst.startTime;
+    if (elapsed < spellBurst.delay) return; // still mid-flight, nothing to show yet
+    Uint32 sinceImpact = elapsed - spellBurst.delay;
+    if (sinceImpact >= spellBurst.duration) { spellBurst.active = false; return; }
+
+    float t     = sinceImpact / (float)spellBurst.duration; // 0..1
+    Uint8 alpha = (Uint8)(150.0f * (1.0f - t));
+
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, spellBurst.color.r, spellBurst.color.g, spellBurst.color.b, alpha);
+    for (int y = spellBurst.cy - spellBurst.radius; y <= spellBurst.cy + spellBurst.radius; y++) {
+        for (int x = spellBurst.cx - spellBurst.radius; x <= spellBurst.cx + spellBurst.radius; x++) {
+            if (std::max(std::abs(x - spellBurst.cx), std::abs(y - spellBurst.cy)) > spellBurst.radius) continue;
+            if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT) continue;
+            int sx = (x - cameraX) * TILE_SIZE;
+            int sy = (y - cameraY) * TILE_SIZE;
+            if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
+            SDL_Rect rect = {sx, sy, TILE_SIZE, TILE_SIZE};
+            SDL_RenderFillRect(r, &rect);
+        }
+    }
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+}
+
+// Draws every in-flight knockback streak (see KnockbackFlash's comment) —
+// the pushed actor's own glyph sliding from its old tile to its new one —
+// and prunes each one once its short flight is done.
+void renderKnockbackFlashes(SDL_Renderer* r, TTF_Font* f) {
+    Uint32 now = SDL_GetTicks();
+    for (auto it = knockbackFlashes.begin(); it != knockbackFlashes.end(); ) {
+        Uint32 elapsed = now - it->startTime;
+        if (elapsed >= KNOCKBACK_FLASH_DURATION) { it = knockbackFlashes.erase(it); continue; }
+
+        float t  = elapsed / (float)KNOCKBACK_FLASH_DURATION;
+        float fx = it->fromX + (it->toX - it->fromX) * t;
+        float fy = it->fromY + (it->toY - it->fromY) * t;
+        int sx = (int)((fx - cameraX) * TILE_SIZE);
+        int sy = (int)((fy - cameraY) * TILE_SIZE);
+        if (sx >= 0 && sx < SCREEN_WIDTH && sy >= 0 && sy < MAP_VIEW_HEIGHT) {
+            SDL_Surface* s = TTF_RenderUTF8_Solid(f, it->symbol, it->color);
+            if (s) {
+                SDL_Texture* tex = SDL_CreateTextureFromSurface(r, s);
+                SDL_FreeSurface(s);
+                SDL_Rect dst = {sx, sy, TILE_SIZE, TILE_SIZE};
+                SDL_RenderCopy(r, tex, nullptr, &dst);
+                SDL_DestroyTexture(tex);
+            }
+        }
+        ++it;
+    }
 }
 
 // ------------------------------------------------------------------ main
@@ -2665,11 +3714,11 @@ int main(int argc, char* argv[]) {
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     font = TTF_OpenFont("fonts/DejaVuSansMono.ttf", 16);
 
-    SDL_Surface* playerSurface = TTF_RenderText_Solid(font, player.symbol, player.color);
+    SDL_Surface* playerSurface = TTF_RenderUTF8_Solid(font, player.symbol, player.color);
     playerTexture = SDL_CreateTextureFromSurface(renderer, playerSurface);
     SDL_FreeSurface(playerSurface);
 
-    SDL_Surface* enemySurface = TTF_RenderText_Solid(font, "E", red);
+    SDL_Surface* enemySurface = TTF_RenderUTF8_Solid(font, "E", red);
     enemyTexture = SDL_CreateTextureFromSurface(renderer, enemySurface);
     SDL_FreeSurface(enemySurface);
 
@@ -2814,6 +3863,18 @@ int main(int argc, char* argv[]) {
             console.pendingUnlockTech.clear();
         }
 
+        if (!console.pendingUnlockSpell.empty()) {
+            for (int i = 0; CheatConsole::SPELL_TOKENS[i]; i++) {
+                if (console.pendingUnlockSpell == CheatConsole::SPELL_TOKENS[i]) {
+                    const Spell& s = spellInfo((SpellId)i);
+                    SkillLevel& sk = player.skill(s.school);
+                    if (sk.level < s.minLevel) { sk.level = s.minLevel; sk.exp = 0; }
+                    break;
+                }
+            }
+            console.pendingUnlockSpell.clear();
+        }
+
         if (console.pendingGrowPlants) {
             console.pendingGrowPlants = false;
             for (int my = 0; my < MAP_HEIGHT; my++)
@@ -2900,6 +3961,7 @@ int main(int argc, char* argv[]) {
         SDL_RenderClear(renderer);
 
         renderMap(renderer);
+        renderFireHazards(renderer);
 
         // Corpses render first — ground items and actors draw on top.
         for (const Corpse& c : corpses) {
@@ -2909,7 +3971,7 @@ int main(int argc, char* argv[]) {
             int sy = (c.y - cameraY) * TILE_SIZE;
             if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
             static const char cSym[2] = {'%', 0};
-            SDL_Surface* s = TTF_RenderText_Solid(font, cSym, c.color);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(font, cSym, c.color);
             if (s) {
                 SDL_Texture* t = SDL_CreateTextureFromSurface(renderer, s);
                 SDL_FreeSurface(s);
@@ -2942,7 +4004,7 @@ int main(int argc, char* argv[]) {
                 const char* sym = (cnt > 1) ? "$" : gi.item.groundSymbol();
                 SDL_Color col   = (cnt > 1) ? SDL_Color{220, 200, 60, 255} : gi.item.groundColor();
 
-                SDL_Surface* gs = TTF_RenderText_Solid(font, sym, col);
+                SDL_Surface* gs = TTF_RenderUTF8_Solid(font, sym, col);
                 if (gs) {
                     SDL_Texture* gt = SDL_CreateTextureFromSurface(renderer, gs);
                     SDL_FreeSurface(gs);
@@ -2957,6 +4019,9 @@ int main(int argc, char* argv[]) {
         renderPlayer(renderer);
         renderVillagers(renderer, font);
         renderEnemies(renderer, font);
+        renderSpellProjectile(renderer, font);
+        renderSpellBurst(renderer);
+        renderKnockbackFlashes(renderer, font);
 
         // Night/dusk darkness overlay over the map view
         {
@@ -2970,7 +4035,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        renderTechniqueTargeting(renderer);
+        renderHotbarTargeting(renderer);
+        renderWallTargeting(renderer);
+        renderWallThrowTargeting(renderer);
 
         panel.render(renderer, font, player, worldTime);
 
@@ -2987,6 +4054,7 @@ int main(int argc, char* argv[]) {
             effectsPanel.render(renderer, font, player);
             skillsPanel.render(renderer, font, player);
             techniquesPanel.render(renderer, font, player, hotbar);
+            spellsPanel.render(renderer, font, player, hotbar);
             inventoryPanel.render(renderer, font, player);
             craftPanel.render(renderer, font, player);
             overmap.render(renderer, font, playerSectorX, playerSectorY);
@@ -3032,8 +4100,8 @@ int main(int argc, char* argv[]) {
             // We don't have totalMins handy here; just show minutes left text
             std::string label = "Crafting " + craftPendingItem.name + "...";
             std::string timeLeft = std::to_string(craftMinutesLeft) + " min left  [ESC cancel]";
-            SDL_Surface* ls = TTF_RenderText_Solid(font, label.c_str(), {200,185,100,255});
-            SDL_Surface* ts = TTF_RenderText_Solid(font, timeLeft.c_str(), {130,125,90,255});
+            SDL_Surface* ls = TTF_RenderUTF8_Solid(font, label.c_str(), {200,185,100,255});
+            SDL_Surface* ts = TTF_RenderUTF8_Solid(font, timeLeft.c_str(), {130,125,90,255});
             if (ls) {
                 SDL_Texture* lt = SDL_CreateTextureFromSurface(renderer, ls);
                 int w,h; SDL_QueryTexture(lt,nullptr,nullptr,&w,&h);
@@ -3053,7 +4121,7 @@ int main(int argc, char* argv[]) {
         // Waiting HUD
         if (isWaiting) {
             std::string wstr = "Waiting...  " + worldTime.timeStr();
-            SDL_Surface* ws = TTF_RenderText_Solid(font, wstr.c_str(), {140, 170, 200, 255});
+            SDL_Surface* ws = TTF_RenderUTF8_Solid(font, wstr.c_str(), {140, 170, 200, 255});
             if (ws) {
                 SDL_Texture* wt = SDL_CreateTextureFromSurface(renderer, ws);
                 int ww, wh; SDL_QueryTexture(wt, nullptr, nullptr, &ww, &wh);

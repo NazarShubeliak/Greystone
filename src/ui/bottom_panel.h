@@ -271,7 +271,7 @@ private:
 
     void renderText(SDL_Renderer* r, TTF_Font* f,
                     const char* text, int x, int y, SDL_Color col) {
-        SDL_Surface* s = TTF_RenderText_Solid(f, text, col);
+        SDL_Surface* s = TTF_RenderUTF8_Solid(f, text, col);
         if (!s) return;
         SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
         SDL_FreeSurface(s);

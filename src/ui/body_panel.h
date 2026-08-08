@@ -151,7 +151,7 @@ private:
     }
 
     void txt(SDL_Renderer* r, TTF_Font* f, const char* text, int x, int y, SDL_Color col) {
-        SDL_Surface* s = TTF_RenderText_Solid(f, text, col);
+        SDL_Surface* s = TTF_RenderUTF8_Solid(f, text, col);
         if (!s) return;
         SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
         SDL_FreeSurface(s);
@@ -207,7 +207,7 @@ private:
 
         // Percentage text inside bar
         std::string pct = std::to_string((int)(v * 100)) + "%";
-        SDL_Surface* ps = TTF_RenderText_Solid(f, pct.c_str(), {220, 220, 215, 200});
+        SDL_Surface* ps = TTF_RenderUTF8_Solid(f, pct.c_str(), {220, 220, 215, 200});
         if (ps) {
             SDL_Texture* pt = SDL_CreateTextureFromSurface(r, ps);
             SDL_FreeSurface(ps);

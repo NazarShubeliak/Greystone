@@ -4,9 +4,9 @@
 #include "astar.h"
 #include "panel_style.h"
 
-// Which of the eight "reference" screens (Character/Body/Effects/Skills/
-// Techniques/Inventory/Craft/Map) is currently showing full-screen. NONE = hub closed.
-enum class MenuTab { NONE, CHARACTER, BODY, EFFECTS, SKILLS, TECHNIQUES, INVENTORY, CRAFT, MAP };
+// Which of the nine "reference" screens (Character/Body/Effects/Skills/
+// Techniques/Magic/Inventory/Craft/Map) is currently showing full-screen. NONE = hub closed.
+enum class MenuTab { NONE, CHARACTER, BODY, EFFECTS, SKILLS, TECHNIQUES, MAGIC, INVENTORY, CRAFT, MAP };
 
 // Thin coordinator, not a rendering system of its own: main.cpp still calls
 // each screen's existing render()/handleClick()/handleKey() — this only
@@ -28,13 +28,14 @@ struct MenuHub {
     }
 
     struct TabDef { MenuTab tab; const char* label; };
-    static constexpr int TAB_COUNT = 8;
+    static constexpr int TAB_COUNT = 9;
     static constexpr TabDef TABS[TAB_COUNT] = {
         {MenuTab::CHARACTER,  "Character"},
         {MenuTab::BODY,       "Body"},
         {MenuTab::EFFECTS,    "Effects"},
         {MenuTab::SKILLS,     "Skills"},
         {MenuTab::TECHNIQUES, "Techniques"},
+        {MenuTab::MAGIC,      "Magic"},
         {MenuTab::INVENTORY,  "Inventory"},
         {MenuTab::CRAFT,      "Craft"},
         {MenuTab::MAP,        "Map"},
@@ -87,7 +88,7 @@ struct MenuHub {
                 SDL_RenderDrawLine(r, rects[i].x, TAB_H - 2, rects[i].x + rects[i].w, TAB_H - 2);
             }
             SDL_Color col = active ? PanelStyle::TITLE : SDL_Color{110, 108, 100, 255};
-            SDL_Surface* s = TTF_RenderText_Solid(f, TABS[i].label, col);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(f, TABS[i].label, col);
             if (s) {
                 SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
                 int tw, th;
@@ -103,7 +104,7 @@ struct MenuHub {
         SDL_Rect cr = closeRect();
         SDL_SetRenderDrawColor(r, 90, 40, 35, 255);
         SDL_RenderFillRect(r, &cr);
-        SDL_Surface* xs = TTF_RenderText_Solid(f, "X", {225, 210, 205, 255});
+        SDL_Surface* xs = TTF_RenderUTF8_Solid(f, "X", {225, 210, 205, 255});
         if (xs) {
             SDL_Texture* xt = SDL_CreateTextureFromSurface(r, xs);
             int xw, xh;

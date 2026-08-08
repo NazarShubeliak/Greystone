@@ -35,6 +35,9 @@ struct CheatConsole {
     // Pending unlocktech — technique token, consumed by main.cpp.
     std::string pendingUnlockTech;
 
+    // Pending unlockspell — spell token, consumed by main.cpp.
+    std::string pendingUnlockSpell;
+
     // Lowercase, no-space tokens — order MUST match enum Skill (skill.h) so
     // main.cpp can map token index -> Skill index directly.
     static constexpr const char* SKILL_TOKENS[] = {
@@ -44,6 +47,13 @@ struct CheatConsole {
     };
     // Order MUST match enum TechniqueId (combat.h).
     static constexpr const char* TECH_TOKENS[] = { "brutalstrike","lunge","backstab", nullptr };
+    // Order MUST match enum SpellId (magic.h).
+    static constexpr const char* SPELL_TOKENS[] = {
+        "spark","fireball","wallofire","explosion",
+        "createwater","waterjet","raincall",
+        "stone","stonewall","reclaimwall","wallthrow","architect",
+        "gust","vortex", nullptr
+    };
 
     void open() {
         visible = true;
@@ -120,7 +130,7 @@ struct CheatConsole {
 
         } else if (cmd == "help") {
             result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  "
-                       "setskill <skill> <lvl>  unlocktech <name>  gp  help";
+                       "setskill <skill> <lvl>  unlocktech <name>  unlockspell <name>  gp  help";
             resultOk = true;
 
         } else {
@@ -270,6 +280,24 @@ struct CheatConsole {
                 return;
             }
 
+            // unlockspell <name>
+            char spname[32];
+            if (sscanf(cmd.c_str(), "unlockspell %31s", spname) == 1) {
+                for (int i = 0; spname[i]; i++) spname[i] = (char)tolower((unsigned char)spname[i]);
+                bool ok = false;
+                for (int i = 0; SPELL_TOKENS[i]; i++) if (strcmp(spname, SPELL_TOKENS[i]) == 0) { ok = true; break; }
+                if (ok) {
+                    pendingUnlockSpell = spname;
+                    result   = std::string("Unlocked ") + spname + " (skill raised to its required level if needed).";
+                    resultOk = true;
+                } else {
+                    result   = "Unknown spell. Use: spark  fireball  wallofire  explosion  createwater  waterjet  "
+                               "raincall  stone  stonewall  reclaimwall  wallthrow  architect  gust  vortex";
+                    resultOk = false;
+                }
+                return;
+            }
+
             result  = "Unknown: " + cmd + "   (type 'help')";
             resultOk = false;
         }
@@ -281,7 +309,7 @@ struct CheatConsole {
             return input.rfind(prefix, 0) == 0;
         };
         if (input.empty())
-            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  unlocktech  gp  help    (Tab autocompletes)";
+            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  unlocktech  unlockspell  gp  help    (Tab autocompletes)";
         if (input == "spawn" || starts("spawn "))
             return "spawn: goblin  orc  skeleton  wolf  bandit   e.g. spawn goblin 3";
         if (input == "give" || starts("give "))
@@ -297,10 +325,13 @@ struct CheatConsole {
                    "dagger spear unarmed shield dualwield fire water earth air life death   e.g. setskill axe 30";
         if (input == "unlocktech" || starts("unlocktech "))
             return "unlocktech: brutalstrike  lunge  backstab";
+        if (input == "unlockspell" || starts("unlockspell "))
+            return "unlockspell: spark  fireball  wallofire  explosion  createwater  waterjet  "
+                   "raincall  stone  stonewall  reclaimwall  wallthrow  architect  gust  vortex";
         // Partial command suggestions
         static const char* cmds[] = {
             "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",
-            "setskill","unlocktech","help", nullptr
+            "setskill","unlocktech","unlockspell","help", nullptr
         };
         std::string sugg;
         for (int i = 0; cmds[i]; i++) {
@@ -316,7 +347,7 @@ struct CheatConsole {
         // Complete top-level command
         static const char* cmds[] = {
             "reveal_map","hide_map","tp","time","season","spawn","give",
-            "setskill","unlocktech","help", nullptr
+            "setskill","unlocktech","unlockspell","help", nullptr
         };
         if (input.find(' ') == std::string::npos) {
             for (int i = 0; cmds[i]; i++) {
@@ -370,6 +401,15 @@ struct CheatConsole {
                     return;
                 }
         }
+        // Complete unlockspell argument
+        if (input.rfind("unlockspell ", 0) == 0) {
+            std::string arg = input.substr(12);
+            for (int i = 0; SPELL_TOKENS[i]; i++)
+                if (std::string(SPELL_TOKENS[i]).rfind(arg, 0) == 0) {
+                    input = "unlockspell " + std::string(SPELL_TOKENS[i]);
+                    return;
+                }
+        }
     }
 
     void render(SDL_Renderer* r, TTF_Font* f) {
@@ -391,7 +431,7 @@ struct CheatConsole {
 
         // Prompt + typed text + blinking cursor
         std::string display = "> " + input + "_";
-        SDL_Surface* s = TTF_RenderText_Solid(f, display.c_str(), {210, 195, 105, 255});
+        SDL_Surface* s = TTF_RenderUTF8_Solid(f, display.c_str(), {210, 195, 105, 255});
         if (s) {
             SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
             SDL_FreeSurface(s);
@@ -410,7 +450,7 @@ struct CheatConsole {
                 : (resultOk ? SDL_Color{90, 200, 90, 255} : SDL_Color{220, 80, 80, 255});
 
             if (!aboveText.empty()) {
-                SDL_Surface* as = TTF_RenderText_Solid(f, aboveText.c_str(), aboveCol);
+                SDL_Surface* as = TTF_RenderUTF8_Solid(f, aboveText.c_str(), aboveCol);
                 if (as) {
                     SDL_Texture* at = SDL_CreateTextureFromSurface(r, as);
                     SDL_FreeSurface(as);

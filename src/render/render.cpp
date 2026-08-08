@@ -27,7 +27,7 @@ SDL_Texture* sproutTex = nullptr;
 
 static SDL_Texture* makeCharTex(SDL_Renderer* r, TTF_Font* f,
                                  const char* sym, SDL_Color col) {
-    SDL_Surface* s = TTF_RenderText_Solid(f, sym, col);
+    SDL_Surface* s = TTF_RenderUTF8_Solid(f, sym, col);
     SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
     SDL_FreeSurface(s);
     return t;
@@ -120,7 +120,7 @@ void renderEnemies(SDL_Renderer* r, TTF_Font* font) {
         int sx = (e.x - cameraX) * TILE_SIZE;
         int sy = (e.y - cameraY) * TILE_SIZE;
         if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
-        SDL_Surface* s = TTF_RenderText_Solid(font, e.symbol, e.color);
+        SDL_Surface* s = TTF_RenderUTF8_Solid(font, e.symbol, e.color);
         if (!s) continue;
         SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
         SDL_FreeSurface(s);
@@ -139,7 +139,7 @@ void renderVillagers(SDL_Renderer* r, TTF_Font* font) {
         int sx = (v.x - cameraX) * TILE_SIZE;
         int sy = (v.y - cameraY) * TILE_SIZE;
         if (sx < 0 || sx >= SCREEN_WIDTH || sy < 0 || sy >= MAP_VIEW_HEIGHT) continue;
-        SDL_Surface* s = TTF_RenderText_Solid(font, "@", v.color);
+        SDL_Surface* s = TTF_RenderUTF8_Solid(font, v.symbol, v.color);
         if (!s) continue;
         SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
         SDL_FreeSurface(s);

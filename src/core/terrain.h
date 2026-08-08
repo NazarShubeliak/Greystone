@@ -24,6 +24,7 @@ enum GroundId {
     G_MOSS,
     G_REEDS,
     G_LEAVES,
+    G_SCORCHED,  // fire spells landing on flammable ground swap it to this (cosmetic only)
     G_COUNT
 };
 
@@ -53,6 +54,13 @@ enum ObjectId {
     O_COUNT
 };
 
+// ================================================================ Material
+// What an object is physically made of — determines how much a given school
+// of magic actually damages it (see main.cpp's materialResistance()), e.g.
+// fire chews through wood fast but barely scratches stone. Ground cover and
+// terrain don't have this — only objects are ever "damaged" this way.
+enum class Material { NONE, WOOD, STONE, METAL };
+
 // ================================================================ Type definitions
 
 struct TerrainDef {
@@ -80,6 +88,7 @@ struct ObjectDef {
     bool        blocksMove;
     bool        blocksVision;
     int         durability;   // max HP; 0 = indestructible
+    Material    material    = Material::NONE; // main.cpp's materialResistance()
     bool        isPlant     = false; // uses plantAge for growth, instant harvest
     int         growSeasons = 0;     // bitmask: bit0=spring bit1=summer bit2=autumn bit3=winter
     int         daysToMature= 0;     // in-game days to mature in growing season
@@ -123,34 +132,36 @@ static const GroundDef groundDefs[G_COUNT] = {
     "|", {107,142, 35,255},  50  },
   { "Leaves",     "A thick carpet of fallen autumn leaves.",
     ".", {160,100, 30,255},  20  },
+  { "Scorched ground", "Blackened earth, still smoking faintly where fire caught the grass.",
+    ".", { 40, 35, 30,255},  15  },
 };
 
 static const ObjectDef objectDefs[O_COUNT] = {
-//  name          description                                          sym  color               movMod  blkMv  blkVis  dur
-  { "Tree",       "A tall tree with thick, rough bark.",              "T", {  0,100,  0,255},   0,     true,  true,   100 },
-  { "Dead tree",  "A leafless, rotting tree. Still blocks the way.",  "T", {100, 80, 60,255},   0,     true,  false,   60 },
-  { "Bush",       "A thorny bush. Slows movement but not impassable.","%" ,{  0,130,  0,255},  50,     false, false,   30, true, 7, 15 },
-  { "Rock",       "A large rock embedded in the ground.",             "o", {140,140,130,255},   0,     true,  false,  200 },
+//  name          description                                          sym  color               movMod  blkMv  blkVis  dur  material
+  { "Tree",       "A tall tree with thick, rough bark.",              "T", {  0,100,  0,255},   0,     true,  true,   100, Material::WOOD },
+  { "Dead tree",  "A leafless, rotting tree. Still blocks the way.",  "T", {100, 80, 60,255},   0,     true,  false,   60, Material::WOOD },
+  { "Bush",       "A thorny bush. Slows movement but not impassable.","%" ,{  0,130,  0,255},  50,     false, false,   30, Material::WOOD, true, 7, 15 },
+  { "Rock",       "A large rock embedded in the ground.",             "o", {140,140,130,255},   0,     true,  false,  200, Material::STONE },
   { "Boulder",    "A massive boulder. Nothing short of a giant moves this.",
-                                                                      "O", {110,110,100,255},   0,     true,  true,   500 },
-  { "Fallen log", "A fallen tree trunk lying across the ground.",     "=", {120, 80, 40,255},  80,     false, false,   80 },
-  { "Wall",       "A sturdy stone wall.",                            "#", {130,120,100,255},   0,     true,  true,   300 },
-  { "Door",        "A wooden door, standing open.",                   "/", {160,110, 50,255},   0, false, false,  50 },
-  { "Closed door", "A sturdy wooden door, closed shut.",             "+", {140, 90, 40,255},   0, true,  true,   50 },
-  { "Window",      "A small window set into the wall.",              "-", {140,200,220,255},   0, true,  false,  20 },
-  { "Table",       "A wooden table.",                                "T", {180,130, 60,255},   0, true,  false,  30 },
-  { "Bed",         "A simple straw bed.",                            "b", {200,180,140,255},   0, true,  false,  20 },
-  { "Barrel",      "A wooden barrel.",                               "0", {120, 80, 40,255},   0, true,  false,  40 },
-  { "Fireplace",   "A stone fireplace, warm and crackling.",         "^", {220,100, 30,255},   0, true,  false, 100 },
-  { "Lamp post",   "A wooden post with an oil lantern on top.",     "i", {255,210, 60,255},   0, true,  false,  25 },
-  { "Well",        "A stone well. Cold, clear water inside.",       "W", {100,140,180,255},   0, true,  false,   0 },
-  { "Wheat",       "Tall stalks of golden wheat, ready to harvest.","\"",{210,185, 60,255},  30, false, false,   5, true, 6, 20 },
-  { "Herb",        "A cluster of medicinal herbs with a sharp scent.", ":", { 80,160, 60,255},  10, false, false,   8, true, 3, 10 },
-  { "Mushroom",    "Dark mushrooms growing from the damp soil.",       "n", {160, 90, 40,255},  10, false, false,  10, true, 4,  8 },
+                                                                      "O", {110,110,100,255},   0,     true,  true,   500, Material::STONE },
+  { "Fallen log", "A fallen tree trunk lying across the ground.",     "=", {120, 80, 40,255},  80,     false, false,   80, Material::WOOD },
+  { "Wall",       "A sturdy stone wall.",                            "█", {130,120,100,255},   0,     true,  true,   300, Material::STONE },
+  { "Door",        "A wooden door, standing open.",                   "/", {160,110, 50,255},   0, false, false,  50, Material::WOOD },
+  { "Closed door", "A sturdy wooden door, closed shut.",             "+", {140, 90, 40,255},   0, true,  true,   50, Material::WOOD },
+  { "Window",      "A small window set into the wall.",              "-", {140,200,220,255},   0, true,  false,  20, Material::STONE },
+  { "Table",       "A wooden table.",                                "T", {180,130, 60,255},   0, true,  false,  30, Material::WOOD },
+  { "Bed",         "A simple straw bed.",                            "b", {200,180,140,255},   0, true,  false,  20, Material::WOOD },
+  { "Barrel",      "A wooden barrel.",                               "0", {120, 80, 40,255},   0, true,  false,  40, Material::WOOD },
+  { "Fireplace",   "A stone fireplace, warm and crackling.",         "^", {220,100, 30,255},   0, true,  false, 100, Material::STONE },
+  { "Lamp post",   "A wooden post with an oil lantern on top.",     "i", {255,210, 60,255},   0, true,  false,  25, Material::WOOD },
+  { "Well",        "A stone well. Cold, clear water inside.",       "W", {100,140,180,255},   0, true,  false,   0, Material::STONE },
+  { "Wheat",       "Tall stalks of golden wheat, ready to harvest.","\"",{210,185, 60,255},  30, false, false,   5, Material::WOOD, true, 6, 20 },
+  { "Herb",        "A cluster of medicinal herbs with a sharp scent.", ":", { 80,160, 60,255},  10, false, false,   8, Material::WOOD, true, 3, 10 },
+  { "Mushroom",    "Dark mushrooms growing from the damp soil.",       "n", {160, 90, 40,255},  10, false, false,  10, Material::WOOD, true, 4,  8 },
   { "Anvil",       "A blacksmith's iron anvil, scarred from years of hammering.",
-                                                                       "A", {150,150,160,255},   0, true,  false,  400 },
+                                                                       "A", {150,150,160,255},   0, true,  false,  400, Material::METAL },
   { "Stump",       "A weathered tree stump, left behind after felling.",
-                                                                       "u", {110, 70, 35,255},  20, false, false,   20 },
+                                                                       "u", {110, 70, 35,255},  20, false, false,   20, Material::WOOD },
 };
 
 // ================================================================ Biome type

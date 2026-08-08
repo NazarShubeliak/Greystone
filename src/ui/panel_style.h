@@ -51,7 +51,7 @@ namespace PanelStyle {
 
         if (!title) return y + 8;
 
-        SDL_Surface* s = TTF_RenderText_Solid(f, title, titleColor);
+        SDL_Surface* s = TTF_RenderUTF8_Solid(f, title, titleColor);
         if (s) {
             SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
             SDL_FreeSurface(s);

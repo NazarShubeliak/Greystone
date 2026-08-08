@@ -87,7 +87,7 @@ struct ConfirmPanel {
             SDL_RenderDrawRect(r, &rects[i]);
 
             SDL_Color col = isHover ? SDL_Color{230, 210, 120, 255} : SDL_Color{180, 170, 130, 255};
-            SDL_Surface* s = TTF_RenderText_Solid(f, labels[i], col);
+            SDL_Surface* s = TTF_RenderUTF8_Solid(f, labels[i], col);
             if (!s) continue;
             SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
             int tw, th; SDL_QueryTexture(t, nullptr, nullptr, &tw, &th);
@@ -116,7 +116,7 @@ private:
         };
     }
 
-    // Simple word-wrap to fit within maxW, one TTF_RenderText_Solid call per line.
+    // Simple word-wrap to fit within maxW, one TTF_RenderUTF8_Solid call per line.
     static void wrapText(SDL_Renderer* r, TTF_Font* f, const std::string& text,
                          int x, int y, int maxW, SDL_Color col) {
         std::vector<std::string> words;
@@ -147,7 +147,7 @@ private:
 
     static void drawLine(SDL_Renderer* r, TTF_Font* f, const std::string& line,
                         int x, int y, SDL_Color col) {
-        SDL_Surface* s = TTF_RenderText_Solid(f, line.c_str(), col);
+        SDL_Surface* s = TTF_RenderUTF8_Solid(f, line.c_str(), col);
         if (!s) return;
         SDL_Texture* t = SDL_CreateTextureFromSurface(r, s);
         SDL_FreeSurface(s);
