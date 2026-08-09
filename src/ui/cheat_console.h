@@ -32,6 +32,11 @@ struct CheatConsole {
     std::string pendingSetSkill;
     int         pendingSetSkillLevel = 0;
 
+    // Pending setage — target age, consumed by main.cpp. -1 = none pending
+    // (tests the life-stage system, docs/village.md, without waiting the
+    // 518400 actions a single in-game year actually takes).
+    int pendingSetAge = -1;
+
     // Pending unlocktech — technique token, consumed by main.cpp.
     std::string pendingUnlockTech;
 
@@ -132,7 +137,7 @@ struct CheatConsole {
 
         } else if (cmd == "help") {
             result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  "
-                       "setskill <skill> <lvl>  unlocktech <name>  unlockspell <name>  gp  help";
+                       "setskill <skill> <lvl>  setage <age>  unlocktech <name>  unlockspell <name>  gp  help";
             resultOk = true;
 
         } else {
@@ -265,6 +270,20 @@ struct CheatConsole {
                 return;
             }
 
+            // setage <age>
+            int newAge;
+            if (sscanf(cmd.c_str(), "setage %d", &newAge) == 1) {
+                if (newAge < 0 || newAge > 999) {
+                    result   = "Age must be 0-999.";
+                    resultOk = false;
+                } else {
+                    pendingSetAge = newAge;
+                    result   = "Set age to " + std::to_string(newAge) + ".";
+                    resultOk = true;
+                }
+                return;
+            }
+
             // unlocktech <name>
             char tname[32];
             if (sscanf(cmd.c_str(), "unlocktech %31s", tname) == 1) {
@@ -312,7 +331,7 @@ struct CheatConsole {
             return input.rfind(prefix, 0) == 0;
         };
         if (input.empty())
-            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  unlocktech  unlockspell  gp  help    (Tab autocompletes)";
+            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  setage  unlocktech  unlockspell  gp  help    (Tab autocompletes)";
         if (input == "spawn" || starts("spawn "))
             return "spawn: goblin  orc  skeleton  wolf  bandit   e.g. spawn goblin 3";
         if (input == "give" || starts("give "))
@@ -326,6 +345,9 @@ struct CheatConsole {
         if (input == "setskill" || starts("setskill "))
             return "setskill <skill> <0-100>   skills: sword greatsword axe greataxe mace greatmace "
                    "dagger spear unarmed shield dualwield fire water earth air life death   e.g. setskill axe 30";
+        if (input == "setage" || starts("setage "))
+            return "setage <age>   sets your age directly — tests life-stage speed/STR effects "
+                   "and old-age death without waiting real in-game years. e.g. setage 70";
         if (input == "unlocktech" || starts("unlocktech "))
             return "unlocktech: brutalstrike  lunge  backstab";
         if (input == "unlockspell" || starts("unlockspell "))
@@ -335,7 +357,7 @@ struct CheatConsole {
         // Partial command suggestions
         static const char* cmds[] = {
             "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",
-            "setskill","unlocktech","unlockspell","help", nullptr
+            "setskill","setage","unlocktech","unlockspell","help", nullptr
         };
         std::string sugg;
         for (int i = 0; cmds[i]; i++) {
@@ -351,7 +373,7 @@ struct CheatConsole {
         // Complete top-level command
         static const char* cmds[] = {
             "reveal_map","hide_map","tp","time","season","spawn","give",
-            "setskill","unlocktech","unlockspell","help", nullptr
+            "setskill","setage","unlocktech","unlockspell","help", nullptr
         };
         if (input.find(' ') == std::string::npos) {
             for (int i = 0; cmds[i]; i++) {

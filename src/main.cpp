@@ -602,18 +602,11 @@ void interruptCrafting(bool playerHit); // forward declaration — defined in vi
 // iteration count depending on player speed — so anything tied to real elapsed game time
 // (hunger/thirst/etc.) must NOT live in here. See tickEnemyNeeds().
 void tickWorld() {
-    int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty()
-                                + (player.lightnessTicks > 0 ? 15 : 0)
-                                + (player.accelTicks     > 0 ? 30 : 0)
-                                - (player.slowedTicks    > 0 ? 15 : 0));
-    player.energy += effSpeed;
+    player.energy += player.effectiveSpeed();
 
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
-        int eSpeed = std::max(1, e.speed + (e.lightnessTicks > 0 ? 15 : 0)
-                                          + (e.accelTicks     > 0 ? 30 : 0)
-                                          - (e.slowedTicks    > 0 ? 15 : 0));
-        e.energy += eSpeed;
+        e.energy += e.effectiveSpeed();
         while (e.energy >= 100) {
             enemyAct(e);
             e.energy -= 100;
@@ -664,6 +657,54 @@ void tickEnemyNeeds() {
     }
 }
 
+// Ages every actor once per elapsed in-game year and kills anyone who reaches
+// their rolled naturalDeathAge (docs/village.md "Смерть від старості").
+// A year is 518400 actions (WorldTime::MINUTES_PER_YEAR) — this will almost
+// never fire in real play, by design (no artificial age acceleration); it
+// still runs correctly during long time-skips since it's checked every
+// simulated minute, same as tickEnemyNeeds()/tickVillagerNeeds() above.
+// Called once per player action from onPlayerAct(), not tickWorld() — same
+// "must track real elapsed time, not speed-dependent ticks" reasoning.
+void tickAging() {
+    static long long lastYear = worldTime.minutes / WorldTime::MINUTES_PER_YEAR;
+    long long curYear = worldTime.minutes / WorldTime::MINUTES_PER_YEAR;
+    if (curYear == lastYear) return;
+    lastYear = curYear;
+
+    player.age++;
+    if (player.naturalDeathAge > 0 && player.age >= player.naturalDeathAge && player.isAlive()) {
+        player.body.torso.hp = 0;
+        player.sync();
+        panel.addMessage("Your body finally gives out. You have died of old age.");
+    }
+
+    for (Villager& v : villagers) {
+        if (!v.alive) continue;
+        v.age++;
+        if (v.naturalDeathAge > 0 && v.age >= v.naturalDeathAge) {
+            v.body.torso.hp = 0;
+            v.sync();
+            if (!v.alive) {
+                panel.addMessage(v.name + " has died of old age.");
+                dropVillagerLoot(v);
+            }
+        }
+    }
+
+    for (Enemy& e : enemies) {
+        if (!e.alive) continue;
+        e.age++;
+        if (e.naturalDeathAge > 0 && e.age >= e.naturalDeathAge) {
+            e.body.torso.hp = 0;
+            e.sync();
+            if (!e.alive) {
+                panel.addMessage(e.name + " dies of old age.");
+                dropEnemyLoot(e);
+            }
+        }
+    }
+}
+
 // Called after every player action.
 // Spends 100 energy (+extraEnergy, for techniques that cost more time than a
 // plain attack), then ticks the world until the player can act again.
@@ -707,6 +748,7 @@ void onPlayerAct(int extraEnergy = 0) {
     tickVillagerNeeds();
     tickEnemyNeeds();
     tickFireHazards();
+    tickAging();
     if (player.hunger >= 1.0f) {
         player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
         player.sync();
@@ -4060,6 +4102,11 @@ int main(int argc, char* argv[]) {
                 }
             }
             console.pendingSetSkill.clear();
+        }
+
+        if (console.pendingSetAge >= 0) {
+            player.age = console.pendingSetAge;
+            console.pendingSetAge = -1;
         }
 
         if (!console.pendingUnlockTech.empty()) {

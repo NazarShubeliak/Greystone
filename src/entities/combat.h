@@ -82,7 +82,7 @@ inline AttackResult resolveAttack(Actor& attacker, Actor& defender,
     PartTarget part        = randomHitPart();
     int        weaponDmg   = weapon ? weapon->damage : 1;
     float      skillMult   = 0.5f + sk.level * 0.008f;
-    float      base        = weaponDmg * attacker.body.strMult() * skillMult
+    float      base        = weaponDmg * attacker.body.strMult() * attacker.ageStrMult() * skillMult
                               + (attackerEffStr - 10) / 2.0f;
     float      spread      = 0.8f + (rand() % 41) / 100.0f; // ±20%
     int        rawDmg      = std::max(1, (int)(base * spread));

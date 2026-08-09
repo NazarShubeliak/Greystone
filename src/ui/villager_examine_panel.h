@@ -74,8 +74,8 @@ struct VillagerExaminePanel {
         ty += LH + 4;
 
         // ── Bed position / age ───────────────────────────────────────────
-        std::string bedStr = (snapshot.isChild ? "Child, age " : "Age ")
-                           + std::to_string(snapshot.age)
+        std::string bedStr = std::string(lifeStageName(lifeStageFor(snapshot.age, snapshot.race)))
+                           + ", age " + std::to_string(snapshot.age)
                            + " — home: (" + std::to_string(snapshot.bedX)
                            + ", "         + std::to_string(snapshot.bedY) + ")";
         txt(r, f, bedStr.c_str(), X + PAD, ty, {80,80,75,255});

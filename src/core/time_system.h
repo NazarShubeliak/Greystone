@@ -9,6 +9,11 @@ struct WorldTime {
     // 1 action = 1 game minute (1440 actions per full day).
     static constexpr int MINS_PER_ACTION = 1;
 
+    // A year is 12 30-day months — astronomically long in action-count on
+    // purpose (docs/village.md forbids artificial age acceleration). Used by
+    // main.cpp's tickAging() to advance Actor::age once per elapsed year.
+    static constexpr int MINUTES_PER_YEAR = 60 * 24 * 30 * 12; // 518400
+
     void advance() { minutes += MINS_PER_ACTION; }
 
     int minute() const { return minutes % 60; }

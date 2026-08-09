@@ -33,20 +33,23 @@ struct UI {
         ly += LH;
 
         {
-            int needsPen  = player.needsSpeedPenalty();
-            int effSpeed  = std::max(1, player.speed - needsPen);
+            int effSpeed = player.effectiveSpeed();
             std::string spdStr = "Speed:  " + std::to_string(effSpeed);
             txt(r, f, spdStr.c_str(), LX, ly, {190, 190, 190, 255});
-            if (needsPen != 0) {
+            if (effSpeed != player.speed) {
                 int cx = LX + (int)spdStr.size() * 9;
-                std::string penStr = " (-" + std::to_string(needsPen) + " needs)";
-                txt(r, f, penStr.c_str(), cx, ly, {220, 90, 70, 255});
+                std::string penStr = effSpeed < player.speed
+                    ? " (-" + std::to_string(player.speed - effSpeed) + ")"
+                    : " (+" + std::to_string(effSpeed - player.speed) + ")";
+                txt(r, f, penStr.c_str(), cx, ly, effSpeed < player.speed
+                    ? SDL_Color{220, 90, 70, 255} : SDL_Color{100, 200, 120, 255});
             }
         }
         ly += LH;
 
         std::string meta = std::string(raceTraits[(int)player.race].name)
-                         + "  age " + std::to_string(player.age);
+                         + "  " + lifeStageName(lifeStageFor(player.age, player.race))
+                         + ", age " + std::to_string(player.age);
         txt(r, f, meta.c_str(), LX, ly, {110, 105, 90, 255});
         ly += LH + 4;
         hline(r, LX, ly, COLW);

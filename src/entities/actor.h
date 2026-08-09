@@ -35,6 +35,43 @@ static const RaceTraits raceTraits[] = {
   { "Ghost",      false, false, false,  0,     0,      0,   0,  +2,   0,  +2,   0 },
 };
 
+// ================================================================ Life stages (docs/village.md "Шар 4: Вік і демографія")
+//
+// Boundaries are fractions of a race's minAge/maxAge rather than hardcoded
+// human years, so the same six-stage shape scales from a 80-year human to a
+// 700-year elf per the doc's "для інших рас масштабуються від minAge/maxAge"
+// note. minAge already doubles as "age of adulthood" (it's the lower bound
+// generateAge() rolls adult villagers from), so Adult begins exactly there.
+
+enum class LifeStage { CHILD, TEEN, YOUNG_ADULT, ADULT, ELDER, OLD };
+
+inline LifeStage lifeStageFor(int age, Race race) {
+    const RaceTraits& t = raceTraits[(int)race];
+    if (t.minAge == 0 && t.maxAge == 0) return LifeStage::ADULT; // ageless races don't age
+    float childEnd = t.minAge * 0.33f;
+    float teenEnd  = t.minAge * 0.72f;
+    float elderBeg = t.maxAge * 0.625f;
+    float oldBeg   = t.maxAge * 0.8f;
+    if (age < childEnd)     return LifeStage::CHILD;
+    if (age < teenEnd)      return LifeStage::TEEN;
+    if (age < t.minAge)     return LifeStage::YOUNG_ADULT;
+    if (age < elderBeg)     return LifeStage::ADULT;
+    if (age < oldBeg)       return LifeStage::ELDER;
+    return LifeStage::OLD;
+}
+
+inline const char* lifeStageName(LifeStage s) {
+    switch (s) {
+        case LifeStage::CHILD:       return "Child";
+        case LifeStage::TEEN:        return "Teen";
+        case LifeStage::YOUNG_ADULT: return "Young Adult";
+        case LifeStage::ADULT:       return "Adult";
+        case LifeStage::ELDER:       return "Elder";
+        case LifeStage::OLD:         return "Old";
+    }
+    return "Adult";
+}
+
 // ================================================================ Name generation
 
 namespace Names {
@@ -244,6 +281,10 @@ struct Actor {
     std::string name;
     Race        race   = Race::HUMAN;
     int         age    = 25;
+    // Rolled once at construction (docs/village.md: "±10% рандому" around the
+    // race's maxAge) — the age tickAging() (main.cpp) kills this Actor of old
+    // age at, once `age` reaches it. 0 = never (ageless races).
+    int         naturalDeathAge = 0;
     float       weight = 70.0f;    // kg
     float       height = 175.0f;   // cm
 
@@ -336,6 +377,8 @@ struct Actor {
 
         name = Names::generate(race);
         age  = Names::generateAge(race);
+        if (rt.minAge != 0 || rt.maxAge != 0)
+            naturalDeathAge = (int)(rt.maxAge * (0.90f + (rand() % 21) / 100.0f));
 
         maxStamina = 50.0f + constitution * 5.0f;
         stamina    = maxStamina;
@@ -349,6 +392,44 @@ struct Actor {
         maxHp = body.totalMaxHp();
         speed = std::max(1, (int)(baseSpeed * body.speedMult()));
         alive = !body.isDead();
+    }
+
+    // ---- Life-stage stat effects (docs/village.md) ----
+    // Point-of-use modifiers, same shape as the buff ticks above — nothing
+    // caches an "effective" stat, callers ask for the multiplier/modifier
+    // where they need it. Skills deliberately do NOT decay with age (doc:
+    // old veterans stay skilled, just physically weaker — future teachers).
+    float ageStrMult() const {
+        switch (lifeStageFor(age, race)) {
+            case LifeStage::CHILD:       return 0.4f;
+            case LifeStage::TEEN:        return 0.7f;
+            case LifeStage::YOUNG_ADULT: return 0.85f;
+            case LifeStage::ELDER:       return 0.85f;
+            case LifeStage::OLD:         return 0.6f;
+            default:                     return 1.0f;
+        }
+    }
+    int ageSpeedMod() const {
+        switch (lifeStageFor(age, race)) {
+            case LifeStage::CHILD:       return -20;
+            case LifeStage::TEEN:        return -10;
+            case LifeStage::YOUNG_ADULT: return -5;
+            case LifeStage::ELDER:       return -5;
+            case LifeStage::OLD:         return -15;
+            default:                     return 0;
+        }
+    }
+
+    // Every speed modifier composed in one place — the single source of truth
+    // for "how fast can this Actor currently act." tickWorld() (main.cpp) uses
+    // this to grant energy, and UI panels (ui.h's Speed line, bottom_panel.h's
+    // SPD:) call it too so what's displayed always matches what's actually
+    // applied, instead of each display re-deriving its own partial subset.
+    int effectiveSpeed() const {
+        return std::max(1, speed - needsSpeedPenalty() + ageSpeedMod()
+                            + (lightnessTicks > 0 ? 15 : 0)
+                            + (accelTicks     > 0 ? 30 : 0)
+                            - (slowedTicks    > 0 ? 15 : 0));
     }
 
     // ---- Damage ----

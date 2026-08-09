@@ -101,6 +101,16 @@ private:
             std::string d = "-15 effective Speed — " + std::to_string(p.slowedTicks) + " turns left";
             debuffs.push_back({"Slowed", d, {90, 130, 190, 255}});
         }
+        // Life stage (docs/village.md) — age-based speed/strength modifier,
+        // same point-of-use pattern as the buff ticks above. Every non-Adult
+        // stage is a net penalty (even Elder), so it always lands in debuffs.
+        LifeStage stage = lifeStageFor(p.age, p.race);
+        if (stage != LifeStage::ADULT) {
+            std::string d = std::to_string(p.ageSpeedMod()) + " Speed, "
+                           + std::to_string((int)(p.ageStrMult() * 100)) + "% Strength — age "
+                           + std::to_string(p.age);
+            debuffs.push_back({lifeStageName(stage), d, {180, 160, 140, 255}});
+        }
         // Item stat bonuses (jewelry etc.) — can be negative, so sort by sign.
         addStatBonus(p.strItemBonus(), "Strength", debuffs, buffs);
         addStatBonus(p.dexItemBonus(), "Dexterity", debuffs, buffs);

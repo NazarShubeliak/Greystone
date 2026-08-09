@@ -191,9 +191,13 @@ private:
         SDL_RenderDrawRect(r, &barBg);
         x += BAR_W + GAP;
 
-        // Speed / Energy — speed shown after hunger/thirst penalty (matches tickWorld's effSpeed)
-        int effSpeed = std::max(1, p.speed - p.needsSpeedPenalty());
-        SDL_Color spdCol = p.needsSpeedPenalty() > 0 ? SDL_Color{220, 140, 90, 255} : SDL_Color{180, 180, 180, 255};
+        // Speed / Energy — matches tickWorld's effectiveSpeed() exactly (needs
+        // penalty, age, and buff ticks all folded in), so this never drifts
+        // from what's actually applied to energy gain.
+        int effSpeed = p.effectiveSpeed();
+        SDL_Color spdCol = effSpeed < p.speed ? SDL_Color{220, 140, 90, 255}
+                          : effSpeed > p.speed ? SDL_Color{100, 200, 120, 255}
+                                                : SDL_Color{180, 180, 180, 255};
         std::string spdStr = "SPD: " + std::to_string(effSpeed);
         renderText(r, f, spdStr.c_str(), x, Y, spdCol);
         x += textWidth(f, spdStr.c_str()) + GAP;
