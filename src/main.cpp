@@ -104,15 +104,17 @@ int  wallTargetSlot = -1;
 std::vector<SDL_Point> wallSelection;
 
 // Two-phase targeting for throwsWall spells (Wall Throw): first click picks
-// which existing O_WALL to hurl (within a generous fixed pick radius, not
-// the spell's normal range), second click picks the target (within the
-// spell's normal range). Doesn't fit hotbarTargeting (one click) or
-// wallTargeting (open-ended multi-select) — needs exactly two clicks with
-// different validity rules each. Mutually exclusive with both of those.
+// which existing O_WALL to hurl (within WALL_THROW_PICK_RADIUS — close by,
+// "grab" range, not the spell's normal aim range), second click picks the
+// target (within the spell's normal range — thrown farther than it's
+// picked up). Doesn't fit hotbarTargeting (one click) or wallTargeting
+// (open-ended multi-select) — needs exactly two clicks with different
+// validity rules each. Mutually exclusive with both of those.
 bool wallThrowTargeting     = false;
 int  wallThrowSlot          = -1;
 bool wallThrowPickingSource = true;
 int  wallThrowSrcX = -1, wallThrowSrcY = -1;
+constexpr int WALL_THROW_PICK_RADIUS = 3;
 
 // Purely cosmetic: a spell's projectile flying from caster to target after a
 // cast resolves (damage is already applied — see useSpellAtTile()).
@@ -445,6 +447,14 @@ void enemyAct(Enemy& enemy) {
                              + withWeapon + " for " + std::to_string(r.damage) + " damage.");
             if (!player.isAlive())
                 panel.addMessage("You have been slain by " + enemy.name + ".");
+            if (r.reflectedDamage > 0) {
+                panel.addMessage("Your Fire Shield burns " + enemy.name + " for "
+                                 + std::to_string(r.reflectedDamage) + " damage!");
+                if (!enemy.isAlive()) {
+                    panel.addMessage(enemy.name + " is consumed by the flames.");
+                    dropEnemyLoot(enemy);
+                }
+            }
         }
     } else if (!isTileOccupied(next.x, next.y)) {
         enemy.x = next.x;
@@ -566,6 +576,14 @@ void villagerCombatAct(Villager& v) {
                              + withWeapon + " for " + std::to_string(r.damage) + " damage.");
             if (!player.isAlive())
                 panel.addMessage("You have been slain by " + v.name + ".");
+            if (r.reflectedDamage > 0) {
+                panel.addMessage("Your Fire Shield burns " + v.name + " for "
+                                 + std::to_string(r.reflectedDamage) + " damage!");
+                if (!v.isAlive()) {
+                    panel.addMessage(v.name + " is consumed by the flames.");
+                    dropVillagerLoot(v);
+                }
+            }
         }
     } else if (!isTileOccupied(next.x, next.y)) {
         v.x = next.x;
@@ -584,12 +602,18 @@ void interruptCrafting(bool playerHit); // forward declaration — defined in vi
 // iteration count depending on player speed — so anything tied to real elapsed game time
 // (hunger/thirst/etc.) must NOT live in here. See tickEnemyNeeds().
 void tickWorld() {
-    int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty());
+    int effSpeed = std::max(1, player.speed - player.needsSpeedPenalty()
+                                + (player.lightnessTicks > 0 ? 15 : 0)
+                                + (player.accelTicks     > 0 ? 30 : 0)
+                                - (player.slowedTicks    > 0 ? 15 : 0));
     player.energy += effSpeed;
 
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
-        e.energy += e.speed;
+        int eSpeed = std::max(1, e.speed + (e.lightnessTicks > 0 ? 15 : 0)
+                                          + (e.accelTicks     > 0 ? 30 : 0)
+                                          - (e.slowedTicks    > 0 ? 15 : 0));
+        e.energy += eSpeed;
         while (e.energy >= 100) {
             enemyAct(e);
             e.energy -= 100;
@@ -960,6 +984,22 @@ void spawnVillagers(bool isVillage) {
         for (Item& g : goodsFor(occ)) addToContainer(*v.bag, std::move(g));
     };
 
+    // Nearest O_BARREL to a bed — every farmstead room already has exactly
+    // one (map.cpp's placeFarmstead()), so this reliably finds that
+    // household's own barrel rather than the Smithy's/Woodcutter's (those
+    // sit in a completely different building, far outside this radius).
+    auto findNearbyBarrel = [](int bx, int by) -> SDL_Point {
+        SDL_Point best{-1, -1};
+        int bestD = -1;
+        for (int y = std::max(0, by - 12); y <= std::min(MAP_HEIGHT - 1, by + 12); y++)
+            for (int x = std::max(0, bx - 12); x <= std::min(MAP_WIDTH - 1, bx + 12); x++) {
+                if (map[y][x].objectId != O_BARREL) continue;
+                int d = (x - bx) * (x - bx) + (y - by) * (y - by);
+                if (bestD < 0 || d < bestD) { bestD = d; best = {x, y}; }
+            }
+        return best;
+    };
+
     for (auto& kv : households) {
         int primary = kv.second[0];
 
@@ -981,11 +1021,124 @@ void spawnVillagers(bool isVillage) {
         }
         giveOccupation(villagers[primary], occ);
 
-        // Rare chance: the spouse in a non-farm household becomes a Seamstress
-        // instead of a plain helper.
         bool isFarmHousehold = (role == BuildingRole::FARM || role == BuildingRole::HERBALIST_FARM);
-        if (!isFarmHousehold && kv.second.size() > 1 && (rand() % 100) < 20)
-            giveOccupation(villagers[kv.second[1]], Occupation::SEAMSTRESS);
+
+        // Family granary — shared food reserve tied to the barrel map.cpp
+        // already furnishes every farmstead room with (repurposed from pure
+        // decoration). The primary worker holds the real Item;
+        // granaryOwnerId (set on the primary itself, then propagated to
+        // spouse/children below) is how everyone else reaches it.
+        if (isFarmHousehold) {
+            SDL_Point barrel = findNearbyBarrel(villagers[primary].bedX, villagers[primary].bedY);
+            if (barrel.x >= 0) {
+                Item stock   = Items::grainBarrel();
+                Item starter = (occ == Occupation::HERBALIST) ? Items::mushroomStew() : Items::flatbread();
+                starter.count = 8;
+                addToContainer(stock, starter);
+                villagers[primary].granary        = stock;
+                villagers[primary].granaryX       = barrel.x;
+                villagers[primary].granaryY       = barrel.y;
+                villagers[primary].granaryOwnerId = primary;
+            }
+        }
+
+        // Real spouse link for any two-bed household (farm/herbalist/elder) —
+        // not just a shared surname. Both spouses already got an independent
+        // adult age from Villager()'s default ctor; re-roll the second one
+        // close to the first's instead of leaving two unrelated ages.
+        if (kv.second.size() > 1) {
+            int spouseIdx = kv.second[1];
+            villagers[primary].spouseId   = spouseIdx;
+            villagers[spouseIdx].spouseId = primary;
+            villagers[spouseIdx].granaryOwnerId = villagers[primary].granaryOwnerId;
+            int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, villagers[primary].age - 10);
+            int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, villagers[primary].age + 10);
+            villagers[spouseIdx].age = Names::generateAge(Race::HUMAN, lo, hi);
+
+            // Rare chance: the spouse in a non-farm household becomes a
+            // Seamstress instead of a plain helper.
+            if (!isFarmHousehold && (rand() % 100) < 20)
+                giveOccupation(villagers[spouseIdx], Occupation::SEAMSTRESS);
+        }
+
+        // Children — farm/herbalist households (married couples) only. No bed
+        // exists for them (map.cpp never furnishes more than 2 beds per
+        // building), so they share a parent's home tile instead of pathing to
+        // one of their own; the family granary (above) plus a small personal
+        // stock covers their food.
+        if (isFarmHousehold && kv.second.size() > 1) {
+            int fatherIdx = primary, motherIdx = kv.second[1];
+            int youngerParentAge = std::min(villagers[fatherIdx].age, villagers[motherIdx].age);
+            int maxChildAge = youngerParentAge - 16; // parent was at least 16 at birth
+
+            if (maxChildAge >= 1 && (rand() % 100) < 60) {
+                int nKids = 1 + rand() % 3;
+                std::vector<SDL_Point> takenHomeTiles = {
+                    {villagers[fatherIdx].sleepX, villagers[fatherIdx].sleepY},
+                    {villagers[motherIdx].sleepX, villagers[motherIdx].sleepY}
+                };
+
+                for (int k = 0; k < nKids; k++) {
+                    Villager child;
+                    child.isChild = true;
+                    child.age = Names::generateAge(Race::HUMAN, 1, std::min(17, maxChildAge));
+                    child.bedX = villagers[fatherIdx].bedX;
+                    child.bedY = villagers[fatherIdx].bedY;
+
+                    // Distinct nearby walkable tile so kids don't all path onto
+                    // the exact same spot as a parent — search a small ring
+                    // around the household's bed for a free floor tile.
+                    child.sleepX = villagers[fatherIdx].sleepX;
+                    child.sleepY = villagers[fatherIdx].sleepY;
+                    bool foundTile = false;
+                    for (int dy = -2; dy <= 2 && !foundTile; dy++) {
+                        for (int dx = -2; dx <= 2; dx++) {
+                            int tx = child.bedX + dx, ty = child.bedY + dy;
+                            if (tx < 1 || tx >= MAP_WIDTH-1 || ty < 1 || ty >= MAP_HEIGHT-1) continue;
+                            if (!map[ty][tx].walkable()) continue;
+                            bool taken = false;
+                            for (const SDL_Point& p : takenHomeTiles)
+                                if (p.x == tx && p.y == ty) { taken = true; break; }
+                            if (taken) continue;
+                            child.sleepX = tx; child.sleepY = ty;
+                            foundTile = true;
+                            break;
+                        }
+                    }
+                    takenHomeTiles.push_back({child.sleepX, child.sleepY});
+                    child.x = child.sleepX; child.y = child.sleepY;
+
+                    int fnIdx;
+                    do { fnIdx = rand() % nFirstNames; }
+                    while (std::count(usedFirst[kv.first].begin(), usedFirst[kv.first].end(), fnIdx) > 0
+                           && (int)usedFirst[kv.first].size() < nFirstNames);
+                    usedFirst[kv.first].push_back(fnIdx);
+
+                    int snIdx = kv.first % nSurnames;
+                    child.name     = std::string(NPC_FIRST_NAMES[fnIdx]) + " " + NPC_SURNAMES[snIdx];
+                    child.color    = VILLAGER_COLORS[(fatherIdx + k + 1) % VILLAGER_COLOR_COUNT];
+                    child.greetIdx = (fatherIdx + k) % countStrings(GREETINGS_DAY);
+                    child.state    = Villager::State::WANDER;
+
+                    child.bag = Items::backpack();
+                    {
+                        Item loaves = Items::bread();
+                        loaves.count = 3;
+                        addToContainer(*child.bag, std::move(loaves));
+                    }
+                    child.outfit = Items::commonClothes();
+
+                    child.motherId = motherIdx;
+                    child.fatherId = fatherIdx;
+                    child.granaryOwnerId = villagers[fatherIdx].granaryOwnerId;
+
+                    int childId = (int)villagers.size();
+                    villagers.push_back(child);
+                    villagers[fatherIdx].childIds.push_back(childId);
+                    villagers[motherIdx].childIds.push_back(childId);
+                }
+            }
+        }
     }
 }
 
@@ -1144,19 +1297,34 @@ void updateVillagers() {
             case Villager::State::EAT:
                 if (followPath(v, v.sleepX, v.sleepY)) {
                     bool ate = false;
-                    if (v.bag) {
-                        auto& c = v.bag->contents;
+                    // Eats the first nutrition>0 stack out of a container.
+                    auto eatFrom = [](Item& container) {
+                        auto& c = container.contents;
                         for (int i = 0; i < (int)c.size(); i++) {
                             if (c[i].nutrition > 0) {
                                 if (c[i].count > 1) c[i].count--;
                                 else                 c.erase(c.begin() + i);
-                                ate = true;
-                                break;
+                                return true;
                             }
                         }
+                        return false;
+                    };
+
+                    if (v.bag) ate = eatFrom(*v.bag);
+
+                    // Family granary — shared reserve, tried before anyone
+                    // goes hungry. Every household member (owner included)
+                    // points at it via granaryOwnerId, so this is the same
+                    // lookup for everyone, not a special case for the farmer.
+                    if (!ate && v.granaryOwnerId >= 0 && v.granaryOwnerId < (int)villagers.size()) {
+                        Villager& owner = villagers[v.granaryOwnerId];
+                        if (owner.granary) ate = eatFrom(*owner.granary);
                     }
-                    if (!ate && (v.occupation == Occupation::FARMER || v.occupation == Occupation::HERBALIST)) {
-                        // No stock left — try to harvest a mature crop from their own field.
+
+                    if (!ate && (v.occupation == Occupation::FARMER || v.occupation == Occupation::HERBALIST) && v.granary) {
+                        // Granary's empty too — harvest a mature crop from
+                        // their own field straight into it (a real Item, not
+                        // an invisible hunger reset), then eat one portion.
                         int wantId = (v.occupation == Occupation::FARMER) ? O_WHEAT : O_HERB;
                         for (int dy = -6; dy <= 6 && !ate; dy++)
                             for (int dx = -6; dx <= 6 && !ate; dx++) {
@@ -1165,11 +1333,15 @@ void updateVillagers() {
                                 Tile& t = map[fy][fx];
                                 if (t.objectId == wantId && t.plantAge >= 170) {
                                     t.plantAge = 0; // harvested — regrows over the season
-                                    ate = true;
+                                    Item food = (v.occupation == Occupation::FARMER)
+                                              ? Items::flatbread() : Items::mushroomStew();
+                                    food.count = 3;
+                                    addToContainer(*v.granary, food);
+                                    ate = eatFrom(*v.granary);
                                 }
                             }
                     }
-                    // If neither worked, hunger stays high — a real risk, not just flavor.
+                    // If nothing worked, hunger stays high — a real risk, not just flavor.
                     if (ate) v.hunger = 0.0f;
                     v.state = Villager::State::WANDER;
                 }
@@ -1853,8 +2025,13 @@ void useSpellAtTile(int tx, int ty, SpellId id) {
         if (!e->isAlive()) {
             panel.addMessage(e->name + " dies" + (s.school == Skill::FIRE ? ", charred." : "."));
             dropEnemyLoot(*e);
-        } else if (s.knockback && tryKnockback(*e, player.x, player.y)) {
-            panel.addMessage(e->name + " is thrown back by the wind!");
+        } else {
+            if (s.knockback && tryKnockback(*e, player.x, player.y))
+                panel.addMessage(e->name + " is thrown back by the wind!");
+            if (s.slows) {
+                e->slowedTicks = s.buffTurns;
+                panel.addMessage(e->name + " is slowed by the water!");
+            }
         }
     }
     for (Villager* v : hitVillagers) {
@@ -1866,8 +2043,11 @@ void useSpellAtTile(int tx, int ty, SpellId id) {
             dropVillagerLoot(*v);
         } else {
             villagerReactToAttack(*v);
-            if (s.knockback && tryKnockback(*v, player.x, player.y)) {
+            if (s.knockback && tryKnockback(*v, player.x, player.y))
                 panel.addMessage(v->name + " is thrown back by the wind!");
+            if (s.slows) {
+                v->slowedTicks = s.buffTurns;
+                panel.addMessage(v->name + " is slowed by the water!");
             }
         }
     }
@@ -1879,13 +2059,13 @@ void useSpellAtTile(int tx, int ty, SpellId id) {
     onPlayerAct(s.extraEnergy);
 }
 
-// Resolves a selfCast spell (Create Water) immediately — no targeting mode,
-// no click to wait on, no travel. Still spends stamina and rolls the usual
+// Resolves a selfCast spell (Create Water, or a buffTurns spell — Fire
+// Shield/Skin Hardening/Lightness) immediately — no targeting mode, no
+// click to wait on, no travel. Still spends stamina and rolls the usual
 // single backfire per docs/magic.md's "невдалі касти на низькій навичці",
 // same as any other spell; only the "there's an impact point" part is
-// skipped. Only Create Water exists here so far — add more selfCast spells
-// with their own branch as they show up rather than inventing a generic
-// "utility effect" field for a single spell.
+// skipped. Each selfCast spell gets its own branch by SpellId rather than a
+// generic "utility effect" field — there are only a handful of these.
 void useSelfSpell(SpellId id) {
     const Spell& s = spellInfo(id);
     if (!player.hasStamina(s.staminaCost)) {
@@ -1910,6 +2090,27 @@ void useSelfSpell(SpellId id) {
         panel.addMessage(wasThirsty
             ? "You conjure a stream of water from the air and drink deeply."
             : "You conjure water from the air, but you're not thirsty.");
+    } else if (id == SpellId::FIRE_SHIELD) {
+        player.fireShieldTicks = s.buffTurns;
+        panel.addMessage("Shimmering heat wraps around you.");
+    } else if (id == SpellId::SKIN_HARDENING) {
+        player.skinHardenTicks = s.buffTurns;
+        panel.addMessage("Your skin hardens like stone.");
+    } else if (id == SpellId::LIGHTNESS) {
+        player.lightnessTicks = s.buffTurns;
+        panel.addMessage("Your steps grow lighter and faster.");
+    } else if (id == SpellId::ACCELERATION) {
+        player.accelTicks = s.buffTurns;
+        panel.addMessage("A surge of wind carries you forward!");
+    } else if (id == SpellId::MINOR_HEAL) {
+        int healAmt = 15;
+        int before  = player.body.torso.hp;
+        player.body.torso.hp = std::min(player.body.torso.maxHp, player.body.torso.hp + healAmt);
+        player.sync();
+        int healed = player.body.torso.hp - before;
+        panel.addMessage(healed > 0
+            ? "Warm light knits your wounds — you recover " + std::to_string(healed) + " HP."
+            : "Warm light washes over you, but you're already at full health.");
     }
 
     if (roll.leveledUp)
@@ -2342,7 +2543,6 @@ void resolveWallThrowClick(int mx, int my) {
     }
 
     if (wallThrowPickingSource) {
-        const int WALL_THROW_PICK_RADIUS = 10;
         int dist = std::max(std::abs(mx - player.x), std::abs(my - player.y));
         if (dist > WALL_THROW_PICK_RADIUS || map[my][mx].objectId != O_WALL) {
             cancelWallThrowTargeting("That's not a stone wall within reach.");
@@ -2879,10 +3079,22 @@ void handleInput(SDL_Event& event, bool& running) {
                                     }
                                 }});
                             }
-                            items.push_back({"Examine",
-                                [vsnap = v]() {
-                                    villagerExaminePanel.show(vsnap);
-                                }});
+                            {
+                                std::string spouseName = (v.spouseId >= 0 && v.spouseId < (int)villagers.size())
+                                                        ? villagers[v.spouseId].name : "";
+                                std::string motherName = (v.motherId >= 0 && v.motherId < (int)villagers.size())
+                                                        ? villagers[v.motherId].name : "";
+                                std::string fatherName = (v.fatherId >= 0 && v.fatherId < (int)villagers.size())
+                                                        ? villagers[v.fatherId].name : "";
+                                std::vector<std::string> childrenNames;
+                                for (int cid : v.childIds)
+                                    if (cid >= 0 && cid < (int)villagers.size())
+                                        childrenNames.push_back(villagers[cid].name);
+                                items.push_back({"Examine",
+                                    [vsnap = v, spouseName, motherName, fatherName, childrenNames]() {
+                                        villagerExaminePanel.show(vsnap, spouseName, motherName, fatherName, childrenNames);
+                                    }});
+                            }
                             int vi = (int)(&v - &villagers[0]);
                             // Trading now happens through the Talk dialogue (buildDialogueOptions),
                             // not as its own menu item — one less redundant entry here.
@@ -3527,7 +3739,6 @@ void renderWallThrowTargeting(SDL_Renderer* r) {
     if (raw < 0 || !Hotbar::isSpellSlot(raw)) return;
     const Spell& s = spellInfo(Hotbar::spellOf(raw));
 
-    const int WALL_THROW_PICK_RADIUS = 10;
     int radius = wallThrowPickingSource ? WALL_THROW_PICK_RADIUS : s.range;
 
     SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);

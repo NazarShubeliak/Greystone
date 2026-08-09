@@ -45,13 +45,14 @@ inline bool isBlunt(Skill s)  { return s == Skill::MACE   || s == Skill::GREATMA
 inline bool isDagger(Skill s) { return s == Skill::DAGGER; }
 
 struct AttackResult {
-    bool       hit           = false;
-    int        damage        = 0;
-    PartTarget part          = PartTarget::TORSO;
-    bool       killed        = false;
-    bool       leveledUp     = false;
-    Skill      skillUsed     = Skill::UNARMED;
-    int        newSkillLevel = 0;
+    bool       hit             = false;
+    int        damage          = 0;
+    PartTarget part            = PartTarget::TORSO;
+    bool       killed          = false;
+    bool       leveledUp       = false;
+    Skill      skillUsed       = Skill::UNARMED;
+    int        newSkillLevel   = 0;
+    int        reflectedDamage = 0; // Fire Shield — 0 if the defender didn't have it up
 };
 
 // Resolves one melee attack per the formulas in docs/weapons.md.
@@ -107,6 +108,14 @@ inline AttackResult resolveAttack(Actor& attacker, Actor& defender,
     result.damage = finalDmg;
     result.part   = part;
     result.killed = wasAlive && !defender.isAlive();
+
+    // Fire Shield: a defender wreathed in it burns whoever just struck them
+    // in melee, regardless of who's attacking whom — symmetric, same as
+    // everything else in combat.h.
+    if (defender.fireShieldTicks > 0 && attacker.isAlive()) {
+        result.reflectedDamage = std::max(1, finalDmg / 3);
+        attacker.takeDamage(result.reflectedDamage, PartTarget::TORSO);
+    }
 
     result.leveledUp = sk.gain(2);
     if (result.killed && sk.gain(5)) result.leveledUp = true;

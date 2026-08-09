@@ -254,6 +254,17 @@ inline Item backpack() {
     return i;
 }
 
+inline Item grainBarrel() {
+    Item i;
+    i.name        = "Grain Barrel";
+    i.description = "A sturdy barrel where the household keeps its shared food stock.";
+    i.type        = ItemType::CONTAINER;
+    i.volume      = 3000;   i.weight    = 2500;
+    i.maxVolume   = 20000;  i.maxWeight = 20000;
+    i.value       = 10;
+    return i;
+}
+
 inline Item beltPouch() {
     Item i;
     i.name        = "Belt Pouch";

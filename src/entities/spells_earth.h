@@ -6,10 +6,6 @@
 // are defined there — split out purely so the spell roster doesn't pile into
 // one giant table as more schools arrive (see magic.h's own comment).
 //
-// Skin Hardening (the other Novice spell, a temporary defense buff) needs a
-// buff-duration system nothing in the game has yet, deliberately deferred
-// rather than bolted on for one spell.
-
 inline constexpr Spell STONE_SPELL = {
     "Stone", Skill::EARTH, 0, 6, 8.0f, 20, 6, "o",
     {150, 130, 100, 255},
@@ -21,7 +17,7 @@ inline constexpr Spell STONE_SPELL = {
 // game that edits the map itself, matching docs/magic.md's "єдина школа що
 // редагує тайли карти" (the only school that edits map tiles) framing for Earth.
 inline constexpr Spell STONE_WALL_SPELL = {
-    "Stone Wall", Skill::EARTH, 15, 6, 15.0f, 60, 5, "#",
+    "Stone Wall", Skill::EARTH, 15, 6, 15.0f, 60, 2, "#",
     {130, 120, 100, 255},
     "Raises a slab of solid stone from the earth on an open tile, blocking "
     "the way. Requires Earth 15.",
@@ -33,7 +29,7 @@ inline constexpr Spell STONE_WALL_SPELL = {
 // that happens to share Material::STONE with nothing — an earth spell has no
 // business unmaking something that isn't stone.
 inline constexpr Spell RECLAIM_WALL_SPELL = {
-    "Reclaim Wall", Skill::EARTH, 20, 4, 10.0f, 30, 5, "#",
+    "Reclaim Wall", Skill::EARTH, 20, 4, 10.0f, 30, 2, "#",
     {130, 120, 100, 255},
     "Undoes a stone wall, sinking it back into the earth it came from. Only "
     "works on stone — a wooden wall shrugs this off. Requires Earth 20.",
@@ -59,4 +55,15 @@ inline constexpr Spell ARCHITECT_SPELL = {
     "Mark out a structure's walls tile by tile and raise all of them from "
     "the earth at once. Costs stamina per tile marked. Requires Earth 50.",
     SpellShape::POINT, 0, false, 0, false, false, false, false, false, false, true
+};
+
+// selfCast + buffTurns — see Spell's own comments on those fields. Reflected
+// through Player::totalDefense(); works for the player only until
+// enemies/villagers gain a comparable defense calculation to hook into.
+inline constexpr Spell SKIN_HARDENING_SPELL = {
+    "Skin Hardening", Skill::EARTH, 0, 5, 12.0f, 30, 0, "o",
+    {160, 140, 110, 255},
+    "Hardens your skin like stone for a while, boosting your defense. "
+    "Requires no training.",
+    SpellShape::POINT, 0, false, 0, true, false, false, false, false, false, false, 25
 };

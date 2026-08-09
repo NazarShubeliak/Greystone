@@ -10,10 +10,9 @@
 // Spells reuse the same Skill/SkillLevel progression as weapons (Skill::FIRE etc,
 // living on Actor per the world-symmetry rule) and the same 9-slot Hotbar as
 // techniques — see hotbar.h's SPELL_SLOT_OFFSET for how one int slot holds either
-// a TechniqueId or a SpellId without changing Hotbar's structure. Fire, Water,
-// Earth and Air exist so far (docs/magic.md's implementation order: Fireball
-// first as a test, round out the rest of Fire, then the other schools one at
-// a time).
+// a TechniqueId or a SpellId without changing Hotbar's structure. All six base
+// schools exist now (docs/magic.md's implementation order: Fireball first as a
+// test, round out the rest of Fire, then the other schools one at a time).
 //
 // Each school's actual spells live in their own spells_<school>.h file (as
 // named `inline constexpr Spell` constants), included below right after
@@ -23,10 +22,12 @@
 // SpellId.
 
 enum class SpellId {
-    SPARK, FIREBALL, WALL_OF_FIRE, EXPLOSION,
-    CREATE_WATER, WATER_JET, RAIN_CALL,
-    STONE, STONE_WALL, RECLAIM_WALL, WALL_THROW, ARCHITECT,
-    GUST, VORTEX,
+    SPARK, FIREBALL, WALL_OF_FIRE, EXPLOSION, FIRE_SHIELD,
+    CREATE_WATER, WATER_JET, RAIN_CALL, SLOWNESS,
+    STONE, STONE_WALL, RECLAIM_WALL, WALL_THROW, ARCHITECT, SKIN_HARDENING,
+    GUST, VORTEX, LIGHTNESS, ACCELERATION,
+    MINOR_HEAL,
+    WITHERING,
     SPELL_COUNT
 };
 
@@ -102,19 +103,36 @@ struct Spell {
     // igniting a FireHazardTile — same UI, construction instead of
     // destruction. staminaCost is per-tile here too.
     bool        manualBuild  = false;
+    // buffTurns: how long a selfCast buff (Fire Shield/Skin Hardening/
+    // Lightness/Acceleration) or a slows debuff (Slowness) lasts, in turns.
+    // useSelfSpell()/the slows branch of useSpellAtTile() pick which Actor
+    // counter to set by SpellId, same "no generic effect field for a
+    // handful of spells" call as rainCall/buildsWall.
+    int         buffTurns   = 0;
+    // slows spells (Slowness) set the hit target's slowedTicks to buffTurns
+    // after the normal damage resolves — a debuff instead of a self-buff,
+    // but reuses the exact same Actor counters/buffTurns field as the
+    // selfCast buffs above (main.cpp's useSpellAtTile()). Declared last so
+    // adding it never shifts any earlier field's position in existing
+    // spells_<school>.h positional initializers.
+    bool        slows       = false;
 };
 
 #include "spells_fire.h"
 #include "spells_water.h"
 #include "spells_earth.h"
 #include "spells_air.h"
+#include "spells_life.h"
+#include "spells_death.h"
 
 inline const Spell& spellInfo(SpellId id) {
     static const Spell S[(int)SpellId::SPELL_COUNT] = {
-        SPARK_SPELL, FIREBALL_SPELL, WALL_OF_FIRE_SPELL, EXPLOSION_SPELL,
-        CREATE_WATER_SPELL, WATER_JET_SPELL, RAIN_CALL_SPELL,
-        STONE_SPELL, STONE_WALL_SPELL, RECLAIM_WALL_SPELL, WALL_THROW_SPELL, ARCHITECT_SPELL,
-        GUST_SPELL, VORTEX_SPELL,
+        SPARK_SPELL, FIREBALL_SPELL, WALL_OF_FIRE_SPELL, EXPLOSION_SPELL, FIRE_SHIELD_SPELL,
+        CREATE_WATER_SPELL, WATER_JET_SPELL, RAIN_CALL_SPELL, SLOWNESS_SPELL,
+        STONE_SPELL, STONE_WALL_SPELL, RECLAIM_WALL_SPELL, WALL_THROW_SPELL, ARCHITECT_SPELL, SKIN_HARDENING_SPELL,
+        GUST_SPELL, VORTEX_SPELL, LIGHTNESS_SPELL, ACCELERATION_SPELL,
+        MINOR_HEAL_SPELL,
+        WITHERING_SPELL,
     };
     return S[(int)id];
 }

@@ -49,10 +49,12 @@ struct CheatConsole {
     static constexpr const char* TECH_TOKENS[] = { "brutalstrike","lunge","backstab", nullptr };
     // Order MUST match enum SpellId (magic.h).
     static constexpr const char* SPELL_TOKENS[] = {
-        "spark","fireball","wallofire","explosion",
-        "createwater","waterjet","raincall",
-        "stone","stonewall","reclaimwall","wallthrow","architect",
-        "gust","vortex", nullptr
+        "spark","fireball","wallofire","explosion","fireshield",
+        "createwater","waterjet","raincall","slowness",
+        "stone","stonewall","reclaimwall","wallthrow","architect","skinhardening",
+        "gust","vortex","lightness","acceleration",
+        "minorheal",
+        "withering", nullptr
     };
 
     void open() {
@@ -291,8 +293,9 @@ struct CheatConsole {
                     result   = std::string("Unlocked ") + spname + " (skill raised to its required level if needed).";
                     resultOk = true;
                 } else {
-                    result   = "Unknown spell. Use: spark  fireball  wallofire  explosion  createwater  waterjet  "
-                               "raincall  stone  stonewall  reclaimwall  wallthrow  architect  gust  vortex";
+                    result   = "Unknown spell. Use: spark  fireball  wallofire  explosion  fireshield  createwater  "
+                               "waterjet  raincall  slowness  stone  stonewall  reclaimwall  wallthrow  architect  "
+                               "skinhardening  gust  vortex  lightness  acceleration  minorheal  withering";
                     resultOk = false;
                 }
                 return;
@@ -326,8 +329,9 @@ struct CheatConsole {
         if (input == "unlocktech" || starts("unlocktech "))
             return "unlocktech: brutalstrike  lunge  backstab";
         if (input == "unlockspell" || starts("unlockspell "))
-            return "unlockspell: spark  fireball  wallofire  explosion  createwater  waterjet  "
-                   "raincall  stone  stonewall  reclaimwall  wallthrow  architect  gust  vortex";
+            return "unlockspell: spark  fireball  wallofire  explosion  fireshield  createwater  "
+                   "waterjet  raincall  slowness  stone  stonewall  reclaimwall  wallthrow  architect  "
+                   "skinhardening  gust  vortex  lightness  acceleration  minorheal  withering";
         // Partial command suggestions
         static const char* cmds[] = {
             "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",

@@ -287,6 +287,20 @@ struct Actor {
     float stamina    = 100.0f;
     float maxStamina = 100.0f;
 
+    // --- Buffs/debuffs (docs/magic.md self-cast/targeted utility effects) ---
+    // Simple duration counters in turns, decremented once per tickNeeds()
+    // call — the same "once per actor turn" cadence hunger/thirst/stamina
+    // regen already use (see onPlayerAct()/tickEnemyNeeds()/
+    // tickVillagerNeeds()). Live here, not on Player, so an NPC mage could
+    // eventually buff itself (or debuff someone else) too. Explicit named
+    // counters rather than a generic buff-list — there are only a handful of
+    // these, a lookup table would be more machinery than the thing it replaces.
+    int fireShieldTicks = 0; // Fire Shield: reflects incoming melee damage while > 0 (combat.h)
+    int skinHardenTicks = 0; // Skin Hardening: + defense while > 0 (Player::totalDefense())
+    int lightnessTicks  = 0; // Lightness: + speed while > 0 (main.cpp's tickWorld())
+    int accelTicks  = 0; // Acceleration: bigger + speed while > 0 (main.cpp's tickWorld())
+    int slowedTicks = 0; // Slowness (Water, targeted debuff): -speed while > 0 (main.cpp's tickWorld())
+
     // --- Social ---
     // Disposition to the player: -100 (enemy on sight) .. 0 (neutral) .. +100 (loyal ally)
     // Thresholds: <-50 attack on sight | -50..-20 hostile | -20..+20 neutral
@@ -360,6 +374,12 @@ struct Actor {
         if (rt.needsWater) thirst = std::min(1.0f, thirst + 0.000694f); // ~24h to dehydrate
 
         stamina = std::min(maxStamina, stamina + 3.0f); // regen — nothing spends it yet
+
+        if (fireShieldTicks > 0) fireShieldTicks--;
+        if (skinHardenTicks > 0) skinHardenTicks--;
+        if (lightnessTicks  > 0) lightnessTicks--;
+        if (accelTicks  > 0) accelTicks--;
+        if (slowedTicks > 0) slowedTicks--;
 
         // Bleeding drains torso HP
         if (rt.canBleed) {
@@ -511,6 +531,7 @@ struct Player : Actor {
         int d = 0;
         for (int s = 0; s < (int)EquipSlot::SLOT_COUNT; s++)
             if (worn[s].has_value()) d += worn[s]->defense;
+        if (skinHardenTicks > 0) d += 8; // Skin Hardening buff
         return d;
     }
 

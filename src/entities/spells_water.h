@@ -33,3 +33,14 @@ inline constexpr Spell RAIN_CALL_SPELL = {
     "scorched ground in the area. Requires Water 15.",
     SpellShape::BURST, 3, false, 0, false, false, true
 };
+
+// slows — see Spell's own comment on that field. Docs/magic.md: "Мокрий
+// ворог повільніший" (a wet enemy is slower) — the damage is secondary, the
+// point is soaking the target down for buffTurns.
+inline constexpr Spell SLOWNESS_SPELL = {
+    "Slowness", Skill::WATER, 15, 5, 12.0f, 30, 6, "~",
+    {70, 100, 160, 255},
+    "A cold, heavy splash that soaks the target down, slowing their steps "
+    "for a while. Requires Water 15.",
+    SpellShape::POINT, 0, false, 0, false, false, false, false, false, false, false, 20, true
+};

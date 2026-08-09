@@ -73,6 +73,34 @@ private:
             std::string d = "Losing ~" + std::to_string((int)bleed) + " HP per turn from wounds";
             debuffs.push_back({"Bleeding", d, {220, 50, 50, 255}});
         }
+        // Spell buffs (Fire Shield/Skin Hardening/Lightness) — plain turn counters
+        // on Actor, ticked down in tickNeeds(); shown here so the player can see
+        // how much longer they have left instead of guessing.
+        if (p.fireShieldTicks > 0) {
+            std::string d = "Reflects melee damage back at attackers — "
+                           + std::to_string(p.fireShieldTicks) + " turns left";
+            buffs.push_back({"Fire Shield", d, {255, 130, 40, 255}});
+        }
+        if (p.skinHardenTicks > 0) {
+            std::string d = "+8 Defense — " + std::to_string(p.skinHardenTicks) + " turns left";
+            buffs.push_back({"Skin Hardening", d, {160, 140, 110, 255}});
+        }
+        if (p.lightnessTicks > 0) {
+            std::string d = "+15 effective Speed — " + std::to_string(p.lightnessTicks) + " turns left";
+            buffs.push_back({"Lightness", d, {200, 235, 245, 255}});
+        }
+        if (p.accelTicks > 0) {
+            std::string d = "+30 effective Speed — " + std::to_string(p.accelTicks) + " turns left";
+            buffs.push_back({"Acceleration", d, {255, 225, 130, 255}});
+        }
+        // Slowness (Water) — normally landed on an enemy/villager, not the
+        // player, but the counter lives on every Actor symmetrically, so a
+        // stray self-hit (clicking your own tile) shows up here too instead
+        // of silently doing nothing.
+        if (p.slowedTicks > 0) {
+            std::string d = "-15 effective Speed — " + std::to_string(p.slowedTicks) + " turns left";
+            debuffs.push_back({"Slowed", d, {90, 130, 190, 255}});
+        }
         // Item stat bonuses (jewelry etc.) — can be negative, so sort by sign.
         addStatBonus(p.strItemBonus(), "Strength", debuffs, buffs);
         addStatBonus(p.dexItemBonus(), "Dexterity", debuffs, buffs);

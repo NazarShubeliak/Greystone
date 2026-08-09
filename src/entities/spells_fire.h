@@ -35,3 +35,14 @@ inline constexpr Spell EXPLOSION_SPELL = {
     "A bolt that bursts on impact, roasting everything nearby. Requires Fire 35.",
     SpellShape::BURST, 2
 };
+
+// selfCast + buffTurns — see Spell's own comments on those fields. Reflects
+// through combat.h's resolveAttack(), so it works symmetrically no matter
+// who's attacking whom while it's up.
+inline constexpr Spell FIRE_SHIELD_SPELL = {
+    "Fire Shield", Skill::FIRE, 30, 6, 20.0f, 40, 0, "*",
+    {255, 130, 40, 255},
+    "Wreathes you in shimmering heat for a while — anyone who strikes you "
+    "in melee gets burned right back. Requires Fire 30.",
+    SpellShape::POINT, 0, false, 0, true, false, false, false, false, false, false, 20
+};

@@ -10,14 +10,29 @@ struct VillagerExaminePanel {
     bool     visible = false;
     Villager snapshot;
 
-    void show(const Villager& v) { snapshot = v; visible = true; }
-    void hide()                  { visible = false; }
+    // Resolved at show()-time from the live villagers vector (snapshot is a
+    // by-value copy, so it can't chase spouseId/motherId/etc. itself) —
+    // empty string/vector = none.
+    std::string spouseName, motherName, fatherName;
+    std::vector<std::string> childrenNames;
+
+    void show(const Villager& v, const std::string& spouse = "",
+              const std::string& mother = "", const std::string& father = "",
+              const std::vector<std::string>& children = {}) {
+        snapshot       = v;
+        spouseName     = spouse;
+        motherName     = mother;
+        fatherName     = father;
+        childrenNames  = children;
+        visible        = true;
+    }
+    void hide() { visible = false; }
 
     void render(SDL_Renderer* r, TTF_Font* f) {
         if (!visible) return;
 
         const int W   = 380;
-        const int H   = 242;
+        const int H   = 242 + extraLines() * 20;
         const int PAD = 14;
         const int LH  = 20;
         const int X   = (SCREEN_WIDTH  - W) / 2;
@@ -58,9 +73,11 @@ struct VillagerExaminePanel {
         txt(r, f, stateStr,  X + PAD + 55, ty, stateCol);
         ty += LH + 4;
 
-        // ── Bed position ──────────────────────────────────────────────────
-        std::string bedStr = "Home bed: (" + std::to_string(snapshot.bedX)
-                           + ", "          + std::to_string(snapshot.bedY) + ")";
+        // ── Bed position / age ───────────────────────────────────────────
+        std::string bedStr = (snapshot.isChild ? "Child, age " : "Age ")
+                           + std::to_string(snapshot.age)
+                           + " — home: (" + std::to_string(snapshot.bedX)
+                           + ", "         + std::to_string(snapshot.bedY) + ")";
         txt(r, f, bedStr.c_str(), X + PAD, ty, {80,80,75,255});
         ty += LH + 4;
 
@@ -68,6 +85,29 @@ struct VillagerExaminePanel {
         txt(r, f, needsStr("Hunger", snapshot.hunger).c_str(), X + PAD, ty, needsCol(snapshot.hunger));
         txt(r, f, needsStr("Thirst", snapshot.thirst).c_str(), X + PAD + 170, ty, needsCol(snapshot.thirst));
         ty += LH + 4;
+
+        // ── Family — real relationships, not just a shared surname ────────
+        if (!spouseName.empty()) {
+            txt(r, f, ("Spouse: " + spouseName).c_str(), X + PAD, ty, {200,150,180,255});
+            ty += LH;
+        }
+        if (!motherName.empty() || !fatherName.empty()) {
+            std::string parents = "Parents: ";
+            if (!fatherName.empty()) parents += fatherName;
+            if (!fatherName.empty() && !motherName.empty()) parents += ", ";
+            if (!motherName.empty()) parents += motherName;
+            txt(r, f, parents.c_str(), X + PAD, ty, {150,170,200,255});
+            ty += LH;
+        }
+        if (!childrenNames.empty()) {
+            std::string kids = "Children: ";
+            for (size_t i = 0; i < childrenNames.size(); i++) {
+                if (i > 0) kids += ", ";
+                kids += childrenNames[i];
+            }
+            txt(r, f, kids.c_str(), X + PAD, ty, {170,200,150,255});
+            ty += LH;
+        }
 
         hline(r, X, ty, W);
         ty += 10;
@@ -93,6 +133,15 @@ struct VillagerExaminePanel {
     }
 
 private:
+    // Panel height grows with however many family lines this villager has.
+    int extraLines() const {
+        int n = 0;
+        if (!spouseName.empty()) n++;
+        if (!motherName.empty() || !fatherName.empty()) n++;
+        if (!childrenNames.empty()) n++;
+        return n;
+    }
+
     static void txt(SDL_Renderer* r, TTF_Font* f,
                     const char* text, int x, int y, SDL_Color col) {
         SDL_Surface* s = TTF_RenderUTF8_Solid(f, text, col);

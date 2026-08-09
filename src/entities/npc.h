@@ -106,6 +106,33 @@ struct Villager : Actor {
     // What this villager does for a living — determines flavor text and bag contents.
     Occupation occupation = Occupation::NONE;
 
+    // Real family — not just a shared surname. Indices into the world's
+    // villagers vector; -1 = none/unknown. Stable for the village's whole
+    // lifetime: villagers are only ever marked !alive, never erased, and the
+    // whole vector is rebuilt together on sector transition
+    // (spawnVillagers() in main.cpp), so an index never dangles or gets
+    // reused mid-village. isChild marks household members generated as
+    // offspring rather than a bed's own occupant — no bed of their own
+    // (map.cpp never furnishes more than 2 beds per building), so they share
+    // a parent's bed/sleep tile, have no occupation, and just wander/sleep
+    // near home.
+    int spouseId = -1;
+    int motherId = -1;
+    int fatherId = -1;
+    std::vector<int> childIds;
+    bool isChild = false;
+
+    // Family granary — shared food reserve, physically the barrel object
+    // map.cpp already furnishes every farmstead with (repurposed from pure
+    // decoration). Only farm/herbalist households have one, and only the
+    // primary worker's Villager actually holds the Item; every household
+    // member (owner included) carries granaryOwnerId pointing at whoever
+    // does, so spouse/children reach the same real container instead of a
+    // personal copy — mirrors how spouseId/childIds work.
+    std::optional<Item> granary;
+    int granaryX = -1, granaryY = -1;
+    int granaryOwnerId = -1;
+
     // Everything they carry — trade goods AND personal food, all physically inside this
     // one real container (no floating/invisible items). Eating pulls a food item out of
     // it; trading reads/writes it directly.
