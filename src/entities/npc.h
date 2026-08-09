@@ -133,6 +133,17 @@ struct Villager : Actor {
     int granaryX = -1, granaryY = -1;
     int granaryOwnerId = -1;
 
+    // A real goal (docs/village.md "Цілі NPC → квести") — references an
+    // actual Enemy already spawned in this sector by its stable Actor::id,
+    // not scripted flavor text. -1 = no goal. "Completion" is derived
+    // lazily by looking the id up in the live enemies vector (main.cpp's
+    // findEnemyById()) rather than tracked with its own flag — if it's
+    // gone, it died (by any cause), since a sector change would have wiped
+    // this Villager too. goalAccepted gates the reward: a threat that
+    // resolves itself before the player ever asks about it earns nothing.
+    int  goalTargetEnemyId = -1;
+    bool goalAccepted      = false;
+
     // Everything they carry — trade goods AND personal food, all physically inside this
     // one real container (no floating/invisible items). Eating pulls a food item out of
     // it; trading reads/writes it directly.

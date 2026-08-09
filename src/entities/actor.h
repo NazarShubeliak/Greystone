@@ -6,6 +6,11 @@
 #include <optional>
 #include <cstdlib>
 
+// Monotonically increasing, never reused (even after death) — lets other systems
+// (villager goals/quests, main.cpp) reference a specific Actor by a stable id instead
+// of a vector index, which shifts whenever a dead Enemy/Villager is erased.
+inline int nextActorId = 1;
+
 // ================================================================ Race
 
 enum class Race {
@@ -278,6 +283,7 @@ struct Body {
 
 struct Actor {
     // --- Identity ---
+    int         id     = 0;    // stable, unique, set in the constructor — see nextActorId
     std::string name;
     Race        race   = Race::HUMAN;
     int         age    = 25;
@@ -367,6 +373,8 @@ struct Actor {
           strength(str), dexterity(dex), intelligence(intel),
           constitution(con), perception(per), charisma(cha)
     {
+        id = nextActorId++;
+
         const RaceTraits& rt = raceTraits[(int)race];
         strength     += rt.strMod;
         dexterity    += rt.dexMod;

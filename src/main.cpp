@@ -919,10 +919,19 @@ std::string greetingFor(const Villager& v) {
                    : GREETINGS_DAY        [v.greetIdx % countStrings(GREETINGS_DAY)]);
 }
 
+// Linear scan — enemies is small. Needed because vector indices shift whenever
+// enemies.erase(remove_if(!alive)) runs (tickWorld()), but a villager's
+// goalTargetEnemyId must keep pointing at the same Enemy across many ticks.
+Enemy* findEnemyById(int id) {
+    for (Enemy& e : enemies) if (e.id == id) return &e;
+    return nullptr;
+}
+
 // Response options for talking to villagers[vi] — Trade (if they sell
 // anything), Ask about their work (shows another line, rebuilds this same
-// list so the player can keep going), Farewell. Not a real branching tree —
-// one level of depth, reused every time "Ask" is picked.
+// list so the player can keep going), a goal-dependent option if this
+// villager has one (docs/village.md "Цілі NPC → квести"), Farewell. Not a
+// real branching tree — one level of depth, reused every time "Ask" is picked.
 std::vector<MenuItem> buildDialogueOptions(int vi) {
     std::vector<MenuItem> opts;
     if (vi < 0 || vi >= (int)villagers.size()) return opts;
@@ -940,6 +949,58 @@ std::vector<MenuItem> buildDialogueOptions(int vi) {
             panel.startDialogue(tv.name, occupationFlavor(tv.occupation), buildDialogueOptions(vi));
         }});
     }
+
+    // Goal state is derived fresh every call, never cached — same "pull live
+    // state" approach effects_panel.h uses for buffs. A missing target inside
+    // one continuous sector visit can only mean it died (by any cause — a
+    // sector change would have wiped this Villager along with it), matching
+    // village.md's "піде на нього сам рано чи пізно — з гравцем чи без".
+    if (v.goalTargetEnemyId >= 0) {
+        Enemy* target = findEnemyById(v.goalTargetEnemyId);
+        if (target && target->alive) {
+            if (!v.goalAccepted) {
+                opts.push_back({"Ask about their trouble", [vi]() {
+                    if (vi < 0 || vi >= (int)villagers.size()) return;
+                    Villager& tv = villagers[vi];
+                    Enemy* t = findEnemyById(tv.goalTargetEnemyId);
+                    if (!t) { panel.endDialogue(); return; } // resolved between menu open and click
+                    std::string line = "There's a " + t->name + " that's been trouble lately. "
+                                        "I'd feel a lot safer if someone dealt with it.";
+                    std::vector<MenuItem> subOpts;
+                    subOpts.push_back({"I'll deal with it", [vi]() {
+                        if (vi < 0 || vi >= (int)villagers.size()) return;
+                        villagers[vi].goalAccepted = true;
+                        panel.addMessage(villagers[vi].name + ": \"Thank you, truly.\"");
+                        panel.endDialogue();
+                    }});
+                    subOpts.push_back({"Not my problem", [vi]() {
+                        if (vi < 0 || vi >= (int)villagers.size()) return;
+                        Villager& tv2 = villagers[vi];
+                        panel.startDialogue(tv2.name, greetingFor(tv2), buildDialogueOptions(vi));
+                    }});
+                    panel.startDialogue(tv.name, line, subOpts);
+                }});
+            } else {
+                opts.push_back({"Ask about the " + target->name, [vi]() {
+                    if (vi < 0 || vi >= (int)villagers.size()) return;
+                    panel.addMessage(villagers[vi].name + ": \"Any luck? Please be careful.\"");
+                }});
+            }
+        } else if (v.goalAccepted) {
+            opts.push_back({"Return about their trouble", [vi]() {
+                if (vi < 0 || vi >= (int)villagers.size()) return;
+                Villager& tv = villagers[vi];
+                Item reward = Items::goldCoin();
+                reward.count = 15;
+                player.addToContainer(reward);
+                panel.addMessage(tv.name + ": \"It's gone? Thank you — please, take this.\"");
+                tv.goalTargetEnemyId = -1;
+                tv.goalAccepted = false;
+                panel.endDialogue();
+            }});
+        }
+    }
+
     opts.push_back({"Farewell", []() { panel.endDialogue(); }});
     return opts;
 }
@@ -1224,6 +1285,20 @@ void spawnVillagers(bool isVillage) {
                     villagers[motherIdx].childIds.push_back(childId);
                 }
             }
+        }
+    }
+
+    // One real goal per sector visit (docs/village.md "Цілі NPC → квести") — pick a
+    // random non-child villager to be worried about an actual threat already spawned
+    // in this sector. initEnemy() already ran before spawnVillagers() was called (see
+    // the sector-transition site), so `enemies` is populated by this point.
+    if (!enemies.empty()) {
+        std::vector<int> eligible;
+        for (int i = 0; i < (int)villagers.size(); i++)
+            if (!villagers[i].isChild) eligible.push_back(i);
+        if (!eligible.empty()) {
+            int chosen = eligible[rand() % eligible.size()];
+            villagers[chosen].goalTargetEnemyId = enemies[rand() % enemies.size()].id;
         }
     }
 }
