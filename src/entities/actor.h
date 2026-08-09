@@ -495,23 +495,12 @@ struct Actor {
     bool isNeutral()   const { return disposition >= -20 && disposition <= 20; }
     bool isFriendly()  const { return disposition > 20; }
     bool isAlly()      const { return disposition > 50; }
-};
 
-// ================================================================ Player
-
-struct Player : Actor {
-    int medicineSkill = 0;
-
-    // Equipment slots — optional so empty slots cost nothing.
-    std::optional<Item> worn[(int)EquipSlot::SLOT_COUNT];
-
-    // Which container's contents are shown in the inventory UI (default: BACK).
-    int activeContainerSlot = (int)EquipSlot::BACK;
-
-    // ---- Effective stats (base + item bonuses) ----
-
-    // hunger/thirst: 0=full/hydrated, 1=starving/dying
-    // Returns 0-3 severity level for each need.
+    // ---- Hunger/thirst severity + penalties ----
+    // Only touch hunger/thirst (both live on Actor), so this works for every
+    // Enemy/Villager too, not just Player — needed by effectiveSpeed() above
+    // and combat.h's ageStrMult() sibling. hunger/thirst: 0=full/hydrated,
+    // 1=starving/dying. Returns 0-3 severity level for each need.
     int hungerLevel() const {
         if (hunger >= 1.0f) return 4; // dead
         if (hunger >= 0.75f) return 3;
@@ -558,6 +547,23 @@ struct Player : Actor {
         return p[std::min(thirstLevel(), 3)];
     }
     int needsStrPenalty() const { return hungerStrPenalty() + thirstStrPenalty(); }
+};
+
+// ================================================================ Player
+
+struct Player : Actor {
+    int medicineSkill = 0;
+
+    // Equipment slots — optional so empty slots cost nothing.
+    std::optional<Item> worn[(int)EquipSlot::SLOT_COUNT];
+
+    // Which container's contents are shown in the inventory UI (default: BACK).
+    int activeContainerSlot = (int)EquipSlot::BACK;
+
+    // ---- Effective stats (base + item bonuses) ----
+    // hunger/thirst severity/penalty helpers moved up to Actor (they only
+    // touch hunger/thirst, which live there too) — see the block right
+    // before Actor's closing brace above.
 
     int effectiveStr() const {
         int b = 0;
