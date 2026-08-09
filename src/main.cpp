@@ -392,10 +392,54 @@ void dropEnemyLoot(const Enemy& enemy) {
     corpses.push_back(makeCorpse(enemy, worldTime.minutes, playerSectorX, playerSectorY));
 }
 
+// Inheritance for the one piece of village state a death could otherwise
+// orphan (docs/village.md "Спадщина": майно переходить дітям/родині; без
+// спадкоємців — забирається). Only the granary owner ever has v.granary
+// engaged (see npc.h's comment on granaryOwnerId) — everyone else in the
+// household just points at the owner's index, so if the owner dies without
+// this, the whole family loses access to it forever. Heir order: spouse,
+// else the first still-living child; no heir left -> stock spills onto the
+// ground where they died instead of vanishing with them.
+void transferGranary(Villager& deceased) {
+    if (!deceased.granary) return;
+
+    int heirIdx = -1;
+    if (deceased.spouseId >= 0 && deceased.spouseId < (int)villagers.size()
+        && villagers[deceased.spouseId].alive) {
+        heirIdx = deceased.spouseId;
+    } else {
+        for (int cid : deceased.childIds) {
+            if (cid >= 0 && cid < (int)villagers.size() && villagers[cid].alive) {
+                heirIdx = cid;
+                break;
+            }
+        }
+    }
+
+    if (heirIdx >= 0) {
+        Villager& heir = villagers[heirIdx];
+        heir.granary  = std::move(deceased.granary);
+        heir.granaryX = deceased.granaryX;
+        heir.granaryY = deceased.granaryY;
+        deceased.granary.reset();
+
+        int deceasedIdx = (int)(&deceased - &villagers[0]);
+        for (Villager& hh : villagers)
+            if (hh.granaryOwnerId == deceasedIdx) hh.granaryOwnerId = heirIdx;
+
+        panel.addMessage(heir.name + " inherits the family's granary.");
+    } else {
+        for (const Item& item : deceased.granary->contents)
+            groundItems.push_back({deceased.x, deceased.y, item, playerSectorX, playerSectorY});
+        deceased.granary.reset();
+    }
+}
+
 // Same as dropEnemyLoot(), for a villager killed by the player (or anything
 // else) — also drops what they were wearing, not just what they carried, so
 // nothing survives them as an invisible "worn" item.
 void dropVillagerLoot(Villager& v) {
+    transferGranary(v);
     dropBag(v, v.bag);
     if (v.outfit) {
         groundItems.push_back({v.x, v.y, *v.outfit, playerSectorX, playerSectorY});
