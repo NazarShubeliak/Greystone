@@ -2752,6 +2752,12 @@ void handleInput(SDL_Event& event, bool& running) {
     // Console intercepts all input while open (except the backtick above).
     if (console.handleEvent(event, overmap, worldTime)) return;
 
+    // Dead player: nothing below this point should still run (movement,
+    // combat, dialogue, targeting modes, etc.) — renderDeathScreen() already
+    // draws the death overlay, but nothing was actually blocking further
+    // input, so the game kept playing right through it.
+    if (!player.isAlive()) return;
+
     // Hotbar targeting intercepts input while active — the highlighted-range
     // picker started by useHotbarSlot() for a technique or spell. Left-click on
     // a painted tile resolves it; right-click or Esc cancels without spending
