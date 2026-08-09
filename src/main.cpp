@@ -927,6 +927,18 @@ Enemy* findEnemyById(int id) {
     return nullptr;
 }
 
+// Rough compass hint from the player to (tx,ty) — a quick, temporary stand-in
+// for a real quest waypoint/marker (which doesn't exist yet), so "go kill the
+// goblin the game mentioned" isn't a blind search of the whole sector.
+std::string compassHint(int tx, int ty) {
+    int dx = tx - player.x, dy = ty - player.y;
+    int dist = std::max(std::abs(dx), std::abs(dy));
+    std::string ns = dy < -3 ? "north" : dy > 3 ? "south" : "";
+    std::string ew = dx < -3 ? "west"  : dx > 3 ? "east"  : "";
+    std::string dir = ns + ew;
+    return std::to_string(dist) + " tiles " + (dir.empty() ? "away, right around here" : "to the " + dir);
+}
+
 // Response options for talking to villagers[vi] — Trade (if they sell
 // anything), Ask about their work (shows another line, rebuilds this same
 // list so the player can keep going), a goal-dependent option if this
@@ -964,7 +976,8 @@ std::vector<MenuItem> buildDialogueOptions(int vi) {
                     Villager& tv = villagers[vi];
                     Enemy* t = findEnemyById(tv.goalTargetEnemyId);
                     if (!t) { panel.endDialogue(); return; } // resolved between menu open and click
-                    std::string line = "There's a " + t->name + " that's been trouble lately. "
+                    std::string line = "There's a " + t->name + " that's been trouble lately — "
+                                        "last I saw, it was about " + compassHint(t->x, t->y) + ". "
                                         "I'd feel a lot safer if someone dealt with it.";
                     std::vector<MenuItem> subOpts;
                     subOpts.push_back({"I'll deal with it", [vi]() {
@@ -983,7 +996,9 @@ std::vector<MenuItem> buildDialogueOptions(int vi) {
             } else {
                 opts.push_back({"Ask about the " + target->name, [vi]() {
                     if (vi < 0 || vi >= (int)villagers.size()) return;
-                    panel.addMessage(villagers[vi].name + ": \"Any luck? Please be careful.\"");
+                    Enemy* t = findEnemyById(villagers[vi].goalTargetEnemyId);
+                    std::string hint = t ? (" Last I heard, it was about " + compassHint(t->x, t->y) + ".") : "";
+                    panel.addMessage(villagers[vi].name + ": \"Any luck? Please be careful." + hint + "\"");
                 }});
             }
         } else if (v.goalAccepted) {
