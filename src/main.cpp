@@ -640,6 +640,7 @@ void tickVillagerNeeds();  // forward declaration — defined after updateVillag
 void tickEnemyNeeds();     // forward declaration — defined below, called once per player action
 void tickFireHazards();    // forward declaration — defined near Wall of Fire casting, called once per player action
 void interruptCrafting(bool playerHit); // forward declaration — defined in villager section
+void simulateVillageYear(std::vector<Villager>& vs); // forward declaration — defined next to spawnVillagers()
 
 // One world tick: give everyone energy, then let enemies spend theirs.
 // NOTE: this can run several times per single player action (see onPlayerAct()), with the
@@ -701,20 +702,11 @@ void tickEnemyNeeds() {
     }
 }
 
-// Ages every actor once per elapsed in-game year and kills anyone who reaches
-// their rolled naturalDeathAge (docs/village.md "Смерть від старості").
-// A year is 518400 actions (WorldTime::MINUTES_PER_YEAR) — this will almost
-// never fire in real play, by design (no artificial age acceleration); it
-// still runs correctly during long time-skips since it's checked every
-// simulated minute, same as tickEnemyNeeds()/tickVillagerNeeds() above.
-// Called once per player action from onPlayerAct(), not tickWorld() — same
-// "must track real elapsed time, not speed-dependent ticks" reasoning.
-void tickAging() {
-    static long long lastYear = worldTime.minutes / WorldTime::MINUTES_PER_YEAR;
-    long long curYear = worldTime.minutes / WorldTime::MINUTES_PER_YEAR;
-    if (curYear == lastYear) return;
-    lastYear = curYear;
-
+// Ages every actor by one year and kills anyone who reaches their rolled
+// naturalDeathAge (docs/village.md "Смерть від старості"). Body of the old
+// tickAging(), unchanged — just extracted so tickYearlyEvents() below can
+// call it once per elapsed year instead of just once per detected boundary.
+void tickAgingOneYear() {
     player.age++;
     if (player.naturalDeathAge > 0 && player.age >= player.naturalDeathAge && player.isAlive()) {
         player.body.torso.hp = 0;
@@ -746,6 +738,27 @@ void tickAging() {
                 dropEnemyLoot(e);
             }
         }
+    }
+}
+
+// Runs tickAgingOneYear() + simulateVillageYear() once for every in-game year
+// crossed since the last call — not just once per call — so a jump of several
+// years in one go (skipyears cheat, or a future instant travel/time-skip
+// feature) doesn't silently drop years the way a plain boundary check would.
+// A year is 518400 actions (WorldTime::MINUTES_PER_YEAR) — this will almost
+// never fire from ordinary movement, by design (no artificial age
+// acceleration); it fires correctly during long time-skips since it's called
+// every simulated minute, same as tickEnemyNeeds()/tickVillagerNeeds().
+// Called once per player action from onPlayerAct() and once per simulated
+// minute from the Wait/Rest loop, not from tickWorld() — same "must track
+// real elapsed time, not speed-dependent ticks" reasoning tickAging() always used.
+void tickYearlyEvents() {
+    static long long lastYear = worldTime.minutes / WorldTime::MINUTES_PER_YEAR;
+    long long curYear = worldTime.minutes / WorldTime::MINUTES_PER_YEAR;
+    while (lastYear < curYear) {
+        lastYear++;
+        tickAgingOneYear();
+        simulateVillageYear(villagers);
     }
 }
 
@@ -792,7 +805,7 @@ void onPlayerAct(int extraEnergy = 0) {
     tickVillagerNeeds();
     tickEnemyNeeds();
     tickFireHazards();
-    tickAging();
+    tickYearlyEvents();
     if (player.hunger >= 1.0f) {
         player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
         player.sync();
@@ -1020,6 +1033,193 @@ std::vector<MenuItem> buildDialogueOptions(int vi) {
     return opts;
 }
 
+// Adds an occupation's goods into a villager's bag (real container, no floating
+// items). Shared by spawnVillagers() (initial household assignment) and
+// simulateVillageYear()'s occupation-succession pass.
+void giveOccupation(Villager& v, Occupation occ) {
+    v.occupation = occ;
+    if (!v.bag) return;
+    for (Item& g : goodsFor(occ)) addToContainer(*v.bag, std::move(g));
+}
+
+// Creates one child of motherIdx/fatherIdx and appends it to vs. ageOverride=0
+// means a brand-new birth (simulateVillageYear()'s yearly roll); spawnVillagers()
+// passes a random worldgen-style age instead, since the village it builds is
+// meant to already have some lived-in history. motherId/fatherId are just
+// consistent slot names — the game has no gender mechanic.
+// Simplification vs. the original inline version this was extracted from:
+// doesn't dedupe first names against siblings (that bookkeeping only existed
+// in spawnVillagers()'s local scope) — a repeated first name in a big family
+// is a cosmetic risk, not worth threading extra state through both callers for.
+int spawnChild(std::vector<Villager>& vs, int motherIdx, int fatherIdx, int ageOverride = 0) {
+    Villager& mother = vs[motherIdx];
+    Villager& father = vs[fatherIdx];
+
+    Villager child;
+    child.isChild = true;
+    child.age     = ageOverride;
+    child.bedX    = father.bedX;
+    child.bedY    = father.bedY;
+
+    // Distinct nearby walkable tile so kids don't all path onto the exact same
+    // spot as a parent or an existing sibling — search a small ring around the
+    // household's bed for a free floor tile.
+    child.sleepX = father.sleepX;
+    child.sleepY = father.sleepY;
+    std::vector<SDL_Point> takenHomeTiles = {
+        {father.sleepX, father.sleepY}, {mother.sleepX, mother.sleepY}
+    };
+    for (int cid : father.childIds)
+        if (cid >= 0 && cid < (int)vs.size())
+            takenHomeTiles.push_back({vs[cid].sleepX, vs[cid].sleepY});
+    bool foundTile = false;
+    for (int dy = -2; dy <= 2 && !foundTile; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            int tx = child.bedX + dx, ty = child.bedY + dy;
+            if (tx < 1 || tx >= MAP_WIDTH-1 || ty < 1 || ty >= MAP_HEIGHT-1) continue;
+            if (!map[ty][tx].walkable()) continue;
+            bool taken = false;
+            for (const SDL_Point& p : takenHomeTiles)
+                if (p.x == tx && p.y == ty) { taken = true; break; }
+            if (taken) continue;
+            child.sleepX = tx; child.sleepY = ty;
+            foundTile = true;
+            break;
+        }
+    }
+    child.x = child.sleepX; child.y = child.sleepY;
+
+    int nFirstNames = countStrings(NPC_FIRST_NAMES);
+    int fnIdx = rand() % nFirstNames;
+    std::string surname = father.name.substr(father.name.find(' ') + 1);
+    child.name     = std::string(NPC_FIRST_NAMES[fnIdx]) + " " + surname;
+    child.color    = VILLAGER_COLORS[(int)vs.size() % VILLAGER_COLOR_COUNT];
+    child.greetIdx = (int)vs.size() % countStrings(GREETINGS_DAY);
+    child.state    = Villager::State::WANDER;
+
+    child.bag = Items::backpack();
+    {
+        Item loaves = Items::bread();
+        loaves.count = 3;
+        addToContainer(*child.bag, std::move(loaves));
+    }
+    child.outfit = Items::commonClothes();
+
+    child.motherId       = motherIdx;
+    child.fatherId       = fatherIdx;
+    child.granaryOwnerId = father.granaryOwnerId;
+
+    int childId = (int)vs.size();
+    vs.push_back(child);
+    vs[fatherIdx].childIds.push_back(childId);
+    vs[motherIdx].childIds.push_back(childId);
+    return childId;
+}
+
+// docs/village.md "Демографія" / docs/world.md "Шар 3" — one year of life for
+// the currently-loaded village: children come of age, a dead worker's job
+// passes to an heir, eligible adults marry, and married couples might have a
+// child. Runs once per elapsed in-game year via tickYearlyEvents(). Operates
+// only on `vs` — the live `villagers` vector for whichever village the player
+// is currently standing in. Distant, unvisited villages don't tick yet (no
+// persistent per-sector village store exists — see CLAUDE.md roadmap).
+static constexpr int MARRIAGE_CHANCE_PERCENT = 20;
+static constexpr int BIRTH_CHANCE_PERCENT    = 15;
+
+void simulateVillageYear(std::vector<Villager>& vs) {
+    if (vs.empty()) return;
+
+    // ---- Growing up: child -> adult at the race's age of adulthood ----------
+    for (Villager& v : vs) {
+        if (!v.alive || !v.isChild) continue;
+        if (v.age >= raceTraits[(int)v.race].minAge) {
+            v.isChild = false;
+            panel.addMessage(v.name + " has grown into an adult.");
+        }
+    }
+
+    // ---- Occupation succession: a dead worker's job passes to an heir -------
+    // Same heir order as transferGranary() — spouse first, else the first
+    // alive child — but only once that heir is old enough. If nobody
+    // qualifies yet, the job stays vacant and this retries next year.
+    for (int i = 0; i < (int)vs.size(); i++) {
+        Villager& deceased = vs[i];
+        if (deceased.alive || deceased.occupation == Occupation::NONE) continue;
+
+        int heirIdx = -1;
+        if (deceased.spouseId >= 0 && deceased.spouseId < (int)vs.size()
+            && vs[deceased.spouseId].alive && !vs[deceased.spouseId].isChild) {
+            heirIdx = deceased.spouseId;
+        } else {
+            for (int cid : deceased.childIds) {
+                if (cid >= 0 && cid < (int)vs.size() && vs[cid].alive && !vs[cid].isChild) {
+                    heirIdx = cid;
+                    break;
+                }
+            }
+        }
+
+        if (heirIdx >= 0 && vs[heirIdx].occupation == Occupation::NONE) {
+            Occupation occ = deceased.occupation;
+            giveOccupation(vs[heirIdx], occ);
+            deceased.occupation = Occupation::NONE;
+            panel.addMessage(vs[heirIdx].name + " takes up the family trade as " + occupationName(occ) + ".");
+        }
+    }
+
+    // ---- Marriage: pair up eligible unmarried/widowed adults -----------------
+    std::vector<int> eligible;
+    for (int i = 0; i < (int)vs.size(); i++) {
+        Villager& v = vs[i];
+        if (!v.alive || v.isChild) continue;
+        if (v.age < raceTraits[(int)v.race].minAge) continue;
+        bool free = v.spouseId < 0 || v.spouseId >= (int)vs.size() || !vs[v.spouseId].alive;
+        if (free) eligible.push_back(i);
+    }
+    std::vector<bool> matchedThisYear(vs.size(), false);
+    for (int i : eligible) {
+        if (matchedThisYear[i]) continue;
+        if ((rand() % 100) >= MARRIAGE_CHANCE_PERCENT) continue;
+
+        std::vector<int> candidates;
+        for (int j : eligible) {
+            if (j == i || matchedThisYear[j]) continue;
+            const Villager& a = vs[i];
+            const Villager& b = vs[j];
+            bool related = (a.motherId >= 0 && (a.motherId == b.motherId || a.motherId == j))
+                         || (a.fatherId >= 0 && (a.fatherId == b.fatherId || a.fatherId == j))
+                         || (b.motherId == i) || (b.fatherId == i);
+            if (related) continue;
+            candidates.push_back(j);
+        }
+        if (candidates.empty()) continue;
+
+        int j = candidates[rand() % candidates.size()];
+        vs[i].spouseId = j;
+        vs[j].spouseId = i;
+        matchedThisYear[i] = matchedThisYear[j] = true;
+        panel.addMessage(vs[i].name + " and " + vs[j].name + " are married.");
+    }
+
+    // ---- Births: married couples at full adulthood might have a child --------
+    for (int i = 0; i < (int)vs.size(); i++) {
+        Villager& a = vs[i];
+        if (!a.alive || a.isChild || a.spouseId < 0) continue;
+        int j = a.spouseId;
+        if (j <= i || j >= (int)vs.size()) continue; // handle each pair once
+        Villager& b = vs[j];
+        if (!b.alive) continue;
+
+        if (lifeStageFor(a.age, a.race) != LifeStage::ADULT) continue;
+        if (lifeStageFor(b.age, b.race) != LifeStage::ADULT) continue;
+
+        if ((rand() % 100) < BIRTH_CHANCE_PERCENT) {
+            int childId = spawnChild(vs, i, j);
+            panel.addMessage(vs[childId].name + " was born to " + vs[i].name + " and " + vs[j].name + ".");
+        }
+    }
+}
+
 void spawnVillagers(bool isVillage) {
     villagers.clear();
     villageWellX = villageWellY = -1;
@@ -1139,13 +1339,6 @@ void spawnVillagers(bool isVillage) {
     for (int i = 0; i < (int)villagers.size(); i++)
         households[surnameIdx[i]].push_back(i);
 
-    // Adds an occupation's goods into a villager's bag (real container, no floating items).
-    auto giveOccupation = [](Villager& v, Occupation occ) {
-        v.occupation = occ;
-        if (!v.bag) return;
-        for (Item& g : goodsFor(occ)) addToContainer(*v.bag, std::move(g));
-    };
-
     // Nearest O_BARREL to a bed — every farmstead room already has exactly
     // one (map.cpp's placeFarmstead()), so this reliably finds that
     // household's own barrel rather than the Smithy's/Woodcutter's (those
@@ -1235,70 +1428,8 @@ void spawnVillagers(bool isVillage) {
 
             if (maxChildAge >= 1 && (rand() % 100) < 60) {
                 int nKids = 1 + rand() % 3;
-                std::vector<SDL_Point> takenHomeTiles = {
-                    {villagers[fatherIdx].sleepX, villagers[fatherIdx].sleepY},
-                    {villagers[motherIdx].sleepX, villagers[motherIdx].sleepY}
-                };
-
-                for (int k = 0; k < nKids; k++) {
-                    Villager child;
-                    child.isChild = true;
-                    child.age = Names::generateAge(Race::HUMAN, 1, std::min(17, maxChildAge));
-                    child.bedX = villagers[fatherIdx].bedX;
-                    child.bedY = villagers[fatherIdx].bedY;
-
-                    // Distinct nearby walkable tile so kids don't all path onto
-                    // the exact same spot as a parent — search a small ring
-                    // around the household's bed for a free floor tile.
-                    child.sleepX = villagers[fatherIdx].sleepX;
-                    child.sleepY = villagers[fatherIdx].sleepY;
-                    bool foundTile = false;
-                    for (int dy = -2; dy <= 2 && !foundTile; dy++) {
-                        for (int dx = -2; dx <= 2; dx++) {
-                            int tx = child.bedX + dx, ty = child.bedY + dy;
-                            if (tx < 1 || tx >= MAP_WIDTH-1 || ty < 1 || ty >= MAP_HEIGHT-1) continue;
-                            if (!map[ty][tx].walkable()) continue;
-                            bool taken = false;
-                            for (const SDL_Point& p : takenHomeTiles)
-                                if (p.x == tx && p.y == ty) { taken = true; break; }
-                            if (taken) continue;
-                            child.sleepX = tx; child.sleepY = ty;
-                            foundTile = true;
-                            break;
-                        }
-                    }
-                    takenHomeTiles.push_back({child.sleepX, child.sleepY});
-                    child.x = child.sleepX; child.y = child.sleepY;
-
-                    int fnIdx;
-                    do { fnIdx = rand() % nFirstNames; }
-                    while (std::count(usedFirst[kv.first].begin(), usedFirst[kv.first].end(), fnIdx) > 0
-                           && (int)usedFirst[kv.first].size() < nFirstNames);
-                    usedFirst[kv.first].push_back(fnIdx);
-
-                    int snIdx = kv.first % nSurnames;
-                    child.name     = std::string(NPC_FIRST_NAMES[fnIdx]) + " " + NPC_SURNAMES[snIdx];
-                    child.color    = VILLAGER_COLORS[(fatherIdx + k + 1) % VILLAGER_COLOR_COUNT];
-                    child.greetIdx = (fatherIdx + k) % countStrings(GREETINGS_DAY);
-                    child.state    = Villager::State::WANDER;
-
-                    child.bag = Items::backpack();
-                    {
-                        Item loaves = Items::bread();
-                        loaves.count = 3;
-                        addToContainer(*child.bag, std::move(loaves));
-                    }
-                    child.outfit = Items::commonClothes();
-
-                    child.motherId = motherIdx;
-                    child.fatherId = fatherIdx;
-                    child.granaryOwnerId = villagers[fatherIdx].granaryOwnerId;
-
-                    int childId = (int)villagers.size();
-                    villagers.push_back(child);
-                    villagers[fatherIdx].childIds.push_back(childId);
-                    villagers[motherIdx].childIds.push_back(childId);
-                }
+                for (int k = 0; k < nKids; k++)
+                    spawnChild(villagers, motherIdx, fatherIdx, Names::generateAge(Race::HUMAN, 1, std::min(17, maxChildAge)));
             }
         }
     }
@@ -4249,6 +4380,12 @@ int main(int argc, char* argv[]) {
             console.pendingSetAge = -1;
         }
 
+        if (console.pendingSkipYears > 0) {
+            worldTime.minutes += console.pendingSkipYears * WorldTime::MINUTES_PER_YEAR;
+            console.pendingSkipYears = 0;
+            tickYearlyEvents(); // apply immediately, don't wait for the player's next action
+        }
+
         if (!console.pendingUnlockTech.empty()) {
             for (int i = 0; CheatConsole::TECH_TOKENS[i]; i++) {
                 if (console.pendingUnlockTech == CheatConsole::TECH_TOKENS[i]) {
@@ -4304,6 +4441,7 @@ int main(int argc, char* argv[]) {
                 // Needs advance every game-minute, same rate as normal play.
                 player.tickNeeds();
                 tickVillagerNeeds();
+                tickYearlyEvents();
 
                 // Starvation/dehydration damage + message throttled to once per game hour.
                 if (worldTime.hour() != lastNeedsHour) {

@@ -288,8 +288,8 @@ struct Actor {
     Race        race   = Race::HUMAN;
     int         age    = 25;
     // Rolled once at construction (docs/village.md: "±10% рандому" around the
-    // race's maxAge) — the age tickAging() (main.cpp) kills this Actor of old
-    // age at, once `age` reaches it. 0 = never (ageless races).
+    // race's maxAge) — the age tickAgingOneYear() (main.cpp) kills this Actor
+    // of old age at, once `age` reaches it. 0 = never (ageless races).
     int         naturalDeathAge = 0;
     float       weight = 70.0f;    // kg
     float       height = 175.0f;   // cm

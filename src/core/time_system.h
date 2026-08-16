@@ -11,7 +11,8 @@ struct WorldTime {
 
     // A year is 12 30-day months — astronomically long in action-count on
     // purpose (docs/village.md forbids artificial age acceleration). Used by
-    // main.cpp's tickAging() to advance Actor::age once per elapsed year.
+    // main.cpp's tickYearlyEvents() to advance Actor::age and run
+    // simulateVillageYear() once per elapsed year.
     static constexpr int MINUTES_PER_YEAR = 60 * 24 * 30 * 12; // 518400
 
     void advance() { minutes += MINS_PER_ACTION; }
