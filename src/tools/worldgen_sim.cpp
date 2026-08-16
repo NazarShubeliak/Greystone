@@ -111,16 +111,12 @@ static bool areRelated(const Villager& a, int aIdx, const Villager& b, int bIdx)
         || shared(a.fatherId, b.motherId) || shared(a.fatherId, b.fatherId);
 }
 
-// docs/village.md's "залізне правило: не буває людини без джерела їжі" —
-// abstract stand-in for the live game's real per-minute hunger/bag/granary
-// system (main.cpp's tickVillagerNeeds()), which has nothing to operate on
-// here (no map, no Item, no granary). A villager is fed if they work
-// themselves (any occupation — the economic cycle from village.md covers the
-// rest: "фермер годує коваля..."), or a living spouse/parent/child works and
-// presumably shares. Doesn't reach further than immediate family (no
-// sibling/grandparent support) — a scoped simplification, not the full
-// household model.
-static bool isFed(const std::vector<Villager>& vs, int i) {
+// A villager has a *reliable* food source if they work one of the village's
+// five named trades themselves, or a living spouse/parent/child does (the
+// rest of village.md's economic cycle is assumed to flow from there —
+// "фермер годує коваля..."). Doesn't reach further than immediate family
+// (no sibling/grandparent support) — a scoped simplification.
+static bool hasReliableTrade(const std::vector<Villager>& vs, int i) {
     const Villager& v = vs[i];
     if (v.occupation != Occupation::NONE) return true;
     auto worksAndAlive = [&](int idx) {
@@ -132,10 +128,12 @@ static bool isFed(const std::vector<Villager>& vs, int i) {
     return false;
 }
 
-static constexpr int MARRIAGE_CHANCE_PERCENT    = 20;
-static constexpr int BIRTH_CHANCE_PERCENT       = 15;
-static constexpr int APPRENTICE_CHANCE_PERCENT  = 25;
-static constexpr int STARVATION_DEATH_PERCENT   = 30;
+static constexpr int MARRIAGE_CHANCE_PERCENT       = 20;
+static constexpr int BIRTH_CHANCE_PERCENT          = 15;
+static constexpr int APPRENTICE_CHANCE_PERCENT     = 25;
+static constexpr int GARDEN_FAILURE_CHANCE_PERCENT = 5;  // per year, per household with no reliable trade
+static constexpr int FAMINE_DEATH_PERCENT_DEPENDENT = 40; // child or Old, during a failed-harvest year
+static constexpr int FAMINE_DEATH_PERCENT_ADULT     = 10; // working-age, same year — lower, but real
 
 // One year of village life — same four passes and tuning constants as main.cpp's
 // simulateVillageYear() (plus the old-age death main.cpp keeps in a separate
@@ -209,27 +207,55 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
         }
     }
 
-    // ---- Starvation: docs/village.md's iron rule, but restricted to actual
-    // dependents (children, and the Old — 65+, "не працює, живе з запасів
-    // сім'ї" per its own life-stage table). Confirmed by running a 100-year
-    // test that applying this to every unfed adult is wrong: only 5 named
-    // occupations exist in the whole village regardless of population, so
-    // most working-age adults in a growing village are never a direct
-    // parent/spouse/child of one of those 5 people — the doc's own
-    // "жебрає/краде/помирає" implies a jobless adult still typically
-    // survives (begging, day labor, foraging), not automatic death. Checked
-    // after occupation succession so a same-year heir or apprentice can
-    // still save a dependent in time.
+    // ---- Famine: docs/village.md's iron rule, Dwarf Fortress-style — no
+    // food means no food, for anyone, not just the young/old. A household
+    // without a reliable trade (see hasReliableTrade()) still has its own
+    // small garden/plot near the house ("це ж село по-іншому не може
+    // бути") — that normally covers them, but can fail in a given year
+    // (bad harvest). Checked after occupation succession so a same-year heir
+    // or apprentice still counts as a reliable trade in time.
+    //
+    // Resolved once per married couple (they share the same household/
+    // garden, not two independent rolls), then children inherit whichever
+    // parent's household they belong to. An earlier version applied this to
+    // every unfed adult individually and wiped out ~80% of a 100-year test
+    // village, because only 5 named trades exist regardless of population —
+    // rolling per household instead of per unemployed relative-chain is what
+    // keeps this from re-exploding the same way.
+    std::vector<bool> famined(vs.size(), false);
+    std::vector<bool> gardenRolled(vs.size(), false);
+    for (int i = 0; i < (int)vs.size(); i++) {
+        Villager& v = vs[i];
+        if (!v.alive || v.isChild || gardenRolled[i]) continue;
+        gardenRolled[i] = true;
+        if (hasReliableTrade(vs, i)) continue;
+
+        bool failedHarvest = (rand() % 100) < GARDEN_FAILURE_CHANCE_PERCENT;
+        famined[i] = failedHarvest;
+        if (v.spouseId >= 0 && v.spouseId < (int)vs.size() && vs[v.spouseId].alive) {
+            famined[v.spouseId]      = failedHarvest;
+            gardenRolled[v.spouseId] = true;
+        }
+    }
+
     for (int i = 0; i < (int)vs.size(); i++) {
         Villager& v = vs[i];
         if (!v.alive) continue;
+
+        bool inFamine = famined[i];
+        if (v.isChild) {
+            inFamine = (v.motherId >= 0 && v.motherId < (int)vs.size() && famined[v.motherId])
+                    || (v.fatherId >= 0 && v.fatherId < (int)vs.size() && famined[v.fatherId]);
+        }
+        if (!inFamine) continue;
+
         bool dependent = v.isChild || lifeStageFor(v.age, v.race) == LifeStage::OLD;
-        if (!dependent || isFed(vs, i)) continue;
-        if ((rand() % 100) < STARVATION_DEATH_PERCENT) {
+        int deathChance = dependent ? FAMINE_DEATH_PERCENT_DEPENDENT : FAMINE_DEATH_PERCENT_ADULT;
+        if ((rand() % 100) < deathChance) {
             v.body.torso.hp = 0;
             v.sync();
             if (!v.alive)
-                log.push_back({year, v.name + " has died of starvation, with no one left to provide for them."});
+                log.push_back({year, v.name + " has died of starvation after a failed harvest."});
         }
     }
 
@@ -273,10 +299,11 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
 
         if (lifeStageFor(a.age, a.race) != LifeStage::ADULT) continue;
         if (lifeStageFor(b.age, b.race) != LifeStage::ADULT) continue;
-        // No isFed() gate here (removed) — working-age adults aren't treated
-        // as starvation risks at all (see the pass above), so gating births
-        // on the same narrow five-named-occupations check would have
-        // suppressed most of a growing population's births for no reason.
+        // No famine gate here — a bad-harvest year (see the pass above) is a
+        // one-year event, not a standing disqualifier, and most couples
+        // without one of the five named trades still have a working garden
+        // most years; gating births on it would suppress most of a growing
+        // population's children for no real reason.
 
         if ((rand() % 100) < BIRTH_CHANCE_PERCENT) {
             int childId = spawnChild(vs, i, j);
