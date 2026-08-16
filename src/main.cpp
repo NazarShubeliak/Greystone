@@ -1340,7 +1340,7 @@ void spawnVillagers(bool isVillage) {
     // graceful-degradation precedent placeRoleBuilding() already sets when it
     // can't find room for a building.
     auto placeGraveNear = [&](int bx, int by, const std::string& name, int ageAtDeath, int diedYearsAgo) {
-        for (int r = 2; r <= 6; r++) {
+        for (int r = 2; r <= 8; r++) {
             for (int dy = -r; dy <= r; dy++) {
                 for (int dx = -r; dx <= r; dx++) {
                     if (std::max(std::abs(dx), std::abs(dy)) != r) continue; // ring, closest first
@@ -1357,6 +1357,25 @@ void spawnVillagers(bool isVillage) {
         }
     };
 
+    // One shared graveyard, not scattered graves behind every house — per
+    // user request. Pick a single open spot away from the building cluster
+    // (random offset 15-28 tiles from the well in each axis, still inside
+    // placeVillage()'s 50-tile cleared radius) and let every household's
+    // dead go there; placeGraveNear()'s own ring search naturally clusters
+    // repeat calls to the same anchor together (each already-placed grave
+    // counts as taken, pushing the next one to the next free ring), so
+    // reusing one anchor for every call is all a graveyard needs.
+    int cemeteryX = villageWellX, cemeteryY = villageWellY;
+    for (int tries = 0; tries < 40; tries++) {
+        int ox = (rand() % 2 ? 1 : -1) * (15 + rand() % 14);
+        int oy = (rand() % 2 ? 1 : -1) * (15 + rand() % 14);
+        int cx = villageWellX + ox, cy = villageWellY + oy;
+        if (cx < 5 || cx >= MAP_WIDTH-5 || cy < 5 || cy >= MAP_HEIGHT-5) continue;
+        if (!map[cy][cx].walkable() || map[cy][cx].objectId >= 0) continue;
+        cemeteryX = cx; cemeteryY = cy;
+        break;
+    }
+
     // A household's residents today are the survivors of a short simulated
     // past, not a fresh roll — docs/world.md: "Історія при worldgen — це не
     // текстовий флейвор, а результат тієї самої симуляції." Reuses the
@@ -1364,7 +1383,19 @@ void spawnVillagers(bool isVillage) {
     // runs, isolated per household (no marriage across households during
     // this window — today's bed-assignment shape below can't absorb that
     // kind of reshuffling).
-    constexpr int HISTORY_YEARS = 30;
+    //
+    // 60, not 30: founders are seeded as young adults (18-26) and a human's
+    // rolled naturalDeathAge is never below ~72 (raceTraits.maxAge * 0.90).
+    // At 30 years, the oldest a founder could possibly reach is ~56 — old-age
+    // death was mathematically impossible, and since a household's own
+    // occupation-holder shields their whole immediate family from famine
+    // risk (hasReliableTrade() checks spouse/parent), nobody could die at
+    // all — confirmed no graves ever appeared. 60 years puts a founder's
+    // reachable age (78-86) inside the real death-age range, giving a
+    // genuine chance (roughly 60% for a mid-range roll) of natural
+    // succession happening before "now", which is also what actually
+    // produces famine-vulnerable gap years for the family left behind.
+    constexpr int HISTORY_YEARS = 60;
 
     for (auto& kv : bedHouseholds) {
         int primaryBed    = kv.second[0];
@@ -1441,9 +1472,11 @@ void spawnVillagers(bool isVillage) {
 
         // Places graves for the whole simulated household regardless of
         // whether anyone survived — even a fully extinct line left a mark.
+        // All households share the one graveyard (cemeteryX/Y), not a plot
+        // behind each individual house.
         for (int k = 0; k < (int)hist.size(); k++)
             if (diedAtYear[k] >= 0)
-                placeGraveNear(beds[primaryBed].x, beds[primaryBed].y,
+                placeGraveNear(cemeteryX, cemeteryY,
                                 hist[k].name, hist[k].age, HISTORY_YEARS - diedAtYear[k]);
 
         // Extremely unlucky household — everyone died out with no living
