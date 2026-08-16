@@ -20,6 +20,13 @@
 //
 // Usage: worldgen_sim.exe [years=100] [villages=1] [seed=random]
 
+// SDL.h unconditionally #define's main -> SDL_main on Windows (via SDL_main.h)
+// and expects libSDL2main to supply a WinMain that calls it — that's the actual
+// cause of the "undefined reference to WinMain" link error without this, not a
+// missing SDL2 lib. SDL_MAIN_HANDLED turns that redefinition off; nothing here
+// calls SDL_Init or needs SDL2's runtime, only SDL_Color/SDL_Point as plain
+// structs (pulled in transitively via npc.h), so no SDL2 linking is needed.
+#define SDL_MAIN_HANDLED
 #include "npc.h"
 #include <cstdlib>
 #include <ctime>
