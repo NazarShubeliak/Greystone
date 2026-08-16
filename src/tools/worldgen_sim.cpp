@@ -93,9 +93,31 @@ static int spawnChild(std::vector<Villager>& vs, int motherIdx, int fatherIdx, i
     return childId;
 }
 
-static constexpr int MARRIAGE_CHANCE_PERCENT   = 20;
-static constexpr int BIRTH_CHANCE_PERCENT      = 15;
-static constexpr int APPRENTICE_CHANCE_PERCENT = 25;
+// docs/village.md's "залізне правило: не буває людини без джерела їжі" —
+// abstract stand-in for the live game's real per-minute hunger/bag/granary
+// system (main.cpp's tickVillagerNeeds()), which has nothing to operate on
+// here (no map, no Item, no granary). A villager is fed if they work
+// themselves (any occupation — the economic cycle from village.md covers the
+// rest: "фермер годує коваля..."), or a living spouse/parent/child works and
+// presumably shares. Doesn't reach further than immediate family (no
+// sibling/grandparent support) — a scoped simplification, not the full
+// household model.
+static bool isFed(const std::vector<Villager>& vs, int i) {
+    const Villager& v = vs[i];
+    if (v.occupation != Occupation::NONE) return true;
+    auto worksAndAlive = [&](int idx) {
+        return idx >= 0 && idx < (int)vs.size() && vs[idx].alive && vs[idx].occupation != Occupation::NONE;
+    };
+    if (worksAndAlive(v.spouseId) || worksAndAlive(v.motherId) || worksAndAlive(v.fatherId)) return true;
+    for (int cid : v.childIds)
+        if (worksAndAlive(cid)) return true;
+    return false;
+}
+
+static constexpr int MARRIAGE_CHANCE_PERCENT    = 20;
+static constexpr int BIRTH_CHANCE_PERCENT       = 15;
+static constexpr int APPRENTICE_CHANCE_PERCENT  = 25;
+static constexpr int STARVATION_DEATH_PERCENT   = 30;
 
 // One year of village life — same four passes and tuning constants as main.cpp's
 // simulateVillageYear() (plus the old-age death main.cpp keeps in a separate
@@ -169,6 +191,21 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
         }
     }
 
+    // ---- Starvation: no one survives without a food source (docs/village.md's
+    // iron rule). Checked after occupation succession so a same-year heir or
+    // apprentice can still save a family in time, before hunger has a chance
+    // to matter.
+    for (int i = 0; i < (int)vs.size(); i++) {
+        Villager& v = vs[i];
+        if (!v.alive || isFed(vs, i)) continue;
+        if ((rand() % 100) < STARVATION_DEATH_PERCENT) {
+            v.body.torso.hp = 0;
+            v.sync();
+            if (!v.alive)
+                log.push_back({year, v.name + " has died of starvation, with no one left to provide for them."});
+        }
+    }
+
     // ---- Marriage: pair up eligible unmarried/widowed adults -----------------
     std::vector<int> eligible;
     for (int i = 0; i < (int)vs.size(); i++) {
@@ -214,6 +251,7 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
 
         if (lifeStageFor(a.age, a.race) != LifeStage::ADULT) continue;
         if (lifeStageFor(b.age, b.race) != LifeStage::ADULT) continue;
+        if (!isFed(vs, i) || !isFed(vs, j)) continue; // a starving household doesn't have children
 
         if ((rand() % 100) < BIRTH_CHANCE_PERCENT) {
             int childId = spawnChild(vs, i, j);
