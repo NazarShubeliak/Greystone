@@ -209,13 +209,22 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
         }
     }
 
-    // ---- Starvation: no one survives without a food source (docs/village.md's
-    // iron rule). Checked after occupation succession so a same-year heir or
-    // apprentice can still save a family in time, before hunger has a chance
-    // to matter.
+    // ---- Starvation: docs/village.md's iron rule, but restricted to actual
+    // dependents (children, and the Old — 65+, "не працює, живе з запасів
+    // сім'ї" per its own life-stage table). Confirmed by running a 100-year
+    // test that applying this to every unfed adult is wrong: only 5 named
+    // occupations exist in the whole village regardless of population, so
+    // most working-age adults in a growing village are never a direct
+    // parent/spouse/child of one of those 5 people — the doc's own
+    // "жебрає/краде/помирає" implies a jobless adult still typically
+    // survives (begging, day labor, foraging), not automatic death. Checked
+    // after occupation succession so a same-year heir or apprentice can
+    // still save a dependent in time.
     for (int i = 0; i < (int)vs.size(); i++) {
         Villager& v = vs[i];
-        if (!v.alive || isFed(vs, i)) continue;
+        if (!v.alive) continue;
+        bool dependent = v.isChild || lifeStageFor(v.age, v.race) == LifeStage::OLD;
+        if (!dependent || isFed(vs, i)) continue;
         if ((rand() % 100) < STARVATION_DEATH_PERCENT) {
             v.body.torso.hp = 0;
             v.sync();
@@ -264,7 +273,10 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
 
         if (lifeStageFor(a.age, a.race) != LifeStage::ADULT) continue;
         if (lifeStageFor(b.age, b.race) != LifeStage::ADULT) continue;
-        if (!isFed(vs, i) || !isFed(vs, j)) continue; // a starving household doesn't have children
+        // No isFed() gate here (removed) — working-age adults aren't treated
+        // as starvation risks at all (see the pass above), so gating births
+        // on the same narrow five-named-occupations check would have
+        // suppressed most of a growing population's births for no reason.
 
         if ((rand() % 100) < BIRTH_CHANCE_PERCENT) {
             int childId = spawnChild(vs, i, j);
