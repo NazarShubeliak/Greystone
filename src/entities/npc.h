@@ -9,15 +9,20 @@
 // ================================================================ Name tables
 
 static const char* NPC_FIRST_NAMES[] = {
-    "Aldric", "Mira",  "Theron", "Sylva",  "Gareth", "Lena",
-    "Bram",   "Cora",  "Edric",  "Nessa",  "Finn",   "Wren",
-    "Oswin",  "Hilda", "Caius",  "Elara",  "Brand",  "Inga",
-    "Rolf",   "Disa",  nullptr
+    "Aldric", "Mira",   "Theron", "Sylva",  "Gareth",  "Lena",
+    "Bram",   "Cora",   "Edric",  "Nessa",  "Finn",    "Wren",
+    "Oswin",  "Hilda",  "Caius",  "Elara",  "Brand",   "Inga",
+    "Rolf",   "Disa",   "Alaric", "Ronan",  "Bryce",   "Osric",
+    "Petra",  "Sabine", "Talia",  "Merrin", "Doran",   "Ysolde",
+    "Cedric", "Ivo",    "Maud",   "Selwyn", "Branwen", "Godric",
+    "Averil", "Renfred","Cyra",   "Waldon", nullptr
 };
 
 static const char* NPC_SURNAMES[] = {
-    "Miller", "Fletcher", "Cooper", "Thatcher", "Mason",
-    "Baker",  "Smith",    "Weaver", "Carter",   "Turner",
+    "Miller",   "Fletcher",  "Cooper",   "Thatcher", "Mason",
+    "Baker",    "Smith",     "Weaver",   "Carter",   "Turner",
+    "Hartley",  "Blackwood", "Sutter",   "Vance",    "Rowan",
+    "Ashford",  "Kellow",    "Brannigan","Wexley",   "Holt",
     nullptr
 };
 

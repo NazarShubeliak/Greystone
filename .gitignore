@@ -58,6 +58,9 @@ compile_commands.json
 *.bak
 *.swp
 
+# worldgen_sim.exe output, when redirected without an extension (e.g. > log)
+/log
+
 # vcpkg
 vcpkg_installed/
 

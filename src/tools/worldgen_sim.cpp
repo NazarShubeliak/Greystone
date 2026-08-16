@@ -93,8 +93,9 @@ static int spawnChild(std::vector<Villager>& vs, int motherIdx, int fatherIdx, i
     return childId;
 }
 
-static constexpr int MARRIAGE_CHANCE_PERCENT = 20;
-static constexpr int BIRTH_CHANCE_PERCENT    = 15;
+static constexpr int MARRIAGE_CHANCE_PERCENT   = 20;
+static constexpr int BIRTH_CHANCE_PERCENT      = 15;
+static constexpr int APPRENTICE_CHANCE_PERCENT = 25;
 
 // One year of village life — same four passes and tuning constants as main.cpp's
 // simulateVillageYear() (plus the old-age death main.cpp keeps in a separate
@@ -122,14 +123,20 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
     }
 
     // ---- Occupation succession: a dead worker's job passes to an heir -------
-    // Same heir order as main.cpp's transferGranary()/simulateVillageYear() —
-    // spouse first, else the first alive child — retried yearly until someone
-    // old enough qualifies.
+    // Heir order: spouse first, else the first alive child (same as
+    // main.cpp's transferGranary()/simulateVillageYear()). If neither exists,
+    // docs/village.md's other stated path applies — "йде в учні до майстра
+    // без спадкоємця": any unrelated adult with no trade of their own can
+    // pick up the vacant one, rolled per year rather than instantly (so a
+    // profession dying out reads as an actual gap in village history, not a
+    // same-year auto-fill) — this is what stops Blacksmith/Herbalist/etc.
+    // from staying vacant forever once their founding line has no children.
     for (int i = 0; i < (int)vs.size(); i++) {
         Villager& deceased = vs[i];
         if (deceased.alive || deceased.occupation == Occupation::NONE) continue;
 
         int heirIdx = -1;
+        bool viaFamily = true;
         if (deceased.spouseId >= 0 && deceased.spouseId < (int)vs.size()
             && vs[deceased.spouseId].alive && !vs[deceased.spouseId].isChild) {
             heirIdx = deceased.spouseId;
@@ -142,11 +149,23 @@ static void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
             }
         }
 
+        if (heirIdx < 0) {
+            viaFamily = false;
+            std::vector<int> apprentices;
+            for (int k = 0; k < (int)vs.size(); k++)
+                if (vs[k].alive && !vs[k].isChild && vs[k].occupation == Occupation::NONE)
+                    apprentices.push_back(k);
+            if (!apprentices.empty() && (rand() % 100) < APPRENTICE_CHANCE_PERCENT)
+                heirIdx = apprentices[rand() % apprentices.size()];
+        }
+
         if (heirIdx >= 0 && vs[heirIdx].occupation == Occupation::NONE) {
             Occupation occ = deceased.occupation;
             giveOccupation(vs[heirIdx], occ);
             deceased.occupation = Occupation::NONE;
-            log.push_back({year, vs[heirIdx].name + " takes up the family trade as " + occupationName(occ) + "."});
+            log.push_back({year, viaFamily
+                ? vs[heirIdx].name + " takes up the family trade as " + occupationName(occ) + "."
+                : vs[heirIdx].name + " apprentices as the village's new " + occupationName(occ) + ", the trade having no heir."});
         }
     }
 
