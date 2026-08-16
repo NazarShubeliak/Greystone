@@ -43,6 +43,28 @@ static int countStrings(const char** arr) {
     int n = 0; while (arr[n]) n++; return n;
 }
 
+// Picks "First Surname" that doesn't already collide with an existing villager
+// sharing that surname — without this, a 20-name first-name pool funneled
+// through a handful of surviving surnames produces confusing log lines like
+// "Brand Mason was born to Gareth Mason and Gareth Mason" where the two
+// parents are genuinely different people who just drew the same name. Only
+// checks within the same surname (a same first name across different
+// surnames reads fine) and is best-effort: a large enough family eventually
+// runs out of fresh combinations from a 20-name pool, so this falls back to
+// a possible repeat rather than looping forever or inventing suffixes.
+static std::string pickFirstName(const std::vector<Villager>& vs, const std::string& surname) {
+    int nFirstNames = countStrings(NPC_FIRST_NAMES);
+    std::string candidate;
+    for (int tries = 0; tries < 30; tries++) {
+        candidate = std::string(NPC_FIRST_NAMES[rand() % nFirstNames]) + " " + surname;
+        bool taken = false;
+        for (const Villager& v : vs)
+            if (v.name == candidate) { taken = true; break; }
+        if (!taken) return candidate;
+    }
+    return candidate;
+}
+
 // No bag/goods here, unlike main.cpp's giveOccupation() — a demography-only
 // history log doesn't care what a villager carries.
 static void giveOccupation(Villager& v, Occupation occ) { v.occupation = occ; }
@@ -58,9 +80,8 @@ static int spawnChild(std::vector<Villager>& vs, int motherIdx, int fatherIdx, i
     child.isChild = true;
     child.age     = ageOverride;
 
-    int fnIdx = rand() % countStrings(NPC_FIRST_NAMES);
     std::string surname = father.name.substr(father.name.find(' ') + 1);
-    child.name = std::string(NPC_FIRST_NAMES[fnIdx]) + " " + surname;
+    child.name = pickFirstName(vs, surname);
 
     child.motherId = motherIdx;
     child.fatherId = fatherIdx;
@@ -201,24 +222,25 @@ static std::vector<Villager> seedVillage() {
         { Occupation::WOODCUTTER, false },
     };
 
-    int nFirstNames = countStrings(NPC_FIRST_NAMES);
-    int nSurnames   = countStrings(NPC_SURNAMES);
+    int nSurnames = countStrings(NPC_SURNAMES);
 
     for (int r = 0; r < (int)roles.size(); r++) {
         const Role& role = roles[r];
-        const char* surname = NPC_SURNAMES[r % nSurnames];
+        std::string surname = NPC_SURNAMES[r % nSurnames];
 
         Villager primary; // ctor already rolls a HUMAN adult age + naturalDeathAge
-        primary.name = std::string(NPC_FIRST_NAMES[rand() % nFirstNames]) + " " + surname;
+        primary.name = pickFirstName(vs, surname);
         giveOccupation(primary, role.occ);
         int primaryIdx = (int)vs.size();
         vs.push_back(primary);
 
+        // vs already contains primary at this point, so pickFirstName() naturally
+        // avoids handing the spouse the exact same first name too.
         Villager spouse;
         int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, vs[primaryIdx].age - 10);
         int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, vs[primaryIdx].age + 10);
         spouse.age  = Names::generateAge(Race::HUMAN, lo, hi);
-        spouse.name = std::string(NPC_FIRST_NAMES[rand() % nFirstNames]) + " " + surname;
+        spouse.name = pickFirstName(vs, surname);
         int spouseIdx = (int)vs.size();
         vs.push_back(spouse);
 
