@@ -66,6 +66,10 @@ struct VillagerExaminePanel {
                 stateStr = "Eating";       stateCol = {200,170,100,255}; break;
             case Villager::State::DRINK:
                 stateStr = "Fetching water"; stateCol = {100,170,200,255}; break;
+            case Villager::State::GO_TO_CORPSE:
+                stateStr = "Grieving";      stateCol = {150,150,150,255}; break;
+            case Villager::State::CARRY_TO_GRAVE:
+                stateStr = "Carrying the dead"; stateCol = {150,150,150,255}; break;
             default:
                 stateStr = "Wandering";    stateCol = {120,200,120,255}; break;
         }

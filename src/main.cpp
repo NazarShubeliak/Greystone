@@ -70,6 +70,7 @@ std::vector<Enemy>    enemies;
 std::vector<Corpse>   corpses;
 std::vector<Villager> villagers;
 int villageWellX = -1, villageWellY = -1; // walkable tile beside the well, set in spawnVillagers()
+int villageCemeteryX = -1, villageCemeteryY = -1; // graveyard anchor, set in spawnVillagers() — used by live burial AI
 
 // A tile currently on fire from a manualArea spell (Wall of Fire) — burns
 // dmgPerTurn into whoever's standing there once per player action
@@ -451,6 +452,78 @@ void transferGranary(Villager& deceased) {
     }
 }
 
+// Ring-search outward from (bx,by) for a free outdoor tile to place a grave
+// on (docs/world.md "Могили і сліди історії"). Used by spawnVillagers()'s
+// pre-history graves and by live burial AI (assignBurial()/updateVillagers()
+// below) — both just point it at villageCemeteryX/Y. Best-effort: if the
+// graveyard area is ever completely full, this silently gives up, same
+// graceful-degradation precedent placeRoleBuilding() already sets when it
+// can't find room for a building.
+void placeGraveNear(int bx, int by, const std::string& name, int ageAtDeath, int diedYearsAgo) {
+    for (int r = 2; r <= 8; r++) {
+        for (int dy = -r; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                if (std::max(std::abs(dx), std::abs(dy)) != r) continue; // ring, closest first
+                int tx = bx + dx, ty = by + dy;
+                if (tx < 1 || tx >= MAP_WIDTH-1 || ty < 1 || ty >= MAP_HEIGHT-1) continue;
+                Tile& t = map[ty][tx];
+                if (!t.walkable() || t.objectId >= 0) continue;
+                t.objectId = O_GRAVE;
+                t.objectHp = objectDefs[O_GRAVE].durability;
+                graves.push_back({tx, ty, playerSectorX, playerSectorY, name, ageAtDeath, diedYearsAgo});
+                return;
+            }
+        }
+    }
+}
+
+// Linear scan — corpses is small. Mirrors findEnemyById(): a burial-tasked
+// villager keeps a stable Corpse::id (assignBurial()) instead of a vector
+// index, since corpses.erase() on decay would otherwise leave a stale index.
+Corpse* findCorpseById(int id) {
+    for (Corpse& c : corpses) if (c.id == id) return &c;
+    return nullptr;
+}
+
+// Live burial AI (docs/world.md, extended to deaths during actual play, not
+// just pre-history) — picks who carries a just-created corpse to the village
+// graveyard. Preference: the deceased's own family (spouse, then mother,
+// then father, then first eligible child) if any of them are free right now,
+// else the nearest eligible villager overall. If nobody qualifies, does
+// nothing — the corpse just decays on its own, same as before this feature.
+void assignBurial(const Corpse& c, const Villager& deceased) {
+    auto eligible = [](int idx) {
+        if (idx < 0 || idx >= (int)villagers.size()) return false;
+        const Villager& v = villagers[idx];
+        return v.alive && !v.isChild && v.state == Villager::State::WANDER;
+    };
+
+    int burierIdx = -1;
+    if (eligible(deceased.spouseId))      burierIdx = deceased.spouseId;
+    else if (eligible(deceased.motherId)) burierIdx = deceased.motherId;
+    else if (eligible(deceased.fatherId)) burierIdx = deceased.fatherId;
+    else {
+        for (int cid : deceased.childIds)
+            if (eligible(cid)) { burierIdx = cid; break; }
+    }
+
+    if (burierIdx < 0) {
+        int bestD = -1;
+        for (int i = 0; i < (int)villagers.size(); i++) {
+            if (!eligible(i)) continue;
+            int d = std::max(std::abs(villagers[i].x - c.x), std::abs(villagers[i].y - c.y));
+            if (bestD < 0 || d < bestD) { bestD = d; burierIdx = i; }
+        }
+    }
+    if (burierIdx < 0) return; // nobody available — corpse decays on its own
+
+    Villager& burier = villagers[burierIdx];
+    burier.state          = Villager::State::GO_TO_CORPSE;
+    burier.burialCorpseId = c.id;
+    burier.homePath.clear();
+    burier.homePathIdx    = 0;
+}
+
 // Same as dropEnemyLoot(), for a villager killed by the player (or anything
 // else) — also drops what they were wearing, not just what they carried, so
 // nothing survives them as an invisible "worn" item.
@@ -462,7 +535,9 @@ void dropVillagerLoot(Villager& v) {
         panel.addMessage(v.name + "'s " + v.outfit->name + " falls to the ground.");
         v.outfit.reset();
     }
-    corpses.push_back(makeCorpse(v, worldTime.minutes, playerSectorX, playerSectorY));
+    Corpse c = makeCorpse(v, worldTime.minutes, playerSectorX, playerSectorY);
+    corpses.push_back(c);
+    assignBurial(c, v);
 }
 
 // ------------------------------------------------------------------ turn system
@@ -1270,6 +1345,7 @@ void spawnVillagers(bool isVillage) {
     villagers.clear();
     graves.clear();
     villageWellX = villageWellY = -1;
+    villageCemeteryX = villageCemeteryY = -1;
     if (!isVillage) return;
 
     // Walkable tile beside the well — every village has exactly one, at map center.
@@ -1332,31 +1408,6 @@ void spawnVillagers(bool isVillage) {
         return best;
     };
 
-    // Ring-search outward from (bx,by) for a free outdoor tile to place a
-    // grave on (docs/world.md "Могили і сліди історії") — same shape as the
-    // indoor bed-adjacency/child-tile searches below, just wider and without
-    // requiring T_FLOOR, since a grave sits outside. Best-effort: if the
-    // household's yard is too cramped, this silently gives up, same
-    // graceful-degradation precedent placeRoleBuilding() already sets when it
-    // can't find room for a building.
-    auto placeGraveNear = [&](int bx, int by, const std::string& name, int ageAtDeath, int diedYearsAgo) {
-        for (int r = 2; r <= 8; r++) {
-            for (int dy = -r; dy <= r; dy++) {
-                for (int dx = -r; dx <= r; dx++) {
-                    if (std::max(std::abs(dx), std::abs(dy)) != r) continue; // ring, closest first
-                    int tx = bx + dx, ty = by + dy;
-                    if (tx < 1 || tx >= MAP_WIDTH-1 || ty < 1 || ty >= MAP_HEIGHT-1) continue;
-                    Tile& t = map[ty][tx];
-                    if (!t.walkable() || t.objectId >= 0) continue;
-                    t.objectId = O_GRAVE;
-                    t.objectHp = objectDefs[O_GRAVE].durability;
-                    graves.push_back({tx, ty, playerSectorX, playerSectorY, name, ageAtDeath, diedYearsAgo});
-                    return;
-                }
-            }
-        }
-    };
-
     // One shared graveyard, not scattered graves behind every house — per
     // user request. Pick a single open spot away from the building cluster
     // (random offset 15-28 tiles from the well in each axis, still inside
@@ -1364,15 +1415,17 @@ void spawnVillagers(bool isVillage) {
     // dead go there; placeGraveNear()'s own ring search naturally clusters
     // repeat calls to the same anchor together (each already-placed grave
     // counts as taken, pushing the next one to the next free ring), so
-    // reusing one anchor for every call is all a graveyard needs.
-    int cemeteryX = villageWellX, cemeteryY = villageWellY;
+    // reusing one anchor for every call is all a graveyard needs. Stored in
+    // the global villageCemeteryX/Y (not local) so live burial AI
+    // (updateVillagers()) can path here too, long after spawnVillagers() returns.
+    villageCemeteryX = villageWellX; villageCemeteryY = villageWellY;
     for (int tries = 0; tries < 40; tries++) {
         int ox = (rand() % 2 ? 1 : -1) * (15 + rand() % 14);
         int oy = (rand() % 2 ? 1 : -1) * (15 + rand() % 14);
         int cx = villageWellX + ox, cy = villageWellY + oy;
         if (cx < 5 || cx >= MAP_WIDTH-5 || cy < 5 || cy >= MAP_HEIGHT-5) continue;
         if (!map[cy][cx].walkable() || map[cy][cx].objectId >= 0) continue;
-        cemeteryX = cx; cemeteryY = cy;
+        villageCemeteryX = cx; villageCemeteryY = cy;
         break;
     }
 
@@ -1472,11 +1525,11 @@ void spawnVillagers(bool isVillage) {
 
         // Places graves for the whole simulated household regardless of
         // whether anyone survived — even a fully extinct line left a mark.
-        // All households share the one graveyard (cemeteryX/Y), not a plot
-        // behind each individual house.
+        // All households share the one graveyard (villageCemeteryX/Y), not a
+        // plot behind each individual house.
         for (int k = 0; k < (int)hist.size(); k++)
             if (diedAtYear[k] >= 0)
-                placeGraveNear(cemeteryX, cemeteryY,
+                placeGraveNear(villageCemeteryX, villageCemeteryY,
                                 hist[k].name, hist[k].age, HISTORY_YEARS - diedAtYear[k]);
 
         // Extremely unlucky household — everyone died out with no living
@@ -1836,6 +1889,31 @@ void updateVillagers() {
                 break;
             case Villager::State::SLEEP:
                 v.x = v.bedX; v.y = v.bedY; // stay on the bed
+                break;
+            case Villager::State::GO_TO_CORPSE: {
+                Corpse* c = findCorpseById(v.burialCorpseId);
+                if (!c) { v.state = Villager::State::WANDER; break; } // decayed/already handled — abandon gracefully
+                if (followPath(v, c->x, c->y)) {
+                    v.burialDeceasedName = c->name;
+                    v.burialDeceasedAge  = c->age;
+                    corpses.erase(std::remove_if(corpses.begin(), corpses.end(),
+                                  [&](const Corpse& cc) { return cc.id == v.burialCorpseId; }),
+                                  corpses.end());
+                    v.state = Villager::State::CARRY_TO_GRAVE;
+                    v.homePath.clear();
+                    v.homePathIdx = 0;
+                }
+                break;
+            }
+            case Villager::State::CARRY_TO_GRAVE:
+                if (villageCemeteryX < 0) { v.state = Villager::State::WANDER; break; }
+                if (followPath(v, villageCemeteryX, villageCemeteryY)) {
+                    placeGraveNear(villageCemeteryX, villageCemeteryY,
+                                    v.burialDeceasedName, v.burialDeceasedAge, 0);
+                    panel.addMessage(v.name + " buries " + v.burialDeceasedName + " in the village graveyard.");
+                    v.burialCorpseId = -1;
+                    v.state = Villager::State::WANDER;
+                }
                 break;
             case Villager::State::FLEE:
             case Villager::State::FIGHT:

@@ -94,12 +94,28 @@ struct Villager : Actor {
     int bedX = 0, bedY = 0;     // home bed object tile (blocksMove=true — not a valid path target)
     int sleepX = 0, sleepY = 0; // walkable tile adjacent to bed — actual path target
 
-    enum class State { WANDER, WALK_HOME, SLEEP, EAT, DRINK, FLEE, FIGHT } state = State::SLEEP;
+    enum class State {
+        WANDER, WALK_HOME, SLEEP, EAT, DRINK, FLEE, FIGHT,
+        GO_TO_CORPSE,   // walking to a dead villager's body to bury it
+        CARRY_TO_GRAVE  // body picked up, walking to the village graveyard
+    } state = State::SLEEP;
 
-    // Path used when walking home or to the well (recomputed via A* with doors open)
+    // Path used when walking home, to the well, to a corpse, or to the
+    // graveyard (recomputed via A* with doors open) — one generic buffer
+    // reused across every walking state, not dedicated to any single one.
     std::vector<SDL_Point> homePath;
     int homePathIdx    = 0;
     int pathRetryCool  = 0; // ticks to wait before rebuilding a failed path
+
+    // Live burial AI (docs/world.md "Могили і сліди історії", extended to
+    // deaths during actual play) — set by main.cpp's assignBurial() when this
+    // villager is chosen to carry a dead neighbor's body. burialCorpseId is a
+    // stable Corpse::id, not a vector index (corpses can reorder on decay).
+    // Name/age are captured once the body is actually picked up (GO_TO_CORPSE
+    // arrival) since the Corpse itself is removed at that point.
+    int         burialCorpseId = -1;
+    std::string burialDeceasedName;
+    int         burialDeceasedAge = 0;
 
     // Door the NPC last opened — closed once they step away from it
     int lastDoorX = -1, lastDoorY = -1;

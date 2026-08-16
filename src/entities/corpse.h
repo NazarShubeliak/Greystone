@@ -6,11 +6,18 @@
 static constexpr int CORPSE_DECAY_MINUTES = 5 * 24 * 60; // 5 in-game days
 static constexpr int CORPSE_FRESH_MINUTES = 2 * 24 * 60; // fresh for 2 days (necromancy window)
 
+// Monotonically increasing, mirrors Actor::id/nextActorId — lets live burial AI
+// (main.cpp) keep referencing "the same corpse" across many ticks even if
+// `corpses` reorders (it's erase()'d on decay), instead of a stale index.
+inline int nextCorpseId = 1;
+
 struct Corpse {
+    int         id;
     int         x, y;
     int         sectorX, sectorY; // which overmap sector this corpse belongs to
     std::string name;
     SDL_Color   color;
+    int         age;        // captured from the Actor at death — for the eventual Grave record
     int         diedAt;     // worldTime.minutes when killed
     int         decaysAt;   // worldTime.minutes when corpse vanishes
 
@@ -20,6 +27,7 @@ struct Corpse {
 
 inline Corpse makeCorpse(const Actor& e, int nowMinutes, int sectorX, int sectorY) {
     Corpse c;
+    c.id       = nextCorpseId++;
     c.x        = e.x;
     c.y        = e.y;
     c.sectorX  = sectorX;
@@ -29,6 +37,7 @@ inline Corpse makeCorpse(const Actor& e, int nowMinutes, int sectorX, int sector
     c.color    = {(Uint8)(e.color.r * 3 / 5),
                   (Uint8)(e.color.g * 3 / 5),
                   (Uint8)(e.color.b * 3 / 5), 255};
+    c.age      = e.age;
     c.diedAt   = nowMinutes;
     c.decaysAt = nowMinutes + CORPSE_DECAY_MINUTES;
     return c;
