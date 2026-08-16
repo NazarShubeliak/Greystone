@@ -54,6 +54,8 @@ C:/msys64/mingw64/bin/g++.exe -std=c++17 -O2 -o greystone.exe src/main.cpp src/c
 C:/msys64/mingw64/bin/g++.exe -std=c++17 -O2 -o worldgen_sim.exe src/tools/worldgen_sim.cpp -Isrc/entities -I"C:/msys64/mingw64/include/SDL2"
 ```
 
+`build.sh` — те саме, обидва бінарники (`greystone` + `worldgen_sim`) одним запуском, для bash-оточення (`sdl2-config` замість прямих `-I`/`-L` шляхів mingw64 з команд вище).
+
 ---
 
 ## Архітектура
