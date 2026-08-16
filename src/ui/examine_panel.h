@@ -16,10 +16,19 @@ struct ExaminePanel {
     std::string corpseName;
     bool        corpseFresh = false;
 
+    // A gravestone from a village's pre-history (docs/world.md "написи на
+    // могилах") — set alongside hasCorpse at the same Examine gather site,
+    // main.cpp.
+    bool        hasGrave = false;
+    std::string graveName;
+    int         graveAge = 0;
+    int         graveDiedYearsAgo = 0;
+
     void show(int x, int y) {
         tileX = x; tileY = y;
         items.clear();
         hasCorpse = false;
+        hasGrave  = false;
         visible = true;
     }
 
@@ -27,6 +36,7 @@ struct ExaminePanel {
         tileX = x; tileY = y;
         items = std::move(groundItems);
         hasCorpse = false;
+        hasGrave  = false;
         visible = true;
     }
 
@@ -36,7 +46,7 @@ struct ExaminePanel {
         if (!visible) return;
 
         const int W  = 480;
-        const int H  = 300 + (int)items.size() * 100 + (hasCorpse ? 50 : 0);
+        const int H  = 300 + (int)items.size() * 100 + (hasCorpse ? 50 : 0) + (hasGrave ? 50 : 0);
         const int px = (SCREEN_WIDTH - W) / 2;
         const int py = (MAP_VIEW_HEIGHT - H) / 2;
         const int LX = px + 14;
@@ -136,6 +146,17 @@ struct ExaminePanel {
                 ? "  Fresh remains. A necromancer could animate this."
                 : "  Decomposing remains.";
             txt(state, dim);
+            hline();
+        }
+
+        // ── Grave ────────────────────────────────────────────────────────
+        if (hasGrave) {
+            SDL_Color gCol = {150, 150, 150, 255};
+            txt(std::string("[Grave]   Here lies ") + graveName + ".", gCol);
+            std::string ageLine = graveDiedYearsAgo > 0
+                ? "  Died " + std::to_string(graveDiedYearsAgo) + " years ago, aged " + std::to_string(graveAge) + "."
+                : "  Died this past year, aged " + std::to_string(graveAge) + ".";
+            txt(ageLine, dim);
             hline();
         }
 

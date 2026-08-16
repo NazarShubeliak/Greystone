@@ -51,6 +51,7 @@ enum ObjectId {
     O_MUSHROOM,
     O_ANVIL,
     O_STUMP,
+    O_GRAVE,
     O_COUNT
 };
 
@@ -162,6 +163,8 @@ static const ObjectDef objectDefs[O_COUNT] = {
                                                                        "A", {150,150,160,255},   0, true,  false,  400, Material::METAL },
   { "Stump",       "A weathered tree stump, left behind after felling.",
                                                                        "u", {110, 70, 35,255},  20, false, false,   20, Material::WOOD },
+  { "Grave",       "A weathered gravestone marking someone's final resting place.",
+                                                                       "x", {150,150,150,255},   0, true,  false,    0, Material::STONE },
 };
 
 // ================================================================ Biome type

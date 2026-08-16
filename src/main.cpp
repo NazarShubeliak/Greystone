@@ -16,6 +16,7 @@
 #include "corpse.h"
 #include "map.h"
 #include "npc.h"
+#include "village_history.h"
 #include "villager_examine_panel.h"
 #include "combat.h"
 #include "magic.h"
@@ -48,6 +49,21 @@ Tile map[MAP_HEIGHT][MAP_WIDTH];
 SDL_Texture* texCursor     = nullptr;
 SDL_Texture* playerTexture = nullptr;
 SDL_Texture* enemyTexture  = nullptr;
+
+// A gravestone from a village's pre-history (docs/world.md "Могили і сліди
+// історії") — unlike Corpse, permanent (no decaysAt/decay logic): these mark
+// ancestors from the short mini-history spawnVillagers() simulates for each
+// household before placing anyone on the map, not anything that happened in
+// the live game. No absolute world-calendar year exists yet (that's
+// world.md's separate "Create World" screen item), so diedYearsAgo is
+// relative to "now" rather than an absolute year number.
+struct Grave {
+    int x, y, sectorX, sectorY;
+    std::string name;
+    int ageAtDeath;
+    int diedYearsAgo;
+};
+std::vector<Grave> graves;
 
 Player player(20, 15);
 std::vector<Enemy>    enemies;
@@ -1252,6 +1268,7 @@ void simulateVillageYear(std::vector<Villager>& vs) {
 
 void spawnVillagers(bool isVillage) {
     villagers.clear();
+    graves.clear();
     villageWellX = villageWellY = -1;
     if (!isVillage) return;
 
@@ -1292,82 +1309,12 @@ void spawnVillagers(bool isVillage) {
         nextSurnameSlot++;
     }
 
-    int nFirstNames = countStrings(NPC_FIRST_NAMES);
-    // Track which first names were used per surname group
-    std::map<int,std::vector<int>> usedFirst;
-
-    for (int i = 0; i < (int)beds.size(); i++) {
-        Villager v;
-        v.bedX = beds[i].x;
-        v.bedY = beds[i].y;
-
-        // Find a walkable tile adjacent to the bed (bed itself blocksMove=true).
-        v.sleepX = beds[i].x;
-        v.sleepY = beds[i].y;
-        {
-            const int DIRS[4][2] = {{0,-1},{0,1},{-1,0},{1,0}};
-            for (auto& d : DIRS) {
-                int nx = beds[i].x + d[0], ny = beds[i].y + d[1];
-                if (nx < 1 || nx >= MAP_WIDTH-1 || ny < 1 || ny >= MAP_HEIGHT-1) continue;
-                Tile& t = map[ny][nx];
-                // Count closed doors as passable (NPC will open them)
-                bool passable = t.walkable() || t.objectId == O_DOOR_CLOSED;
-                if (passable) { v.sleepX = nx; v.sleepY = ny; break; }
-            }
-        }
-
-        v.x = v.sleepX;
-        v.y = v.sleepY;
-
-        // Pick unique first name per household
-        int fnIdx;
-        do { fnIdx = rand() % nFirstNames; }
-        while (std::count(usedFirst[surnameIdx[i]].begin(),
-                          usedFirst[surnameIdx[i]].end(), fnIdx) > 0
-               && (int)usedFirst[surnameIdx[i]].size() < nFirstNames);
-        usedFirst[surnameIdx[i]].push_back(fnIdx);
-
-        int snIdx = surnameIdx[i] % nSurnames;
-        v.name      = std::string(NPC_FIRST_NAMES[fnIdx]) + " " + NPC_SURNAMES[snIdx];
-        v.color     = VILLAGER_COLORS[i % VILLAGER_COLOR_COUNT];
-        v.greetIdx  = i % countStrings(GREETINGS_DAY);
-
-        // Everything they carry lives in one real container — no floating inventory.
-        // Starting food reserve: Farmer/Herbalist can top this up later by harvesting
-        // their own field; everyone else only ever depletes it.
-        v.bag = Items::backpack();
-        {
-            Item loaves = Items::bread();
-            loaves.count = 6;
-            addToContainer(*v.bag, std::move(loaves));
-        }
-        v.outfit = Items::commonClothes(); // never "naked with a backpack"
-
-        // Start sleeping if it's night, else place them near their bed
-        if (worldTime.darkness() > 0.5f) {
-            v.state = Villager::State::SLEEP;
-        } else {
-            v.state = Villager::State::WANDER;
-            // Start a few tiles away so they look like they're already about their day
-            for (int tries = 0; tries < 20; tries++) {
-                int ox = beds[i].x + (rand() % 7) - 3;
-                int oy = beds[i].y + (rand() % 7) - 3;
-                if (ox >= 1 && ox < MAP_WIDTH-1 && oy >= 1 && oy < MAP_HEIGHT-1
-                    && map[oy][ox].walkable()) {
-                    v.x = ox; v.y = oy; break;
-                }
-            }
-        }
-
-        villagers.push_back(v);
-    }
-
-    // ---- Assign occupations, one primary worker per household ----------------
-    // map.cpp's placeVillage() already decided what each building is (villageBuildings);
-    // just match each household's bed to the nearest recorded building anchor.
-    std::map<int, std::vector<int>> households; // surnameIdx -> villager indices
-    for (int i = 0; i < (int)villagers.size(); i++)
-        households[surnameIdx[i]].push_back(i);
+    // Group beds into households (surnameIdx -> bed indices) before anyone's
+    // identity is decided — that now comes from a pre-history simulation per
+    // household, not a direct roll.
+    std::map<int, std::vector<int>> bedHouseholds;
+    for (int i = 0; i < (int)beds.size(); i++)
+        bedHouseholds[surnameIdx[i]].push_back(i);
 
     // Nearest O_BARREL to a bed — every farmstead room already has exactly
     // one (map.cpp's placeFarmstead()), so this reliably finds that
@@ -1385,28 +1332,225 @@ void spawnVillagers(bool isVillage) {
         return best;
     };
 
-    for (auto& kv : households) {
-        int primary = kv.second[0];
+    // Ring-search outward from (bx,by) for a free outdoor tile to place a
+    // grave on (docs/world.md "Могили і сліди історії") — same shape as the
+    // indoor bed-adjacency/child-tile searches below, just wider and without
+    // requiring T_FLOOR, since a grave sits outside. Best-effort: if the
+    // household's yard is too cramped, this silently gives up, same
+    // graceful-degradation precedent placeRoleBuilding() already sets when it
+    // can't find room for a building.
+    auto placeGraveNear = [&](int bx, int by, const std::string& name, int ageAtDeath, int diedYearsAgo) {
+        for (int r = 2; r <= 6; r++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dx = -r; dx <= r; dx++) {
+                    if (std::max(std::abs(dx), std::abs(dy)) != r) continue; // ring, closest first
+                    int tx = bx + dx, ty = by + dy;
+                    if (tx < 1 || tx >= MAP_WIDTH-1 || ty < 1 || ty >= MAP_HEIGHT-1) continue;
+                    Tile& t = map[ty][tx];
+                    if (!t.walkable() || t.objectId >= 0) continue;
+                    t.objectId = O_GRAVE;
+                    t.objectHp = objectDefs[O_GRAVE].durability;
+                    graves.push_back({tx, ty, playerSectorX, playerSectorY, name, ageAtDeath, diedYearsAgo});
+                    return;
+                }
+            }
+        }
+    };
+
+    // A household's residents today are the survivors of a short simulated
+    // past, not a fresh roll — docs/world.md: "Історія при worldgen — це не
+    // текстовий флейвор, а результат тієї самої симуляції." Reuses the
+    // shared map-free engine (village_history.h) that worldgen_sim.exe also
+    // runs, isolated per household (no marriage across households during
+    // this window — today's bed-assignment shape below can't absorb that
+    // kind of reshuffling).
+    constexpr int HISTORY_YEARS = 30;
+
+    for (auto& kv : bedHouseholds) {
+        int primaryBed    = kv.second[0];
+        bool hasSpouseBed = kv.second.size() > 1;
+        int spouseBed     = hasSpouseBed ? kv.second[1] : -1;
 
         BuildingRole role = BuildingRole::FARM;
         int bestDist = -1;
         for (const VillageBuildingInfo& info : villageBuildings) {
-            int dx = beds[primary].x - info.bedX, dy = beds[primary].y - info.bedY;
+            int dx = beds[primaryBed].x - info.bedX, dy = beds[primaryBed].y - info.bedY;
             int d  = dx*dx + dy*dy;
             if (bestDist < 0 || d < bestDist) { bestDist = d; role = info.role; }
         }
 
         Occupation occ;
         switch (role) {
-            case BuildingRole::FARM:           occ = Occupation::FARMER;     break;
+            case BuildingRole::FARM:            occ = Occupation::FARMER;     break;
             case BuildingRole::HERBALIST_FARM:  occ = Occupation::HERBALIST;  break;
             case BuildingRole::SMITHY:          occ = Occupation::BLACKSMITH; break;
             case BuildingRole::ELDER:           occ = Occupation::ELDER;      break;
             default:                            occ = Occupation::WOODCUTTER; break;
         }
-        giveOccupation(villagers[primary], occ);
-
         bool isFarmHousehold = (role == BuildingRole::FARM || role == BuildingRole::HERBALIST_FARM);
+
+        // ---- Pre-history: found this household ~HISTORY_YEARS ago, simulate forward ----
+        std::string surname = NPC_SURNAMES[surnameIdx[primaryBed] % nSurnames];
+        std::vector<Villager> hist;
+
+        Villager founder;
+        founder.name = VillageHistory::pickFirstName(hist, surname);
+        founder.age  = Names::generateAge(Race::HUMAN, raceTraits[(int)Race::HUMAN].minAge,
+                                                         raceTraits[(int)Race::HUMAN].minAge + 8);
+        VillageHistory::giveOccupation(founder, occ);
+        hist.push_back(founder);
+
+        if (hasSpouseBed) {
+            Villager foundingSpouse;
+            int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, hist[0].age - 5);
+            int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, hist[0].age + 5);
+            foundingSpouse.age  = Names::generateAge(Race::HUMAN, lo, hi);
+            foundingSpouse.name = VillageHistory::pickFirstName(hist, surname);
+            hist.push_back(foundingSpouse);
+            hist[0].spouseId = 1;
+            hist[1].spouseId = 0;
+            if (!isFarmHousehold && (rand() % 100) < 20)
+                VillageHistory::giveOccupation(hist[1], Occupation::SEAMSTRESS);
+        }
+
+        std::vector<VillageHistory::LegendEvent> histLog;
+        std::vector<int> diedAtYear(hist.size(), -1);
+        for (int year = 1; year <= HISTORY_YEARS; year++) {
+            size_t before = hist.size();
+            std::vector<bool> wasAlive(before);
+            for (size_t k = 0; k < before; k++) wasAlive[k] = hist[k].alive;
+
+            VillageHistory::simulateOneYear(hist, year, histLog);
+
+            diedAtYear.resize(hist.size(), -1);
+            for (size_t k = 0; k < before; k++)
+                if (wasAlive[k] && !hist[k].alive) diedAtYear[k] = year;
+        }
+
+        // Resolve today's head of household: whoever currently holds `occ`,
+        // else the eldest living adult descendant if the trade went vacant
+        // (a real possible outcome — see village_history.h's apprenticeship
+        // comments — not forced back to "always staffed").
+        int headIdx = -1;
+        for (int k = 0; k < (int)hist.size(); k++)
+            if (hist[k].alive && hist[k].occupation == occ) { headIdx = k; break; }
+        if (headIdx < 0)
+            for (int k = 0; k < (int)hist.size(); k++)
+                if (hist[k].alive && !hist[k].isChild && (headIdx < 0 || hist[k].age > hist[headIdx].age))
+                    headIdx = k;
+
+        // Places graves for the whole simulated household regardless of
+        // whether anyone survived — even a fully extinct line left a mark.
+        for (int k = 0; k < (int)hist.size(); k++)
+            if (diedAtYear[k] >= 0)
+                placeGraveNear(beds[primaryBed].x, beds[primaryBed].y,
+                                hist[k].name, hist[k].age, HISTORY_YEARS - diedAtYear[k]);
+
+        // Extremely unlucky household — everyone died out with no living
+        // descendant at all (rare inside just 30 years, but not impossible).
+        // Leave the beds empty rather than inventing a fresh unrelated
+        // resident — an abandoned house is a legitimate simulated outcome.
+        if (headIdx < 0) continue;
+
+        // Places a resolved hist[] member onto the map — at their own bed if
+        // bedIdx>=0, otherwise sharing (homeX,homeY) with a small ring search
+        // (bedless children, same as before this feature).
+        auto placeFromHistory = [&](int histIdx, int bedIdx, int homeX, int homeY) -> int {
+            Villager v;
+            v.name       = hist[histIdx].name;
+            v.age        = hist[histIdx].age;
+            v.isChild    = hist[histIdx].isChild;
+            v.occupation = hist[histIdx].occupation;
+
+            if (bedIdx >= 0) {
+                v.bedX = beds[bedIdx].x; v.bedY = beds[bedIdx].y;
+                v.sleepX = beds[bedIdx].x; v.sleepY = beds[bedIdx].y;
+                const int DIRS[4][2] = {{0,-1},{0,1},{-1,0},{1,0}};
+                for (auto& d : DIRS) {
+                    int nx = beds[bedIdx].x + d[0], ny = beds[bedIdx].y + d[1];
+                    if (nx < 1 || nx >= MAP_WIDTH-1 || ny < 1 || ny >= MAP_HEIGHT-1) continue;
+                    Tile& t = map[ny][nx];
+                    bool passable = t.walkable() || t.objectId == O_DOOR_CLOSED;
+                    if (passable) { v.sleepX = nx; v.sleepY = ny; break; }
+                }
+            } else {
+                v.bedX = homeX; v.bedY = homeY;
+                v.sleepX = homeX; v.sleepY = homeY;
+                bool found = false;
+                for (int dy = -2; dy <= 2 && !found; dy++) {
+                    for (int dx = -2; dx <= 2; dx++) {
+                        int tx = homeX + dx, ty = homeY + dy;
+                        if (tx < 1 || tx >= MAP_WIDTH-1 || ty < 1 || ty >= MAP_HEIGHT-1) continue;
+                        if (!map[ty][tx].walkable()) continue;
+                        bool taken = false;
+                        for (const Villager& ev : villagers)
+                            if (ev.sleepX == tx && ev.sleepY == ty) { taken = true; break; }
+                        if (taken) continue;
+                        v.sleepX = tx; v.sleepY = ty;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            v.x = v.sleepX; v.y = v.sleepY;
+            v.color    = VILLAGER_COLORS[(int)villagers.size() % VILLAGER_COLOR_COUNT];
+            v.greetIdx = (int)villagers.size() % countStrings(GREETINGS_DAY);
+
+            // Everything they carry lives in one real container — no floating
+            // inventory. Children get a smaller personal stock; adults also
+            // get their trade's goods to sell, same quantities as before.
+            v.bag = Items::backpack();
+            Item loaves = Items::bread();
+            loaves.count = v.isChild ? 3 : 6;
+            addToContainer(*v.bag, std::move(loaves));
+            if (!v.isChild)
+                for (Item& g : goodsFor(v.occupation)) addToContainer(*v.bag, std::move(g));
+            v.outfit = Items::commonClothes(); // never "naked with a backpack"
+
+            if (worldTime.darkness() > 0.5f) {
+                v.state = Villager::State::SLEEP;
+            } else {
+                v.state = Villager::State::WANDER;
+                for (int tries = 0; tries < 20; tries++) {
+                    int ox = v.bedX + (rand() % 7) - 3;
+                    int oy = v.bedY + (rand() % 7) - 3;
+                    if (ox >= 1 && ox < MAP_WIDTH-1 && oy >= 1 && oy < MAP_HEIGHT-1
+                        && map[oy][ox].walkable()) {
+                        v.x = ox; v.y = oy; break;
+                    }
+                }
+            }
+
+            villagers.push_back(v);
+            return (int)villagers.size() - 1;
+        };
+
+        int primaryLiveIdx = placeFromHistory(headIdx, primaryBed, beds[primaryBed].x, beds[primaryBed].y);
+
+        int spouseLiveIdx = -1;
+        if (hasSpouseBed && hist[headIdx].spouseId >= 0 && hist[hist[headIdx].spouseId].alive) {
+            spouseLiveIdx = placeFromHistory(hist[headIdx].spouseId, spouseBed,
+                                              beds[primaryBed].x, beds[primaryBed].y);
+            villagers[primaryLiveIdx].spouseId = spouseLiveIdx;
+            villagers[spouseLiveIdx].spouseId  = primaryLiveIdx;
+        }
+
+        // Children still living-and-underage in the simulated result share
+        // the household's home tile, same as before this feature. Grown
+        // survivors who aren't part of this nuclear family (a sibling who
+        // didn't inherit the trade, etc.) simply aren't placed — an accepted
+        // simplification, see the plan.
+        std::vector<int> childLiveIdxs;
+        for (int cid : hist[headIdx].childIds) {
+            if (cid < 0 || cid >= (int)hist.size()) continue;
+            if (!hist[cid].alive || !hist[cid].isChild) continue;
+            int idx = placeFromHistory(cid, -1, beds[primaryBed].x, beds[primaryBed].y);
+            villagers[idx].motherId = primaryLiveIdx;
+            villagers[idx].fatherId = spouseLiveIdx >= 0 ? spouseLiveIdx : primaryLiveIdx;
+            villagers[primaryLiveIdx].childIds.push_back(idx);
+            if (spouseLiveIdx >= 0) villagers[spouseLiveIdx].childIds.push_back(idx);
+            childLiveIdxs.push_back(idx);
+        }
 
         // Family granary — shared food reserve tied to the barrel map.cpp
         // already furnishes every farmstead room with (repurposed from pure
@@ -1414,52 +1558,19 @@ void spawnVillagers(bool isVillage) {
         // granaryOwnerId (set on the primary itself, then propagated to
         // spouse/children below) is how everyone else reaches it.
         if (isFarmHousehold) {
-            SDL_Point barrel = findNearbyBarrel(villagers[primary].bedX, villagers[primary].bedY);
+            SDL_Point barrel = findNearbyBarrel(villagers[primaryLiveIdx].bedX, villagers[primaryLiveIdx].bedY);
             if (barrel.x >= 0) {
                 Item stock   = Items::grainBarrel();
-                Item starter = (occ == Occupation::HERBALIST) ? Items::mushroomStew() : Items::flatbread();
+                Item starter = (villagers[primaryLiveIdx].occupation == Occupation::HERBALIST)
+                              ? Items::mushroomStew() : Items::flatbread();
                 starter.count = 8;
                 addToContainer(stock, starter);
-                villagers[primary].granary        = stock;
-                villagers[primary].granaryX       = barrel.x;
-                villagers[primary].granaryY       = barrel.y;
-                villagers[primary].granaryOwnerId = primary;
-            }
-        }
-
-        // Real spouse link for any two-bed household (farm/herbalist/elder) —
-        // not just a shared surname. Both spouses already got an independent
-        // adult age from Villager()'s default ctor; re-roll the second one
-        // close to the first's instead of leaving two unrelated ages.
-        if (kv.second.size() > 1) {
-            int spouseIdx = kv.second[1];
-            villagers[primary].spouseId   = spouseIdx;
-            villagers[spouseIdx].spouseId = primary;
-            villagers[spouseIdx].granaryOwnerId = villagers[primary].granaryOwnerId;
-            int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, villagers[primary].age - 10);
-            int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, villagers[primary].age + 10);
-            villagers[spouseIdx].age = Names::generateAge(Race::HUMAN, lo, hi);
-
-            // Rare chance: the spouse in a non-farm household becomes a
-            // Seamstress instead of a plain helper.
-            if (!isFarmHousehold && (rand() % 100) < 20)
-                giveOccupation(villagers[spouseIdx], Occupation::SEAMSTRESS);
-        }
-
-        // Children — farm/herbalist households (married couples) only. No bed
-        // exists for them (map.cpp never furnishes more than 2 beds per
-        // building), so they share a parent's home tile instead of pathing to
-        // one of their own; the family granary (above) plus a small personal
-        // stock covers their food.
-        if (isFarmHousehold && kv.second.size() > 1) {
-            int fatherIdx = primary, motherIdx = kv.second[1];
-            int youngerParentAge = std::min(villagers[fatherIdx].age, villagers[motherIdx].age);
-            int maxChildAge = youngerParentAge - 16; // parent was at least 16 at birth
-
-            if (maxChildAge >= 1 && (rand() % 100) < 60) {
-                int nKids = 1 + rand() % 3;
-                for (int k = 0; k < nKids; k++)
-                    spawnChild(villagers, motherIdx, fatherIdx, Names::generateAge(Race::HUMAN, 1, std::min(17, maxChildAge)));
+                villagers[primaryLiveIdx].granary        = stock;
+                villagers[primaryLiveIdx].granaryX       = barrel.x;
+                villagers[primaryLiveIdx].granaryY       = barrel.y;
+                villagers[primaryLiveIdx].granaryOwnerId = primaryLiveIdx;
+                if (spouseLiveIdx >= 0) villagers[spouseLiveIdx].granaryOwnerId = primaryLiveIdx;
+                for (int cidx : childLiveIdxs) villagers[cidx].granaryOwnerId = primaryLiveIdx;
             }
         }
     }
@@ -3511,6 +3622,23 @@ void handleInput(SDL_Event& event, bool& running) {
                             }
                         }
 
+                        // Gather grave info for Examine (docs/world.md "написи на могилах") —
+                        // same sector-filtered lookup shape as the corpse gather above.
+                        std::string graveNameHere;
+                        int         graveAgeHere         = 0;
+                        int         graveDiedYearsAgoHere = 0;
+                        bool        hasGraveHere          = false;
+                        for (const Grave& g : graves) {
+                            if (g.sectorX != playerSectorX || g.sectorY != playerSectorY) continue;
+                            if (g.x == mx && g.y == my && map[my][mx].visible) {
+                                graveNameHere         = g.name;
+                                graveAgeHere          = g.ageAtDeath;
+                                graveDiedYearsAgoHere = g.diedYearsAgo;
+                                hasGraveHere          = true;
+                                break;
+                            }
+                        }
+
                         // Ground item(s): pick up option (walk to item if needed)
                         GroundItem* gi = getGroundItemAt(mx, my);
                         if (gi && map[my][mx].visible) {
@@ -3636,11 +3764,15 @@ void handleInput(SDL_Event& event, bool& running) {
                             bool hasCN = hasCorpseHere;
                             std::string cn = corpseNameHere;
                             bool cf = corpseFreshHere;
+                            bool hasGV = hasGraveHere;
+                            std::string gn = graveNameHere;
+                            int ga = graveAgeHere;
+                            int gy = graveDiedYearsAgoHere;
                             bool hasGI = (gi && map[my][mx].visible);
                             MenuItem examItem;
                             static const char examLbl[] = {'E','x','a','m','i','n','e','\0'};
                             examItem.label = examLbl;
-                            examItem.action = [mx, my, hasCN, cn, cf, hasGI]() {
+                            examItem.action = [mx, my, hasCN, cn, cf, hasGV, gn, ga, gy, hasGI]() {
                                 if (hasGI)
                                     examinePanel.show(mx, my, getGroundItemsAt(mx, my));
                                 else
@@ -3648,6 +3780,10 @@ void handleInput(SDL_Event& event, bool& running) {
                                 examinePanel.hasCorpse   = hasCN;
                                 examinePanel.corpseName  = cn;
                                 examinePanel.corpseFresh = cf;
+                                examinePanel.hasGrave         = hasGV;
+                                examinePanel.graveName        = gn;
+                                examinePanel.graveAge         = ga;
+                                examinePanel.graveDiedYearsAgo = gy;
                             };
                             items.push_back(std::move(examItem));
                         }
