@@ -1033,6 +1033,24 @@ std::vector<MenuItem> buildDialogueOptions(int vi) {
     return opts;
 }
 
+// Whether aIdx/bIdx are parent-child or share a parent, for the marriage
+// eligibility check below. Deliberately checks all four motherId/fatherId
+// cross-combinations rather than assuming a.motherId lines up with
+// b.motherId specifically: spawnVillagers()'s initial household batch and
+// simulateVillageYear()'s ongoing births pass pass motherIdx/fatherIdx to
+// spawnChild() in opposite index order (spouse/primary vs. lower/higher
+// index), so two siblings — one from each source — can end up with their
+// shared parents recorded in swapped slots. A same-slot-only check missed
+// exactly that case and let siblings marry; this doesn't care which slot
+// a shared parent landed in.
+bool areRelated(const Villager& a, int aIdx, const Villager& b, int bIdx) {
+    if (a.motherId == bIdx || a.fatherId == bIdx) return true;
+    if (b.motherId == aIdx || b.fatherId == aIdx) return true;
+    auto shared = [](int x, int y) { return x >= 0 && x == y; };
+    return shared(a.motherId, b.motherId) || shared(a.motherId, b.fatherId)
+        || shared(a.fatherId, b.motherId) || shared(a.fatherId, b.fatherId);
+}
+
 // Adds an occupation's goods into a villager's bag (real container, no floating
 // items). Shared by spawnVillagers() (initial household assignment) and
 // simulateVillageYear()'s occupation-succession pass.
@@ -1201,12 +1219,7 @@ void simulateVillageYear(std::vector<Villager>& vs) {
         std::vector<int> candidates;
         for (int j : eligible) {
             if (j == i || matchedThisYear[j]) continue;
-            const Villager& a = vs[i];
-            const Villager& b = vs[j];
-            bool related = (a.motherId >= 0 && (a.motherId == b.motherId || a.motherId == j))
-                         || (a.fatherId >= 0 && (a.fatherId == b.fatherId || a.fatherId == j))
-                         || (b.motherId == i) || (b.fatherId == i);
-            if (related) continue;
+            if (areRelated(vs[i], i, vs[j], j)) continue;
             candidates.push_back(j);
         }
         if (candidates.empty()) continue;
