@@ -518,9 +518,42 @@ static void placeVillage(int secX, int secY) {
     placeLamps(VCX, VCY);
 }
 
+// Physically carves a river/lake through this sector — called only when this
+// sector was traced as isWater in Overmap::traceRivers() (overmap.h). A lake
+// terminus (flowDX==0 && flowDY==0) is a big irregular pond near the center;
+// a flowing river wanders from the edge opposite the outgoing flow direction
+// (upstream side) toward the edge in that direction (downstream side), via
+// a handful of overlapping paintPatch() calls along a jittered path.
+// Approximate, not a pixel-perfect join with the neighbouring sector's own
+// carve — same "best-effort" scope as the rest of worldgen (e.g.
+// placeRoleBuilding() giving up after 30 tries).
+static void carveRiver(int flowDX, int flowDY) {
+    if (flowDX == 0 && flowDY == 0) {
+        int cx = MAP_WIDTH / 2 + (rand() % 21 - 10);
+        int cy = MAP_HEIGHT / 2 + (rand() % 21 - 10);
+        for (int i = 0; i < 3; i++)
+            paintPatch(cx + rand() % 15 - 7, cy + rand() % 15 - 7, 8 + rand() % 6, T_WATER);
+        return;
+    }
+
+    int startX = (flowDX < 0) ? MAP_WIDTH - 10 : (flowDX > 0 ? 10 : MAP_WIDTH  / 2 + rand() % 41 - 20);
+    int startY = (flowDY < 0) ? MAP_HEIGHT - 10 : (flowDY > 0 ? 10 : MAP_HEIGHT / 2 + rand() % 41 - 20);
+    int endX   = (flowDX < 0) ? 10 : (flowDX > 0 ? MAP_WIDTH  - 10 : MAP_WIDTH  / 2 + rand() % 41 - 20);
+    int endY   = (flowDY < 0) ? 10 : (flowDY > 0 ? MAP_HEIGHT - 10 : MAP_HEIGHT / 2 + rand() % 41 - 20);
+
+    const int STEPS = 12;
+    for (int i = 0; i <= STEPS; i++) {
+        float t = (float)i / STEPS;
+        int px = startX + (int)((endX - startX) * t) + (rand() % 9 - 4); // jitter for a wandering look
+        int py = startY + (int)((endY - startY) * t) + (rand() % 9 - 4);
+        paintPatch(px, py, 3 + rand() % 3, T_WATER);
+    }
+}
+
 // ---------------------------------------------------------------- sector generation
 
-void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage) {
+void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage,
+                     bool hasRiver, int flowDX, int flowDY) {
     // Deterministic seed from sector coords so revisiting gives same layout.
     unsigned int seed = (seedX >= 0)
         ? (unsigned int)(seedX * 73856093u ^ seedY * 19349663u)
@@ -593,6 +626,9 @@ void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage) {
         int r  = altRadius / 2 + rand() % (altRadius / 2 + 1);
         paintPatch(cx, cy, r, altTerrain);
     }
+
+    // River/lake carved from the overmap's hydrology (Overmap::traceRivers()).
+    if (hasRiver) carveRiver(flowDX, flowDY);
 
     // Add occasional water patches for variety
     if (biome == BiomeType::SWAMP || biome == BiomeType::CURSED_LANDS) {

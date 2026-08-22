@@ -2096,7 +2096,10 @@ void checkSectorTransition() {
 
     generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
                    playerSectorX, playerSectorY,
-                   overmap.sectors[playerSectorY][playerSectorX].hasVillage);
+                   overmap.sectors[playerSectorY][playerSectorX].hasVillage,
+                   overmap.sectors[playerSectorY][playerSectorX].isWater,
+                   overmap.sectors[playerSectorY][playerSectorX].flowDX,
+                   overmap.sectors[playerSectorY][playerSectorX].flowDY);
     overmap.reveal(playerSectorX, playerSectorY);
 
     // Enemies/villagers don't persist across sectors yet (no save system) — they
@@ -2300,7 +2303,10 @@ void doTeleport(int newSX, int newSY) {
 
     generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
                    playerSectorX, playerSectorY,
-                   overmap.sectors[playerSectorY][playerSectorX].hasVillage);
+                   overmap.sectors[playerSectorY][playerSectorX].hasVillage,
+                   overmap.sectors[playerSectorY][playerSectorX].isWater,
+                   overmap.sectors[playerSectorY][playerSectorX].flowDX,
+                   overmap.sectors[playerSectorY][playerSectorX].flowDY);
     overmap.reveal(playerSectorX, playerSectorY);
     // Corpses/groundItems persist across sectors (tagged + filtered by sector);
     // only enemies/villagers respawn fresh, same as checkSectorTransition().
@@ -4583,7 +4589,10 @@ int main(int argc, char* argv[]) {
     overmap.reveal(playerSectorX, playerSectorY);
     generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
                    playerSectorX, playerSectorY,
-                   overmap.sectors[playerSectorY][playerSectorX].hasVillage);
+                   overmap.sectors[playerSectorY][playerSectorX].hasVillage,
+                   overmap.sectors[playerSectorY][playerSectorX].isWater,
+                   overmap.sectors[playerSectorY][playerSectorX].flowDX,
+                   overmap.sectors[playerSectorY][playerSectorX].flowDY);
     initEnemy();
     spawnVillagers(overmap.sectors[playerSectorY][playerSectorX].hasVillage);
 

@@ -73,6 +73,7 @@ struct Tile {
 
 // ================================================================ Functions
 
-void generateSector(BiomeType biome = BiomeType::FOREST, int seedX = -1, int seedY = -1, bool isVillage = false);
+void generateSector(BiomeType biome = BiomeType::FOREST, int seedX = -1, int seedY = -1, bool isVillage = false,
+                     bool hasRiver = false, int flowDX = 0, int flowDY = 0);
 bool hasLineOfSight(int x0, int y0, int x1, int y1);
 void updateVisibility(int radius = VIEW_RADIUS, int lampRadius = 0);

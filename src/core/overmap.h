@@ -5,16 +5,26 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <cstdlib>
+#include <cstdint>
 #include <algorithm>
 #include <string>
+#include <vector>
 
 const int OVERMAP_W = 100;
 const int OVERMAP_H = 100;
 
+// height/isWater/flowDX-DY/fertility — docs/world.md "Шар 1: Фізичний світ" +
+// "Шар 2: Розселення". Temperature/humidity are NOT stored here — they only
+// matter transiently while classifying biome in Overmap::generate() and are
+// discarded afterward.
 struct SectorInfo {
     BiomeType biome      = BiomeType::PLAINS;
     bool      explored   = false;
     bool      hasVillage = false;
+    float     height     = 0.5f;  // 0=lowest .. 1=highest — drives rivers/fertility/village siting
+    bool      isWater     = false; // river or lake cell
+    int8_t    flowDX = 0, flowDY = 0; // isWater only: direction toward the next downstream sector (0,0 = lake/edge terminus)
+    float     fertility   = 0.0f;  // 0..1, from height + distance to water — drives village siting
 };
 
 struct BiomeVisual {
@@ -49,53 +59,225 @@ struct Overmap {
     SDL_Texture* unknownTex  = nullptr;
     SDL_Texture* playerTex   = nullptr;
     SDL_Texture* villageTex  = nullptr;
+    SDL_Texture* waterTex    = nullptr; // rivers/lakes — separate glyph+colour from Swamp's "~"
 
     // ---------------------------------------------------------------- generate
+
+    // Coarse-grid -> bilinear-upsample -> one box-blur pass "value noise"
+    // (docs/world.md: "свій, ~50 рядків") — used independently for both
+    // terrain height and humidity below. Not mathematically pure Perlin
+    // noise, just coherent enough that terrain reads as hills/lowlands
+    // instead of a blocky random grid — same spirit as the rest of this
+    // game's procedural generation.
+    static void noiseField(float (&out)[OVERMAP_H][OVERMAP_W]) {
+        const int COARSE = 9; // 10x10 control points
+        float coarse[COARSE + 1][COARSE + 1];
+        for (int y = 0; y <= COARSE; y++)
+            for (int x = 0; x <= COARSE; x++)
+                coarse[y][x] = (rand() % 1000) / 1000.0f;
+
+        for (int y = 0; y < OVERMAP_H; y++) {
+            for (int x = 0; x < OVERMAP_W; x++) {
+                float fx = (float)x / OVERMAP_W * COARSE;
+                float fy = (float)y / OVERMAP_H * COARSE;
+                int x0 = (int)fx, y0 = (int)fy;
+                int x1 = std::min(x0 + 1, COARSE), y1 = std::min(y0 + 1, COARSE);
+                float tx = fx - x0, ty = fy - y0;
+                float top = coarse[y0][x0] * (1 - tx) + coarse[y0][x1] * tx;
+                float bot = coarse[y1][x0] * (1 - tx) + coarse[y1][x1] * tx;
+                out[y][x] = top * (1 - ty) + bot * ty;
+            }
+        }
+
+        static float tmp[OVERMAP_H][OVERMAP_W]; // static: too big (40KB) to be happy on the stack
+        for (int y = 0; y < OVERMAP_H; y++) {
+            for (int x = 0; x < OVERMAP_W; x++) {
+                float sum = 0; int n = 0;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || nx >= OVERMAP_W || ny < 0 || ny >= OVERMAP_H) continue;
+                        sum += out[ny][nx]; n++;
+                    }
+                }
+                tmp[y][x] = sum / n;
+            }
+        }
+        for (int y = 0; y < OVERMAP_H; y++)
+            for (int x = 0; x < OVERMAP_W; x++)
+                out[y][x] = tmp[y][x];
+    }
+
+    void generateHeightfield() {
+        static float h[OVERMAP_H][OVERMAP_W];
+        noiseField(h);
+        for (int y = 0; y < OVERMAP_H; y++)
+            for (int x = 0; x < OVERMAP_W; x++)
+                sectors[y][x].height = h[y][x];
+    }
+
+    // Temperature from latitude (warmest at the vertical center, coldest at
+    // the top/bottom edges, blended with a touch of this cell's own humidity
+    // noise so the band boundary isn't a perfectly straight line) +
+    // independent humidity noise -> the existing 6 BiomeType values via a
+    // simple hot/cold x wet/dry table (docs/world.md step 2). Cursed Lands
+    // stays a rare magical-blight overlay scattered on top afterward — a
+    // corruption, not a climate zone, so it doesn't compete for a
+    // temperature/humidity band of its own.
+    void classifyBiomes() {
+        static float humidity[OVERMAP_H][OVERMAP_W];
+        noiseField(humidity);
+
+        for (int y = 0; y < OVERMAP_H; y++) {
+            for (int x = 0; x < OVERMAP_W; x++) {
+                float latitude = std::abs(y - OVERMAP_H / 2.0f) / (OVERMAP_H / 2.0f); // 0=equator .. 1=pole
+                float temp = std::max(0.0f, std::min(1.0f, (1.0f - latitude) * 0.85f + humidity[y][x] * 0.15f));
+                float hum  = humidity[y][x];
+
+                BiomeType b;
+                if (temp < 0.35f)      b = (hum > 0.45f) ? BiomeType::FOREST : BiomeType::TUNDRA;
+                else if (temp < 0.7f)  b = (hum > 0.6f)  ? BiomeType::FOREST : BiomeType::PLAINS;
+                else                   b = (hum > 0.55f) ? BiomeType::SWAMP  : (hum < 0.3f ? BiomeType::DESERT : BiomeType::PLAINS);
+
+                sectors[y][x].biome = b;
+            }
+        }
+
+        int nBlights = 3 + rand() % 3; // 3-5
+        for (int i = 0; i < nBlights; i++) {
+            int cx = rand() % OVERMAP_W, cy = rand() % OVERMAP_H;
+            int r  = 3 + rand() % 4;
+            for (int dy = -r; dy <= r; dy++)
+                for (int dx = -r; dx <= r; dx++) {
+                    if (dx * dx + dy * dy > r * r) continue;
+                    int nx = cx + dx, ny = cy + dy;
+                    if (nx >= 0 && nx < OVERMAP_W && ny >= 0 && ny < OVERMAP_H)
+                        sectors[ny][nx].biome = BiomeType::CURSED_LANDS;
+                }
+        }
+    }
+
+    // A handful of sources at the highest sectors, each traced downhill by
+    // steepest descent (docs/world.md: "течуть з гір вниз за градієнтом
+    // висоти") until it runs off the map edge, merges into an already-traced
+    // river, or hits a local minimum with nowhere lower to go — that becomes
+    // a lake ("озера — у западинах"). Best-effort: doesn't guarantee every
+    // river reaches the edge or that lakes never form mid-slope; a stalled
+    // trace just stops, same graceful-degradation spirit as the rest of
+    // worldgen (e.g. placeRoleBuilding() giving up after 30 tries).
+    void traceRivers() {
+        std::vector<SDL_Point> peaks;
+        for (int y = 0; y < OVERMAP_H; y++)
+            for (int x = 0; x < OVERMAP_W; x++)
+                if (sectors[y][x].height > 0.82f) peaks.push_back({x, y});
+
+        int nRivers = std::min((int)peaks.size(), 6 + rand() % 5); // 6-10, capped by how many peaks exist
+        for (int i = 0; i < nRivers && !peaks.empty(); i++) {
+            int pick = rand() % (int)peaks.size();
+            int cx = peaks[pick].x, cy = peaks[pick].y;
+            peaks.erase(peaks.begin() + pick);
+
+            for (int step = 0; step < OVERMAP_W + OVERMAP_H; step++) { // path can't outlive this many steps
+                SectorInfo& cur = sectors[cy][cx];
+                if (cur.isWater) break; // merged into an existing river/lake
+
+                int bestDX = 0, bestDY = 0; float bestH = cur.height; bool found = false;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) continue;
+                        int nx = cx + dx, ny = cy + dy;
+                        if (nx < 0 || nx >= OVERMAP_W || ny < 0 || ny >= OVERMAP_H) continue;
+                        if (sectors[ny][nx].height < bestH) {
+                            bestH = sectors[ny][nx].height; bestDX = dx; bestDY = dy; found = true;
+                        }
+                    }
+                }
+
+                if (!found) { cur.isWater = true; cur.flowDX = 0; cur.flowDY = 0; break; }
+
+                cur.isWater = true; cur.flowDX = (int8_t)bestDX; cur.flowDY = (int8_t)bestDY;
+                cx += bestDX; cy += bestDY;
+                if (cx <= 0 || cx >= OVERMAP_W - 1 || cy <= 0 || cy >= OVERMAP_H - 1) {
+                    sectors[cy][cx].isWater = true; // flows off the map edge
+                    break;
+                }
+            }
+        }
+    }
+
+    // docs/world.md step 4: "низини біля води — родючі". Nearest water
+    // sector within a small search radius (Chebyshev distance) combined with
+    // how low-lying this sector itself is.
+    void computeFertility() {
+        const int RADIUS = 6;
+        for (int y = 0; y < OVERMAP_H; y++) {
+            for (int x = 0; x < OVERMAP_W; x++) {
+                SectorInfo& sec = sectors[y][x];
+                if (sec.isWater) { sec.fertility = 0.0f; continue; }
+
+                int bestDist = RADIUS + 1;
+                for (int dy = -RADIUS; dy <= RADIUS; dy++) {
+                    for (int dx = -RADIUS; dx <= RADIUS; dx++) {
+                        int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || nx >= OVERMAP_W || ny < 0 || ny >= OVERMAP_H) continue;
+                        if (!sectors[ny][nx].isWater) continue;
+                        int dist = std::max(std::abs(dx), std::abs(dy));
+                        if (dist < bestDist) bestDist = dist;
+                    }
+                }
+
+                float waterFactor   = (bestDist > RADIUS) ? 0.1f : std::max(0.1f, 1.0f - (float)bestDist / RADIUS);
+                float lowlandFactor = std::max(0.0f, 1.0f - sec.height * 0.9f);
+                sec.fertility = std::max(0.0f, std::min(1.0f, lowlandFactor * waterFactor));
+            }
+        }
+    }
+
+    // Replaces the old random-scatter-in-any-PLAINS-sector placement:
+    // villages now go where the land is actually good ("Село — біля води +
+    // родюча земля", docs/world.md step 2), highest fertility first, same
+    // 5-sector spacing guard as before. Fewer than 15 placed (not enough
+    // sectors clear the fertility/height bar with enough spacing) is an
+    // accepted outcome, not a bug — same tolerance as placeRoleBuilding().
+    void placeVillages() {
+        struct Candidate { int x, y; float score; };
+        std::vector<Candidate> candidates;
+        for (int y = 0; y < OVERMAP_H; y++) {
+            for (int x = 0; x < OVERMAP_W; x++) {
+                const SectorInfo& sec = sectors[y][x];
+                if (sec.isWater) continue;
+                if (sec.height > 0.75f) continue;   // too mountainous to found a village on
+                if (sec.fertility < 0.25f) continue;
+                candidates.push_back({x, y, sec.fertility});
+            }
+        }
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+
+        int placed = 0;
+        for (const Candidate& c : candidates) {
+            if (placed >= 15) break;
+            bool tooClose = false;
+            for (int dy = -5; dy <= 5 && !tooClose; dy++)
+                for (int dx = -5; dx <= 5 && !tooClose; dx++) {
+                    int nx = c.x + dx, ny = c.y + dy;
+                    if (nx >= 0 && nx < OVERMAP_W && ny >= 0 && ny < OVERMAP_H)
+                        if (sectors[ny][nx].hasVillage) tooClose = true;
+                }
+            if (!tooClose) { sectors[c.y][c.x].hasVillage = true; placed++; }
+        }
+    }
 
     void generate() {
         for (int y = 0; y < OVERMAP_H; y++)
             for (int x = 0; x < OVERMAP_W; x++)
-                sectors[y][x] = { BiomeType::PLAINS, false };
+                sectors[y][x] = SectorInfo{};
 
-        struct Spec { BiomeType biome; int count, minR, maxR; };
-        Spec specs[] = {
-            { BiomeType::FOREST,       25,  6, 12 },
-            { BiomeType::SWAMP,        10,  4,  8 },
-            { BiomeType::DESERT,        8,  5, 10 },
-            { BiomeType::TUNDRA,        6,  8, 14 },
-            { BiomeType::CURSED_LANDS,  5,  3,  6 },
-        };
-        for (auto& s : specs) {
-            for (int i = 0; i < s.count; i++) {
-                int cx = rand() % OVERMAP_W;
-                int cy = rand() % OVERMAP_H;
-                int r  = s.minR + rand() % (s.maxR - s.minR + 1);
-                for (int dy = -r; dy <= r; dy++)
-                    for (int dx = -r; dx <= r; dx++) {
-                        if (dx*dx + dy*dy > r*r) continue;
-                        int nx = cx+dx, ny = cy+dy;
-                        if (nx >= 0 && nx < OVERMAP_W && ny >= 0 && ny < OVERMAP_H)
-                            sectors[ny][nx].biome = s.biome;
-                    }
-            }
-        }
-
-        // Scatter ~15 villages in plains sectors, spaced at least 5 sectors apart.
-        int placed = 0, tries = 0;
-        while (placed < 15 && tries < 1000) {
-            tries++;
-            int vx = 3 + rand() % (OVERMAP_W - 6);
-            int vy = 3 + rand() % (OVERMAP_H - 6);
-            if (sectors[vy][vx].biome != BiomeType::PLAINS) continue;
-            bool tooClose = false;
-            for (int dy = -5; dy <= 5 && !tooClose; dy++)
-                for (int dx = -5; dx <= 5 && !tooClose; dx++) {
-                    int nx = vx+dx, ny = vy+dy;
-                    if (nx >= 0 && nx < OVERMAP_W && ny >= 0 && ny < OVERMAP_H)
-                        if (sectors[ny][nx].hasVillage) tooClose = true;
-                }
-            if (!tooClose) { sectors[vy][vx].hasVillage = true; placed++; }
-        }
+        generateHeightfield();
+        classifyBiomes();
+        traceRivers();
+        computeFertility();
+        placeVillages();
     }
 
     // Reveal the 3x3 area around a sector when the player enters it.
@@ -168,6 +350,7 @@ struct Overmap {
         unknownTex  = make("?",  {38,  38,  35, 255});
         playerTex   = make("@",  {255, 255, 180, 255});
         villageTex  = make("#",  {255, 210,  60, 255});
+        waterTex    = make("=",  {110, 170, 230, 255});
     }
 
     void destroyTextures() {
@@ -175,6 +358,7 @@ struct Overmap {
         SDL_DestroyTexture(unknownTex);  unknownTex  = nullptr;
         SDL_DestroyTexture(playerTex);   playerTex   = nullptr;
         SDL_DestroyTexture(villageTex);  villageTex  = nullptr;
+        SDL_DestroyTexture(waterTex);    waterTex    = nullptr;
     }
 
     // ---------------------------------------------------------------- render
@@ -214,6 +398,13 @@ struct Overmap {
                     continue;
                 }
 
+                if (sec.isWater) {
+                    SDL_SetRenderDrawColor(r, 10, 25, 55, 255);
+                    SDL_RenderFillRect(r, &cell);
+                    SDL_RenderCopy(r, waterTex, nullptr, &cell);
+                    continue;
+                }
+
                 int bi = (int)sec.biome;
                 SDL_Color bgc = biomeVisuals[bi].bg;
                 SDL_SetRenderDrawColor(r, bgc.r, bgc.g, bgc.b, 255);
@@ -250,8 +441,11 @@ struct Overmap {
             SDL_RenderFillRect(r, &box);
             SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
-            // Border tinted with biome colour (dimmed)
-            SDL_Color bc = sec.explored ? biomeVisuals[bi2].fg : SDL_Color{55,55,50,255};
+            // Border tinted with biome colour (dimmed) — water sectors get a
+            // blue-ish border instead, to match waterTex's colour.
+            SDL_Color bc = !sec.explored ? SDL_Color{55,55,50,255}
+                         : sec.isWater   ? SDL_Color{110,170,230,255}
+                                         : biomeVisuals[bi2].fg;
             SDL_SetRenderDrawColor(r, bc.r / 2, bc.g / 2, bc.b / 2, 255);
             SDL_RenderDrawRect(r, &box);
 
@@ -273,11 +467,20 @@ struct Overmap {
                 line("Unknown Region",              {85, 85, 80, 255});
                 line("This area has not been explored yet.", {60, 60, 55, 255});
                 line("Enter the region to reveal it.",       {50, 50, 45, 255});
+            } else if (sec.isWater) {
+                bool isLake = (sec.flowDX == 0 && sec.flowDY == 0);
+                line(isLake ? "Lake" : "River", {110, 170, 230, 255});
+                line(isLake ? "Still water pooled in a basin." : "Flowing water, carved down from the highlands.",
+                     {150, 145, 130, 255});
+                std::string hline = "Height: " + std::to_string((int)(sec.height * 100)) + "%";
+                line(hline.c_str(), {110, 110, 100, 255});
             } else {
                 const BiomeVisual& bv = biomeVisuals[bi2];
                 line(bv.name,        bv.fg);
                 line(bv.description, {150, 145, 130, 255});
-                line("Status: Explored", {75, 160, 75, 255});
+                std::string fline = "Height: " + std::to_string((int)(sec.height * 100))
+                                  + "%   Fertility: " + std::to_string((int)(sec.fertility * 100)) + "%";
+                line(fline.c_str(), {110, 110, 100, 255});
             }
         }
 
@@ -288,10 +491,14 @@ struct Overmap {
         SDL_RenderFillRect(r, &titleBar);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
-        // Show camera coords + biome at camera + player coords.
-        int bi = (int)sectors[camY][camX].biome;
+        // Show camera coords + biome (or River/Lake) at camera + player coords.
+        const SectorInfo& camSec = sectors[camY][camX];
+        int bi = (int)camSec.biome;
+        std::string camBiomeName = camSec.isWater
+            ? ((camSec.flowDX == 0 && camSec.flowDY == 0) ? "Lake" : "River")
+            : biomeVisuals[bi].name;
         std::string camInfo = std::string("[") + std::to_string(camX) + "," + std::to_string(camY) + "] "
-                            + biomeVisuals[bi].name;
+                            + camBiomeName;
         std::string playerInfo = std::string("@:[") + std::to_string(playerSX) + ","
                                + std::to_string(playerSY) + "]";
         std::string title = camInfo + "   " + playerInfo + "   |   Arrows/Click/Drag: pan   M: close";
@@ -311,7 +518,7 @@ struct Overmap {
         SDL_RenderFillRect(r, &legBar);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
-        const char* legend = ".: Plains   %: Forest   ~: Swamp   .: Desert   .: Tundra   &: Cursed Lands   ?: Unexplored";
+        const char* legend = ".: Plains   %: Forest   ~: Swamp   .: Desert   .: Tundra   &: Cursed Lands   =: River/Lake   ?: Unexplored";
         SDL_Surface* ls = TTF_RenderUTF8_Solid(f, legend, {75, 75, 70, 255});
         SDL_Texture* lt = SDL_CreateTextureFromSurface(r, ls);
         SDL_FreeSurface(ls);
