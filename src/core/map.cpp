@@ -541,12 +541,24 @@ static void carveRiver(int flowDX, int flowDY) {
     int endX   = (flowDX < 0) ? 10 : (flowDX > 0 ? MAP_WIDTH  - 10 : MAP_WIDTH  / 2 + rand() % 41 - 20);
     int endY   = (flowDY < 0) ? 10 : (flowDY > 0 ? MAP_HEIGHT - 10 : MAP_HEIGHT / 2 + rand() % 41 - 20);
 
-    const int STEPS = 12;
-    for (int i = 0; i <= STEPS; i++) {
-        float t = (float)i / STEPS;
-        int px = startX + (int)((endX - startX) * t) + (rand() % 9 - 4); // jitter for a wandering look
-        int py = startY + (int)((endY - startY) * t) + (rand() % 9 - 4);
-        paintPatch(px, py, 3 + rand() % 3, T_WATER);
+    // Step distance is derived from the path's actual length (not a fixed
+    // step COUNT) so consecutive patches always overlap into one continuous
+    // band regardless of how long this particular sector's river run is —
+    // a fixed 12-step count left wide gaps ("droplets") on longer runs,
+    // since 3-5 tile-radius circles spaced ~12+ tiles apart never touch.
+    const int   PATCH_R  = 4;
+    const float STEP_LEN = 2.5f; // well under PATCH_R*2, guarantees overlap
+    float dx = (float)(endX - startX), dy = (float)(endY - startY);
+    float length = std::sqrt(dx * dx + dy * dy);
+    int steps = std::max(1, (int)(length / STEP_LEN));
+
+    for (int i = 0; i <= steps; i++) {
+        float t = (float)i / steps;
+        // Gentle jitter — small enough relative to PATCH_R that consecutive
+        // circles still overlap even at their most jittered.
+        int px = startX + (int)(dx * t) + (rand() % 3 - 1);
+        int py = startY + (int)(dy * t) + (rand() % 3 - 1);
+        paintPatch(px, py, PATCH_R, T_WATER);
     }
 }
 
