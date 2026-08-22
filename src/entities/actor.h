@@ -246,6 +246,19 @@ struct Body {
              + legL.bleed + legR.bleed;
     }
 
+    // Wounds clot on their own over time if left untreated — each part's
+    // bleed decays independently, floored at 0. Doesn't replace Herbal
+    // Poultice (instant, cures everything at once); this just means
+    // bleeding isn't a permanent condition without one. Call once per tick,
+    // same cadence as tickNeeds()'s hunger/thirst — 0.01/tick means a
+    // severe bleed (2.0) takes roughly 200 in-game minutes (~3.3h) to stop
+    // on its own, light bleed (1.0) about half that.
+    void clot() {
+        constexpr float RATE = 0.01f;
+        auto decay = [](BodyPart& p) { p.bleed = std::max(0.0f, p.bleed - RATE); };
+        decay(head); decay(torso); decay(armL); decay(armR); decay(legL); decay(legR);
+    }
+
     // Movement penalty from leg damage
     float speedMult() const {
         auto pen = [](const BodyPart& leg) -> float {
@@ -478,6 +491,8 @@ struct Actor {
                 sync();
             }
         }
+
+        body.clot(); // outside the canBleed gate — harmless no-op for races that never bleed in the first place
     }
 
     // ---- Turn system ----
