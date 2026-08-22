@@ -62,12 +62,12 @@ inline std::string pickFirstName(const std::vector<Villager>& vs, const std::str
 // above), one word each so it drops cleanly into the space-delimited
 // "VILLAGE secX secY yearsSimulated name" line of the legends export
 // (main.cpp::exportLegends()) without needing quoting.
-inline constexpr const char* VILLAGE_NAME_PREFIXES[] = {
+static const char* VILLAGE_NAME_PREFIXES[] = {
     "Alder","Oak","Thorn","Mill","Fair","Stone","River","Green","Elm","Ash",
     "Raven","Iron","Silver","Hollow","Bram","Fen","Wren","Hazel","Birch","Wolf",
     "Bright","Hart","Reed","Moss","Willow", nullptr
 };
-inline constexpr const char* VILLAGE_NAME_SUFFIXES[] = {
+static const char* VILLAGE_NAME_SUFFIXES[] = {
     "brook","field","haven","hollow","ford","wood","mill","shire","dale",
     "burg","ton","stead","moor","vale","wick","fen","hall","gate","crest","glen", nullptr
 };
