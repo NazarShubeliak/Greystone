@@ -118,8 +118,8 @@ static const TerrainDef terrainDefs[T_COUNT] = {
     ".", {120,120,120,255},  120, false },
   { "Snow",         "A blanket of fresh snow muffles all sound.",
     ".", {220,235,255,255},  130, false },
-  { "Water",        "Deep water. Impassable without swimming, but you can see across it.",
-    "~", { 30, 80,200,255},  0,   false },
+  { "Water",        "Deep water. You can see across it, but crossing means swimming — exhausting, and dangerous if your stamina runs out.",
+    "~", { 30, 80,200,255},  280, false },
   { "Stone floor",  "Flat stone paving worn smooth by foot traffic.",
     ".", {160,150,130,255},  100, false },
 };

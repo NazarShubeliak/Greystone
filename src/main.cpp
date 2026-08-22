@@ -557,6 +557,18 @@ void dropVillagerLoot(Villager& v) {
 // Fast actors (speed > 100) accumulate energy and act multiple times per cycle.
 // Slow actors (speed < 100) act less often вЂ" multiple ticks pass per their action.
 
+// Every tile of water an actor voluntarily walks into costs stamina —
+// swimming, not walking (user request). Generic over Actor (world-symmetry
+// rule) so player/enemy/villager all pay the same cost to cross a river.
+// Drowning itself (0 stamina, still in the water) is handled next tick by
+// Actor::tickNeeds(inWater) — not here, this only spends the entry cost.
+constexpr float SWIM_STAMINA_COST = 8.0f;
+
+void moveActorTo(Actor& a, int nx, int ny) {
+    a.x = nx; a.y = ny;
+    if (map[ny][nx].terrainId == T_WATER) a.spendStamina(SWIM_STAMINA_COST);
+}
+
 void enemyAct(Enemy& enemy) {
     int dx = player.x - enemy.x;
     int dy = player.y - enemy.y;
@@ -569,7 +581,7 @@ void enemyAct(Enemy& enemy) {
         fx = std::max(1, std::min(MAP_WIDTH  - 2, fx));
         fy = std::max(1, std::min(MAP_HEIGHT - 2, fy));
         if (map[fy][fx].walkable() && !isTileOccupied(fx, fy)) {
-            enemy.x = fx; enemy.y = fy;
+            moveActorTo(enemy, fx, fy);
         }
         return;
     }
@@ -602,8 +614,7 @@ void enemyAct(Enemy& enemy) {
             }
         }
     } else if (!isTileOccupied(next.x, next.y)) {
-        enemy.x = next.x;
-        enemy.y = next.y;
+        moveActorTo(enemy, next.x, next.y);
     } else {
         // Planned step is blocked by another enemy — try adjacent tiles that
         // bring us closer to the player so enemies don't pile up and freeze.
@@ -699,7 +710,7 @@ void villagerCombatAct(Villager& v) {
         fy = std::max(1, std::min(MAP_HEIGHT - 2, fy));
         if (map[fy][fx].walkable() && !isTileOccupied(fx, fy) &&
             !(fx == player.x && fy == player.y)) {
-            v.x = fx; v.y = fy;
+            moveActorTo(v, fx, fy);
         }
         return;
     }
@@ -731,8 +742,7 @@ void villagerCombatAct(Villager& v) {
             }
         }
     } else if (!isTileOccupied(next.x, next.y)) {
-        v.x = next.x;
-        v.y = next.y;
+        moveActorTo(v, next.x, next.y);
     }
 }
 
@@ -789,7 +799,7 @@ void tickEnemyNeeds() {
 
     for (Enemy& e : enemies) {
         if (!e.alive) continue;
-        e.tickNeeds();
+        e.tickNeeds(map[e.y][e.x].terrainId == T_WATER);
         if (hourCrossed) {
             if (e.hunger >= 1.0f) e.takeDamage(1, PartTarget::TORSO);
             if (e.thirst >= 1.0f) e.takeDamage(2, PartTarget::TORSO);
@@ -926,7 +936,7 @@ void onPlayerAct(int extraEnergy = 0) {
         tickWorld();
 
     // Needs advance and starvation damage once per player action (not per world tick)
-    player.tickNeeds();
+    player.tickNeeds(map[player.y][player.x].terrainId == T_WATER);
     tickVillagerNeeds();
     tickEnemyNeeds();
     tickFireHazards();
@@ -942,6 +952,14 @@ void onPlayerAct(int extraEnergy = 0) {
         player.sync();
         if (worldTime.minutes % 10 == 0)
             panel.addMessage("You are dehydrated and taking damage!");
+    }
+    // Drowning damage itself is already applied inside player.tickNeeds()
+    // above (Actor::tickNeeds(inWater), same "silent centralized drain,
+    // Actor decides the HP" pattern as bleeding) — this just narrates it,
+    // same throttled-message style as starvation/dehydration above.
+    if (map[player.y][player.x].terrainId == T_WATER && player.stamina <= 0.0f) {
+        if (worldTime.minutes % 10 == 0)
+            panel.addMessage("You're exhausted and start to drown!");
     }
 
     // Interrupt crafting if player was hit this tick
@@ -1867,8 +1885,7 @@ static bool followPath(Villager& v, int tx, int ty) {
         }
 
         if (t.walkable()) {
-            v.x = next.x;
-            v.y = next.y;
+            moveActorTo(v, next.x, next.y);
             v.homePathIdx++;
         } else {
             // Tile became impassable — recompute next tick.
@@ -1922,7 +1939,7 @@ void updateVillagers() {
                 // Open doors the villager wanders into during the day
                 if (map[ny][nx].objectId == O_DOOR_CLOSED)
                     map[ny][nx].objectId = O_DOOR;
-                if (map[ny][nx].walkable()) { v.x = nx; v.y = ny; }
+                if (map[ny][nx].walkable()) moveActorTo(v, nx, ny);
                 break;
             }
             case Villager::State::WALK_HOME:
@@ -2049,7 +2066,7 @@ void tickVillagerNeeds() {
         // must NOT be gated behind hourCrossed, or a villager who takes a bleeding
         // wound and flees instead of dying outright silently vanishes with no
         // corpse/loot the next time this runs before the hour ticks over.
-        v.tickNeeds(); // inherited from Actor — same rate constants as the player
+        v.tickNeeds(map[v.y][v.x].terrainId == T_WATER); // inherited from Actor — same rate constants as the player
 
         if (hourCrossed) {
             if (v.hunger >= 1.0f) v.takeDamage(1, PartTarget::TORSO);
@@ -4172,8 +4189,7 @@ bool updatePlayer() {
         return false;
     }
 
-    player.x = next.x;
-    player.y = next.y;
+    moveActorTo(player, next.x, next.y);
     pathIndex++;
     onPlayerAct();
 
@@ -4849,7 +4865,7 @@ int main(int argc, char* argv[]) {
                 player.energy = 0;
 
                 // Needs advance every game-minute, same rate as normal play.
-                player.tickNeeds();
+                player.tickNeeds(map[player.y][player.x].terrainId == T_WATER);
                 tickVillagerNeeds();
                 tickYearlyEvents();
 

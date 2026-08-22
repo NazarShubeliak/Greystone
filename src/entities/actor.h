@@ -470,13 +470,28 @@ struct Actor {
     }
 
     // ---- Per world-tick updates ----
-    // Call once per tick for all living actors.
-    void tickNeeds() {
+    // Call once per tick for all living actors. inWater: caller (main.cpp,
+    // which has map access this header doesn't) tells us whether this actor
+    // is currently standing on a water tile — swimming (moveActorTo(),
+    // main.cpp) already spent stamina entering it; here that just means no
+    // passive regen while still in the water, and once stamina is fully
+    // spent, drowning starts (torso HP drain, same "torso is the death gate"
+    // pattern as bleed) — gives a window to reach shore rather than an
+    // instant kill the moment the counter hits zero.
+    void tickNeeds(bool inWater = false) {
         const RaceTraits& rt = raceTraits[(int)race];
         if (rt.needsFood)  hunger = std::min(1.0f, hunger + 0.000347f); // ~48h to starve
         if (rt.needsWater) thirst = std::min(1.0f, thirst + 0.000694f); // ~24h to dehydrate
 
-        stamina = std::min(maxStamina, stamina + 3.0f); // regen — nothing spends it yet
+        if (inWater) {
+            if (stamina <= 0.0f) {
+                constexpr int DROWN_DAMAGE = 5;
+                body.torso.hp = std::max(0, body.torso.hp - DROWN_DAMAGE);
+                sync();
+            }
+        } else {
+            stamina = std::min(maxStamina, stamina + 3.0f);
+        }
 
         if (fireShieldTicks > 0) fireShieldTicks--;
         if (skinHardenTicks > 0) skinHardenTicks--;

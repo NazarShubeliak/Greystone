@@ -39,9 +39,11 @@ struct Tile {
     }
 
     // Does this tile block line-of-sight? Separate from impassability
-    // (moveCost==0) — Water is impassable-without-swimming but you can see
-    // straight across it, same as ObjectDef already splits blocksMove from
-    // blocksVision for objects (e.g. a low Rock blocks movement, not sight).
+    // (moveCost==0) — a low Rock blocks movement but not sight (ObjectDef
+    // already splits blocksMove/blocksVision the same way), and conversely
+    // Water is walkable (swimming — high moveCost, not 0) yet was very
+    // nearly opaque too before terrainDefs got its own blocksVision field;
+    // only Bedrock actually blocks sight among terrain types.
     bool blocksVision() const {
         if (terrainDefs[terrainId].blocksVision) return true;
         if (objectId >= 0 && objectDefs[objectId].blocksVision) return true;
