@@ -61,6 +61,10 @@ compile_commands.json
 # worldgen_sim.exe output, when redirected without an extension (e.g. > log)
 /log
 
+# legends export (main.cpp's `legends` cheat command) — generated per-run
+# save-like data, not source; read by legends_viewer.exe
+/legends.txt
+
 # vcpkg
 vcpkg_installed/
 
