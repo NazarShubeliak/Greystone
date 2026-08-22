@@ -518,16 +518,55 @@ static void placeVillage(int secX, int secY) {
     placeLamps(VCX, VCY);
 }
 
+// Deterministic, order-independent hash of two adjacent overmap sector
+// coordinates -> an offset in [lo,hi). Both sectors on either side of a
+// shared boundary call this with the same pair (order doesn't matter — the
+// hash normalizes it), so they agree on exactly where a river/road crosses
+// instead of each independently jittering its own entry/exit point (which
+// is what made the same river/road look crooked or jump sideways right at
+// a sector seam — user report). `salt` keeps rivers and roads from
+// correlating on a sector that happens to have both.
+static int crossingCoord(int sxA, int syA, int sxB, int syB, unsigned salt, int lo, int hi) {
+    int loX = std::min(sxA, sxB), hiX = std::max(sxA, sxB);
+    int loY = std::min(syA, syB), hiY = std::max(syA, syB);
+    unsigned h = (unsigned)loX * 73856093u ^ (unsigned)loY * 19349663u
+               ^ (unsigned)hiX * 83492791u ^ (unsigned)hiY * 51402917u ^ salt;
+    return lo + (int)(h % (unsigned)std::max(1, hi - lo));
+}
+
+// Picks the point on THIS sector's map where a river/road crosses toward
+// neighbour direction (dX,dY) — a unit step; (0,0) means "no crossing here"
+// (a river source/lake, or a road's start/end at a village) and returns the
+// map center instead. For a straight (non-diagonal) neighbour the
+// perpendicular coordinate comes from crossingCoord(), so it matches
+// whatever the neighbour sector computes for the same boundary; a diagonal
+// neighbour's crossing is just the fixed corner near that direction — no
+// hash needed there, both sides compute the identical corner from the
+// direction alone.
+static SDL_Point edgePoint(int seedX, int seedY, int dX, int dY, unsigned salt) {
+    const int EDGE_MARGIN = 3;
+    if (dX == 0 && dY == 0) return SDL_Point{MAP_WIDTH / 2, MAP_HEIGHT / 2};
+    int px, py;
+    if (dX != 0) px = (dX > 0) ? MAP_WIDTH - EDGE_MARGIN : EDGE_MARGIN;
+    else         px = crossingCoord(seedX, seedY, seedX + dX, seedY + dY, salt, EDGE_MARGIN, MAP_WIDTH - EDGE_MARGIN);
+    if (dY != 0) py = (dY > 0) ? MAP_HEIGHT - EDGE_MARGIN : EDGE_MARGIN;
+    else         py = crossingCoord(seedX, seedY, seedX + dX, seedY + dY, salt, EDGE_MARGIN, MAP_HEIGHT - EDGE_MARGIN);
+    return SDL_Point{px, py};
+}
+
+static constexpr unsigned RIVER_EDGE_SALT = 0x9E3779B9u;
+static constexpr unsigned ROAD_EDGE_SALT  = 0x517CC1B7u;
+
 // Physically carves a river/lake through this sector — called only when this
 // sector was traced as isWater in Overmap::traceRivers() (overmap.h). A lake
 // terminus (flowDX==0 && flowDY==0) is a big irregular pond near the center;
-// a flowing river wanders from the edge opposite the outgoing flow direction
-// (upstream side) toward the edge in that direction (downstream side), via
-// a handful of overlapping paintPatch() calls along a jittered path.
-// Approximate, not a pixel-perfect join with the neighbouring sector's own
-// carve — same "best-effort" scope as the rest of worldgen (e.g.
-// placeRoleBuilding() giving up after 30 tries).
-static void carveRiver(int flowDX, int flowDY) {
+// a flowing river wanders from its entry point (edgePoint() on the upstream
+// side, fromDX/fromDY) to its exit point (edgePoint() on the downstream
+// side, flowDX/flowDY) via a handful of overlapping paintPatch() calls along
+// a jittered path — both endpoints hashed against the actual neighbour
+// sector's coordinates (edgePoint()/crossingCoord()), so this sector's exit
+// lines up with the next one's entry instead of each guessing independently.
+static void carveRiver(int seedX, int seedY, int flowDX, int flowDY, int fromDX, int fromDY) {
     if (flowDX == 0 && flowDY == 0) {
         int cx = MAP_WIDTH / 2 + (rand() % 21 - 10);
         int cy = MAP_HEIGHT / 2 + (rand() % 21 - 10);
@@ -536,16 +575,8 @@ static void carveRiver(int flowDX, int flowDY) {
         return;
     }
 
-    // Margin from the true edge (x/y == 0 or MAP_WIDTH/HEIGHT-1) is small —
-    // just enough for paintPatch()'s inBounds() (x>0, x<MAP_WIDTH-1) to still
-    // paint most of a PATCH_R-radius circle there. A bigger margin (used
-    // before) left the river visibly stopping well short of the sector's
-    // actual edge instead of flowing off it.
-    const int EDGE_MARGIN = 3;
-    int startX = (flowDX < 0) ? MAP_WIDTH - EDGE_MARGIN : (flowDX > 0 ? EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
-    int startY = (flowDY < 0) ? MAP_HEIGHT - EDGE_MARGIN : (flowDY > 0 ? EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
-    int endX   = (flowDX < 0) ? EDGE_MARGIN : (flowDX > 0 ? MAP_WIDTH  - EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
-    int endY   = (flowDY < 0) ? EDGE_MARGIN : (flowDY > 0 ? MAP_HEIGHT - EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
+    SDL_Point startP = edgePoint(seedX, seedY, fromDX, fromDY, RIVER_EDGE_SALT);
+    SDL_Point endP   = edgePoint(seedX, seedY, flowDX, flowDY, RIVER_EDGE_SALT);
 
     // Step distance is derived from the path's actual length (not a fixed
     // step COUNT) so consecutive patches always overlap into one continuous
@@ -554,7 +585,7 @@ static void carveRiver(int flowDX, int flowDY) {
     // since 3-5 tile-radius circles spaced ~12+ tiles apart never touch.
     const int   PATCH_R  = 4;
     const float STEP_LEN = 2.5f; // well under PATCH_R*2, guarantees overlap
-    float dx = (float)(endX - startX), dy = (float)(endY - startY);
+    float dx = (float)(endP.x - startP.x), dy = (float)(endP.y - startP.y);
     float length = std::sqrt(dx * dx + dy * dy);
     int steps = std::max(1, (int)(length / STEP_LEN));
 
@@ -562,26 +593,25 @@ static void carveRiver(int flowDX, int flowDY) {
         float t = (float)i / steps;
         // Gentle jitter — small enough relative to PATCH_R that consecutive
         // circles still overlap even at their most jittered.
-        int px = startX + (int)(dx * t) + (rand() % 3 - 1);
-        int py = startY + (int)(dy * t) + (rand() % 3 - 1);
+        int px = startP.x + (int)(dx * t) + (rand() % 3 - 1);
+        int py = startP.y + (int)(dy * t) + (rand() % 3 - 1);
         paintPatch(px, py, PATCH_R, T_WATER);
     }
 }
 
 // Physically carves a road through this sector (Overmap::buildRoads()) —
-// same "step distance from path length" band approach as carveRiver(), but
-// narrower (roads aren't rivers) and paints ground cover (G_ROAD) instead of
-// swapping terrain, so grass/sand/etc. underneath stays visually varied.
-// Clears wilderness objects in its way (trees, rocks, ...) via
-// isClearableWildObject() below — a road cutting through a forest should
-// actually look cleared, not just painted under the trees (user report) —
-// but never touches anything built or farmed (wall, the indestructible
-// well, crops...), same tolerance pathToPlaza() already has for the
-// in-village dirt paths: route around it, don't bulldoze it. A village
-// sector's road aims at the map center (same anchor placeVillage()/
-// villageWellX/Y already use) instead of the far edge, so it visibly leads
-// to the plaza; roadDX/roadDY there is the direction the road arrived FROM,
-// used to pick which edge to start from.
+// same shared-boundary-hashed entry/exit approach as carveRiver() above
+// (edgePoint()), just narrower (roads aren't rivers) and painting ground
+// cover (G_ROAD) instead of swapping terrain, so grass/sand/etc. underneath
+// stays visually varied. Clears wilderness objects in its way (trees,
+// rocks, ...) via isClearableWildObject() below — a road cutting through a
+// forest should actually look cleared, not just painted under the trees
+// (user report) — but never touches anything built or farmed (wall, the
+// indestructible well, crops...), same tolerance pathToPlaza() already has
+// for the in-village dirt paths: route around it, don't bulldoze it. A
+// village sector's road aims at the map center (same anchor
+// placeVillage()/villageWellX/Y already use) instead of the far edge, so it
+// visibly leads to the plaza.
 //
 // Wilderness objects spawnObject() can actually place (trees, bushes, rocks,
 // boulders, fallen logs, wild herbs/mushrooms) — carveRoad() clears these so
@@ -598,31 +628,21 @@ static bool isClearableWildObject(int objectId) {
     }
 }
 
-static void carveRoad(bool isVillage, int roadDX, int roadDY) {
-    const int EDGE_MARGIN = 3;
-    int startX, startY, endX, endY;
-    if (isVillage) {
-        startX = (roadDX > 0) ? EDGE_MARGIN : (roadDX < 0 ? MAP_WIDTH  - EDGE_MARGIN : MAP_WIDTH  / 2);
-        startY = (roadDY > 0) ? EDGE_MARGIN : (roadDY < 0 ? MAP_HEIGHT - EDGE_MARGIN : MAP_HEIGHT / 2);
-        endX   = MAP_WIDTH  / 2;
-        endY   = MAP_HEIGHT / 2;
-    } else {
-        startX = (roadDX < 0) ? MAP_WIDTH - EDGE_MARGIN : (roadDX > 0 ? EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
-        startY = (roadDY < 0) ? MAP_HEIGHT - EDGE_MARGIN : (roadDY > 0 ? EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
-        endX   = (roadDX < 0) ? EDGE_MARGIN : (roadDX > 0 ? MAP_WIDTH  - EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
-        endY   = (roadDY < 0) ? EDGE_MARGIN : (roadDY > 0 ? MAP_HEIGHT - EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
-    }
+static void carveRoad(int seedX, int seedY, bool isVillage, int toDX, int toDY, int fromDX, int fromDY) {
+    SDL_Point startP = edgePoint(seedX, seedY, fromDX, fromDY, ROAD_EDGE_SALT);
+    SDL_Point endP   = isVillage ? SDL_Point{MAP_WIDTH / 2, MAP_HEIGHT / 2}
+                                  : edgePoint(seedX, seedY, toDX, toDY, ROAD_EDGE_SALT);
 
     const int   PATCH_R  = 2;
     const float STEP_LEN = 1.5f;
-    float dx = (float)(endX - startX), dy = (float)(endY - startY);
+    float dx = (float)(endP.x - startP.x), dy = (float)(endP.y - startP.y);
     float length = std::sqrt(dx * dx + dy * dy);
     int steps = std::max(1, (int)(length / STEP_LEN));
 
     for (int i = 0; i <= steps; i++) {
         float t = (float)i / steps;
-        int cx = startX + (int)(dx * t) + (rand() % 3 - 1);
-        int cy = startY + (int)(dy * t) + (rand() % 3 - 1);
+        int cx = startP.x + (int)(dx * t) + (rand() % 3 - 1);
+        int cy = startP.y + (int)(dy * t) + (rand() % 3 - 1);
         for (int py = cy - PATCH_R; py <= cy + PATCH_R; py++) {
             for (int px = cx - PATCH_R; px <= cx + PATCH_R; px++) {
                 if ((px - cx) * (px - cx) + (py - cy) * (py - cy) > PATCH_R * PATCH_R) continue;
@@ -643,8 +663,8 @@ static void carveRoad(bool isVillage, int roadDX, int roadDY) {
 // ---------------------------------------------------------------- sector generation
 
 void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage,
-                     bool hasRiver, int flowDX, int flowDY,
-                     bool hasRoad, int roadDX, int roadDY) {
+                     bool hasRiver, int flowDX, int flowDY, int riverFromDX, int riverFromDY,
+                     bool hasRoad, int roadDX, int roadDY, int roadFromDX, int roadFromDY) {
     // Deterministic seed from sector coords so revisiting gives same layout.
     unsigned int seed = (seedX >= 0)
         ? (unsigned int)(seedX * 73856093u ^ seedY * 19349663u)
@@ -719,7 +739,7 @@ void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage,
     }
 
     // River/lake carved from the overmap's hydrology (Overmap::traceRivers()).
-    if (hasRiver) carveRiver(flowDX, flowDY);
+    if (hasRiver) carveRiver(seedX, seedY, flowDX, flowDY, riverFromDX, riverFromDY);
 
     // Add occasional water patches for variety
     if (biome == BiomeType::SWAMP || biome == BiomeType::CURSED_LANDS) {
@@ -744,7 +764,7 @@ void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage,
 
     // Road carved last, after village buildings — so it can be routed
     // around whatever's already there instead of the other way around.
-    if (hasRoad) carveRoad(isVillage, roadDX, roadDY);
+    if (hasRoad) carveRoad(seedX, seedY, isVillage, roadDX, roadDY, roadFromDX, roadFromDY);
 }
 
 // ---------------------------------------------------------------- visibility

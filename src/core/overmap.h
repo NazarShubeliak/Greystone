@@ -26,9 +26,11 @@ struct SectorInfo {
     float     height     = 0.5f;  // 0=lowest .. 1=highest — drives rivers/fertility/village siting
     bool      isWater     = false; // river or lake cell
     int8_t    flowDX = 0, flowDY = 0; // isWater only: direction toward the next downstream sector (0,0 = lake/edge terminus)
+    int8_t    riverFromDX = 0, riverFromDY = 0; // isWater only: direction back toward the upstream sector (0,0 = source, no entry edge)
     float     fertility   = 0.0f;  // 0..1, from height + distance to water — drives village siting
     bool      hasRoad = false;
-    int8_t    roadDX = 0, roadDY = 0; // hasRoad only: direction toward the next sector along the road (docs/world.md "Шар 2: Розселення" — roads via A*)
+    int8_t    roadDX = 0, roadDY = 0; // hasRoad only: direction toward the next sector along the road (0,0 = terminus/village here)
+    int8_t    roadFromDX = 0, roadFromDY = 0; // hasRoad only: direction back toward the previous sector (0,0 = start of this road edge)
 };
 
 struct BiomeVisual {
@@ -202,6 +204,15 @@ struct Overmap {
 
                 cur.isWater = true; cur.flowDX = (int8_t)bestDX; cur.flowDY = (int8_t)bestDY;
                 cx += bestDX; cy += bestDY;
+                // The sector we just stepped into knows it was entered from
+                // the opposite direction — carveRiver() (map.cpp) uses this
+                // plus flowDX/DY, hashed together with the actual neighbour
+                // sector's own coordinates, so both sides of a boundary
+                // agree on exactly where the river crosses it instead of
+                // each picking an independent point (used to make the same
+                // river look crooked/discontinuous right at the seam).
+                sectors[cy][cx].riverFromDX = (int8_t)(-bestDX);
+                sectors[cy][cx].riverFromDY = (int8_t)(-bestDY);
                 if (cx <= 0 || cx >= OVERMAP_W - 1 || cy <= 0 || cy >= OVERMAP_H - 1) {
                     sectors[cy][cx].isWater = true; // flows off the map edge
                     break;
@@ -381,15 +392,25 @@ struct Overmap {
             if (parent[u] >= 0) {
                 std::vector<SDL_Point> path = findOvermapPath(
                     villages[parent[u]].x, villages[parent[u]].y, villages[u].x, villages[u].y);
+                // roadDX/DY = direction to the next step (0,0 = terminus —
+                // this village is the end of this edge); roadFromDX/DY =
+                // direction back to the previous step (0,0 = start of this
+                // edge — left alone, not overwritten, so a village that's
+                // already the *destination* of an earlier-processed edge
+                // keeps that arrival direction instead of losing it here).
+                // carveRoad() (map.cpp) hashes both directions together
+                // with the actual neighbour sector's coordinates so every
+                // crossing matches on both sides of the boundary.
                 for (size_t i = 0; i < path.size(); i++) {
                     SectorInfo& s = sectors[path[i].y][path[i].x];
                     s.hasRoad = true;
                     if (i + 1 < path.size()) {
                         s.roadDX = (int8_t)(path[i + 1].x - path[i].x);
                         s.roadDY = (int8_t)(path[i + 1].y - path[i].y);
-                    } else if (i > 0) {
-                        s.roadDX = (int8_t)(path[i].x - path[i - 1].x);
-                        s.roadDY = (int8_t)(path[i].y - path[i - 1].y);
+                    }
+                    if (i > 0) {
+                        s.roadFromDX = (int8_t)(path[i - 1].x - path[i].x);
+                        s.roadFromDY = (int8_t)(path[i - 1].y - path[i].y);
                     }
                 }
             }

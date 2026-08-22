@@ -2117,9 +2117,13 @@ void checkSectorTransition() {
                    overmap.sectors[playerSectorY][playerSectorX].isWater,
                    overmap.sectors[playerSectorY][playerSectorX].flowDX,
                    overmap.sectors[playerSectorY][playerSectorX].flowDY,
+                   overmap.sectors[playerSectorY][playerSectorX].riverFromDX,
+                   overmap.sectors[playerSectorY][playerSectorX].riverFromDY,
                    overmap.sectors[playerSectorY][playerSectorX].hasRoad,
                    overmap.sectors[playerSectorY][playerSectorX].roadDX,
-                   overmap.sectors[playerSectorY][playerSectorX].roadDY);
+                   overmap.sectors[playerSectorY][playerSectorX].roadDY,
+                   overmap.sectors[playerSectorY][playerSectorX].roadFromDX,
+                   overmap.sectors[playerSectorY][playerSectorX].roadFromDY);
     overmap.reveal(playerSectorX, playerSectorY);
 
     // Enemies/villagers don't persist across sectors yet (no save system) — they
@@ -2327,9 +2331,13 @@ void doTeleport(int newSX, int newSY) {
                    overmap.sectors[playerSectorY][playerSectorX].isWater,
                    overmap.sectors[playerSectorY][playerSectorX].flowDX,
                    overmap.sectors[playerSectorY][playerSectorX].flowDY,
+                   overmap.sectors[playerSectorY][playerSectorX].riverFromDX,
+                   overmap.sectors[playerSectorY][playerSectorX].riverFromDY,
                    overmap.sectors[playerSectorY][playerSectorX].hasRoad,
                    overmap.sectors[playerSectorY][playerSectorX].roadDX,
-                   overmap.sectors[playerSectorY][playerSectorX].roadDY);
+                   overmap.sectors[playerSectorY][playerSectorX].roadDY,
+                   overmap.sectors[playerSectorY][playerSectorX].roadFromDX,
+                   overmap.sectors[playerSectorY][playerSectorX].roadFromDY);
     overmap.reveal(playerSectorX, playerSectorY);
     // Corpses/groundItems persist across sectors (tagged + filtered by sector);
     // only enemies/villagers respawn fresh, same as checkSectorTransition().
@@ -4615,9 +4623,13 @@ int main(int argc, char* argv[]) {
                    overmap.sectors[playerSectorY][playerSectorX].isWater,
                    overmap.sectors[playerSectorY][playerSectorX].flowDX,
                    overmap.sectors[playerSectorY][playerSectorX].flowDY,
+                   overmap.sectors[playerSectorY][playerSectorX].riverFromDX,
+                   overmap.sectors[playerSectorY][playerSectorX].riverFromDY,
                    overmap.sectors[playerSectorY][playerSectorX].hasRoad,
                    overmap.sectors[playerSectorY][playerSectorX].roadDX,
-                   overmap.sectors[playerSectorY][playerSectorX].roadDY);
+                   overmap.sectors[playerSectorY][playerSectorX].roadDY,
+                   overmap.sectors[playerSectorY][playerSectorX].roadFromDX,
+                   overmap.sectors[playerSectorY][playerSectorX].roadFromDY);
     initEnemy();
     spawnVillagers(overmap.sectors[playerSectorY][playerSectorX].hasVillage);
 
