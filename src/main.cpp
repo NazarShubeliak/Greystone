@@ -1387,11 +1387,14 @@ void simulateVillageYear(std::vector<Villager>& vs) {
 // second, same engine worldgen_sim.exe already runs interactively.
 void generateAllVillageHistories() {
     int villageSurnameSeed = 0;
+    std::vector<std::string> usedVillageNames;
     for (int sy = 0; sy < OVERMAP_H; sy++) {
         for (int sx = 0; sx < OVERMAP_W; sx++) {
             if (!overmap.sectors[sy][sx].hasVillage) continue;
             srand((unsigned int)(sx * 73856093u ^ sy * 19349663u ^ 0x9E3779B9u));
-            villageHistoryStore[{sx, sy}] = VillageHistory::simulateVillageHistory(villageSurnameSeed);
+            VillageHistory::VillageHistoryRecord rec = VillageHistory::simulateVillageHistory(villageSurnameSeed);
+            rec.name = VillageHistory::generateVillageName(usedVillageNames);
+            villageHistoryStore[{sx, sy}] = std::move(rec);
             villageSurnameSeed += 5;
         }
     }
@@ -1415,7 +1418,8 @@ void exportLegends(const std::string& filename) {
 
     for (auto& kv : villageHistoryStore) {
         const VillageHistory::VillageHistoryRecord& rec = kv.second;
-        f << "VILLAGE " << kv.first.first << " " << kv.first.second << " " << rec.yearsSimulated << "\n";
+        f << "VILLAGE " << kv.first.first << " " << kv.first.second << " " << rec.yearsSimulated
+          << " " << rec.name << "\n";
 
         f << "CHRONICLE " << rec.log.size() << "\n";
         for (const VillageHistory::LegendEvent& e : rec.log)

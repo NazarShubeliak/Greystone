@@ -46,6 +46,7 @@ struct Household {
 };
 
 struct VillageRecord {
+    std::string                     name;
     int                             secX = 0, secY = 0, yearsSimulated = 0;
     std::vector<LegendEventEntry>   chronicle;
     std::vector<Household>          households;
@@ -89,7 +90,9 @@ static std::vector<VillageRecord> loadLegends(const std::string& filename) {
 
     for (int i = 0; i < nVillages && std::getline(f, line); i++) {
         VillageRecord v;
-        std::sscanf(line.c_str(), "VILLAGE %d %d %d", &v.secX, &v.secY, &v.yearsSimulated);
+        char nameBuf[128] = {0};
+        std::sscanf(line.c_str(), "VILLAGE %d %d %d %127s", &v.secX, &v.secY, &v.yearsSimulated, nameBuf);
+        v.name = nameBuf;
 
         std::getline(f, line);
         int nEvents = 0;
@@ -147,15 +150,15 @@ static void printVillageList(const std::vector<VillageRecord>& villages, const s
         int living = 0, total = 0;
         for (const Household& h : v.households)
             for (const RosterMember& m : h.members) { total++; if (m.alive) living++; }
-        std::cout << "  " << (i + 1) << ". Village (" << v.secX << "," << v.secY << ") -- "
+        std::cout << "  " << (i + 1) << ". " << v.name << " (" << v.secX << "," << v.secY << ") -- "
                    << v.yearsSimulated << " yrs, " << v.chronicle.size() << " events, "
                    << living << "/" << total << " living\n";
     }
-    std::cout << "\n  s. Search by name\n  q. Quit\n\n> ";
+    std::cout << "\n  Type a number or a village name.\n  s. Search person by name\n  q. Quit\n\n> ";
 }
 
 static void printVillageDetail(const VillageRecord& v) {
-    std::cout << "\n=== Village (" << v.secX << "," << v.secY << ") -- "
+    std::cout << "\n=== " << v.name << " (" << v.secX << "," << v.secY << ") -- "
                << v.yearsSimulated << " years of history ===\n\n";
 
     std::cout << "--- Chronicle (" << v.chronicle.size() << " events) ---\n";
@@ -190,7 +193,7 @@ static void searchByName(const std::vector<VillageRecord>& villages) {
             for (const RosterMember& m : h.members) {
                 if (toLower(m.name).find(qLower) == std::string::npos) continue;
                 found = true;
-                std::cout << "  " << m.name << " -- Village (" << v.secX << "," << v.secY << "), "
+                std::cout << "  " << m.name << " -- " << v.name << " (" << v.secX << "," << v.secY << "), "
                           << (m.alive ? "alive, age " + std::to_string(m.age) : "deceased");
                 if (!m.occupation.empty()) std::cout << ", " << m.occupation;
                 std::cout << "\n";
@@ -218,8 +221,28 @@ int main(int argc, char** argv) {
         if (choice == "s" || choice == "S") { searchByName(villages); continue; }
 
         int idx = std::atoi(choice.c_str());
-        if (idx >= 1 && idx <= (int)villages.size())
+        if (idx >= 1 && idx <= (int)villages.size()) {
             printVillageDetail(villages[idx - 1]);
+            continue;
+        }
+
+        // Not a number (or out of range) — try matching by village name
+        // instead, so you can just type e.g. "alderbrook" at the prompt.
+        std::string qLower = toLower(choice);
+        std::vector<int> matches;
+        for (size_t i = 0; i < villages.size(); i++)
+            if (toLower(villages[i].name).find(qLower) != std::string::npos) matches.push_back((int)i);
+
+        if (matches.size() == 1) {
+            printVillageDetail(villages[matches[0]]);
+        } else if (matches.size() > 1) {
+            std::cout << "\nMultiple villages match '" << choice << "':\n";
+            for (int mi : matches) std::cout << "  " << (mi + 1) << ". " << villages[mi].name << "\n";
+            waitForEnter();
+        } else if (!choice.empty()) {
+            std::cout << "\nNo village matches '" << choice << "'.\n";
+            waitForEnter();
+        }
     }
 
     return 0;

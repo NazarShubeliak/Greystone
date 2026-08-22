@@ -57,6 +57,39 @@ inline std::string pickFirstName(const std::vector<Villager>& vs, const std::str
     return candidate;
 }
 
+// Village names — prefix+suffix fantasy-town-generator pairs (matches the
+// rest of the game's English naming, e.g. NPC_FIRST_NAMES/NPC_SURNAMES
+// above), one word each so it drops cleanly into the space-delimited
+// "VILLAGE secX secY yearsSimulated name" line of the legends export
+// (main.cpp::exportLegends()) without needing quoting.
+inline constexpr const char* VILLAGE_NAME_PREFIXES[] = {
+    "Alder","Oak","Thorn","Mill","Fair","Stone","River","Green","Elm","Ash",
+    "Raven","Iron","Silver","Hollow","Bram","Fen","Wren","Hazel","Birch","Wolf",
+    "Bright","Hart","Reed","Moss","Willow", nullptr
+};
+inline constexpr const char* VILLAGE_NAME_SUFFIXES[] = {
+    "brook","field","haven","hollow","ford","wood","mill","shire","dale",
+    "burg","ton","stead","moor","vale","wick","fen","hall","gate","crest","glen", nullptr
+};
+
+// Same collision-avoidance shape as pickFirstName() above — best-effort, not
+// a hard guarantee, since ~500 combinations is plenty for ~15 villages but
+// not infinite.
+inline std::string generateVillageName(std::vector<std::string>& usedNames) {
+    int nPre = countStrings(VILLAGE_NAME_PREFIXES);
+    int nSuf = countStrings(VILLAGE_NAME_SUFFIXES);
+    std::string candidate;
+    for (int tries = 0; tries < 30; tries++) {
+        candidate = std::string(VILLAGE_NAME_PREFIXES[rand() % nPre]) + VILLAGE_NAME_SUFFIXES[rand() % nSuf];
+        bool taken = false;
+        for (const std::string& n : usedNames)
+            if (n == candidate) { taken = true; break; }
+        if (!taken) break;
+    }
+    usedNames.push_back(candidate);
+    return candidate;
+}
+
 // No bag/goods here, unlike main.cpp's giveOccupation() — a demography-only
 // history log doesn't care what a villager carries.
 inline void giveOccupation(Villager& v, Occupation occ) { v.occupation = occ; }
@@ -410,6 +443,7 @@ inline void advanceHousehold(HouseholdHistory& h, int year, std::vector<LegendEv
 // "Legends-лог подій") — read by the `legends` cheat-console export
 // (main.cpp) for the standalone legends_viewer.exe tool.
 struct VillageHistoryRecord {
+    std::string name; // set right after construction by generateAllVillageHistories() (main.cpp)
     std::vector<HouseholdHistory> farmHouseholds;
     std::vector<HouseholdHistory> tradeHouseholds;
     int yearsSimulated = 0;
