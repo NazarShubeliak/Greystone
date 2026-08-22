@@ -41,6 +41,7 @@
 #include <ctime>
 #include <algorithm>
 #include <utility>
+#include <fstream>
 
 SDL_Color white = {255, 255, 255, 255};
 SDL_Color red   = {255,   0,   0, 255};
@@ -1003,6 +1004,7 @@ void toggleMenuTab(MenuTab t);
 void doTeleport(int newSX, int newSY);
 void interactWithObject(int tx, int ty);
 void generateAllVillageHistories();
+void exportLegends(const std::string& filename);
 void spawnVillagers(bool isVillage);
 void updateVillagers();
 void tickVillagerNeeds();
@@ -1395,10 +1397,51 @@ void generateAllVillageHistories() {
     }
 }
 
+// Writes every cached village's chronicle + roster to a plain pipe-delimited
+// text file (docs/world.md "Legends-лог подій") — read by the standalone
+// legends_viewer.exe (src/tools/legends_viewer.cpp). Triggered by the
+// `legends` cheat-console command (cheat_console.h). `|` is a safe field
+// delimiter: names/event text are built from fixed word pools and templates
+// that never contain it.
+void exportLegends(const std::string& filename) {
+    std::ofstream f(filename);
+    if (!f) {
+        panel.addMessage("Could not open " + filename + " for writing.");
+        return;
+    }
+
+    f << "GREYSTONE LEGENDS EXPORT 1\n";
+    f << "VILLAGES " << villageHistoryStore.size() << "\n";
+
+    for (auto& kv : villageHistoryStore) {
+        const VillageHistory::VillageHistoryRecord& rec = kv.second;
+        f << "VILLAGE " << kv.first.first << " " << kv.first.second << " " << rec.yearsSimulated << "\n";
+
+        f << "CHRONICLE " << rec.log.size() << "\n";
+        for (const VillageHistory::LegendEvent& e : rec.log)
+            f << e.year << "|" << e.text << "\n";
+
+        auto writeHousehold = [&](const VillageHistory::HouseholdHistory& h) {
+            f << "HOUSEHOLD " << (h.isFarmHousehold ? 1 : 0) << " " << h.hist.size() << "\n";
+            for (const Villager& v : h.hist)
+                f << v.name << "|" << v.age << "|" << (v.alive ? 1 : 0) << "|"
+                  << occupationName(v.occupation) << "|" << (v.isChild ? 1 : 0) << "\n";
+            f << "ENDHOUSEHOLD\n";
+        };
+        f << "ROSTER " << (rec.farmHouseholds.size() + rec.tradeHouseholds.size()) << "\n";
+        for (const auto& h : rec.farmHouseholds)  writeHousehold(h);
+        for (const auto& h : rec.tradeHouseholds) writeHousehold(h);
+
+        f << "ENDVILLAGE\n";
+    }
+
+    panel.addMessage("Exported " + std::to_string(villageHistoryStore.size()) + " village(s) to " + filename + ".");
+}
+
 void spawnVillagers(bool isVillage) {
     villagers.clear();
     // graves are NOT cleared here — sector-tagged (like Corpse/GroundItem) and
-    // placed at most once per village (VillageHistoryRecord::gravesPlaced
+    // placed at most once per death (HouseholdHistory::gravesPlacedThroughYear
     // below), so they persist correctly across repeated visits to this sector
     // and every other sector's graves are untouched regardless.
     villageWellX = villageWellY = -1;
@@ -4723,6 +4766,12 @@ int main(int argc, char* argv[]) {
             worldTime.minutes += console.pendingSkipYears * WorldTime::MINUTES_PER_YEAR;
             console.pendingSkipYears = 0;
             tickYearlyEvents(); // apply immediately, don't wait for the player's next action
+        }
+
+        if (console.pendingExportLegends) {
+            exportLegends(console.pendingLegendsFilename);
+            console.pendingExportLegends = false;
+            console.pendingLegendsFilename.clear();
         }
 
         if (!console.pendingUnlockTech.empty()) {

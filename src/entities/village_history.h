@@ -13,6 +13,7 @@
 // will; anything here operates purely on Villager records.
 
 #include "npc.h"
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -338,7 +339,8 @@ struct HouseholdHistory {
     int gravesPlacedThroughYear = 0;
 };
 
-inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFarmHousehold, int historyYears) {
+inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFarmHousehold, int historyYears,
+                                           std::vector<LegendEvent>& log) {
     HouseholdHistory h;
     h.isFarmHousehold = isFarmHousehold;
     h.surname         = surname;
@@ -361,7 +363,6 @@ inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFar
     if (!isFarmHousehold && (rand() % 100) < 20)
         giveOccupation(h.hist[1], Occupation::SEAMSTRESS);
 
-    std::vector<LegendEvent> log; // discarded — nothing reads it back yet, same as main.cpp's use today
     h.diedAtYear.assign(h.hist.size(), -1);
     for (int year = 1; year <= historyYears; year++) {
         size_t before = h.hist.size();
@@ -383,8 +384,7 @@ inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFar
 // single `year` number handed in by the caller instead of an internal 1..N
 // loop — used to keep ticking a village that already has a founding history
 // but isn't the one currently loaded on the map.
-inline void advanceHousehold(HouseholdHistory& h, int year) {
-    std::vector<LegendEvent> log; // discarded, same as simulateHousehold()
+inline void advanceHousehold(HouseholdHistory& h, int year, std::vector<LegendEvent>& log) {
     size_t before = h.hist.size();
     std::vector<bool> wasAlive(before);
     for (size_t k = 0; k < before; k++) wasAlive[k] = h.hist[k].alive;
@@ -405,11 +405,15 @@ inline void advanceHousehold(HouseholdHistory& h, int year) {
 // simulateVillageHistory()'s historyYears, +1 per advanceVillageOneYear()
 // call) — it's the "year" argument fed to advanceHousehold() and also what
 // a grave's diedYearsAgo is computed relative to, since pre-history and
-// later distant-tick years share one continuous numbering.
+// later distant-tick years share one continuous numbering. `log` is the
+// merged, year-sorted chronicle across all 5 households (docs/world.md
+// "Legends-лог подій") — read by the `legends` cheat-console export
+// (main.cpp) for the standalone legends_viewer.exe tool.
 struct VillageHistoryRecord {
     std::vector<HouseholdHistory> farmHouseholds;
     std::vector<HouseholdHistory> tradeHouseholds;
     int yearsSimulated = 0;
+    std::vector<LegendEvent> log;
 };
 
 inline VillageHistoryRecord simulateVillageHistory(int villageSurnameSeed, int historyYears = 60) {
@@ -417,23 +421,32 @@ inline VillageHistoryRecord simulateVillageHistory(int villageSurnameSeed, int h
     int nSurnames = countStrings(NPC_SURNAMES);
     auto surnameFor = [&](int slot) { return std::string(NPC_SURNAMES[(villageSurnameSeed + slot) % nSurnames]); };
 
-    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(0), true,  historyYears));
-    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(1), true,  historyYears));
-    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(2), false, historyYears)); // Smith
-    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(3), false, historyYears)); // Elder
-    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(4), false, historyYears)); // Woodcutter
+    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(0), true,  historyYears, rec.log));
+    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(1), true,  historyYears, rec.log));
+    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(2), false, historyYears, rec.log)); // Smith
+    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(3), false, historyYears, rec.log)); // Elder
+    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(4), false, historyYears, rec.log)); // Woodcutter
     rec.yearsSimulated = historyYears;
+
+    // Each of the 5 calls above ran its own full 1..historyYears loop one
+    // after another, so rec.log is 5 chronologically-sorted runs concatenated
+    // back-to-back rather than one — sort once here so the merged chronicle
+    // reads in actual year order.
+    std::stable_sort(rec.log.begin(), rec.log.end(),
+                      [](const LegendEvent& a, const LegendEvent& b) { return a.year < b.year; });
     return rec;
 }
 
 // Ticks every household of one village forward by one year — called for
 // every village *other* than the one currently loaded on the map (that one
 // advances live instead, via main.cpp's tickAgingOneYear()/
-// simulateVillageYear() acting on the real placed Villager objects).
+// simulateVillageYear() acting on the real placed Villager objects). All 5
+// households advance the same `rec.yearsSimulated` in this one call, so
+// appending straight to rec.log (no re-sort needed) keeps it in order.
 inline void advanceVillageOneYear(VillageHistoryRecord& rec) {
     rec.yearsSimulated++;
-    for (HouseholdHistory& h : rec.farmHouseholds)  advanceHousehold(h, rec.yearsSimulated);
-    for (HouseholdHistory& h : rec.tradeHouseholds) advanceHousehold(h, rec.yearsSimulated);
+    for (HouseholdHistory& h : rec.farmHouseholds)  advanceHousehold(h, rec.yearsSimulated, rec.log);
+    for (HouseholdHistory& h : rec.tradeHouseholds) advanceHousehold(h, rec.yearsSimulated, rec.log);
 }
 
 } // namespace VillageHistory

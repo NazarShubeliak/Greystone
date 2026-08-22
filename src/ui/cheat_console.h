@@ -43,6 +43,14 @@ struct CheatConsole {
     // without waiting the real number of actions that many years would take.
     int pendingSkipYears = 0;
 
+    // Pending legends export — filename set by execute(), consumed by
+    // main.cpp. Empty string = none pending (a non-empty filename is always
+    // needed even for the default, so an explicit bool flag alongside it —
+    // rather than checking string-emptiness like pendingGive/pendingUnlockTech
+    // do — avoids ambiguity if a filename ever legitimately needed to be "").
+    bool        pendingExportLegends = false;
+    std::string pendingLegendsFilename;
+
     // Pending unlocktech — technique token, consumed by main.cpp.
     std::string pendingUnlockTech;
 
@@ -143,7 +151,8 @@ struct CheatConsole {
 
         } else if (cmd == "help") {
             result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  "
-                       "setskill <skill> <lvl>  setage <age>  skipyears <n>  unlocktech <name>  unlockspell <name>  gp  help";
+                       "setskill <skill> <lvl>  setage <age>  skipyears <n>  unlocktech <name>  unlockspell <name>  "
+                       "legends [file]  gp  help";
             resultOk = true;
 
         } else {
@@ -304,6 +313,19 @@ struct CheatConsole {
                 return;
             }
 
+            // legends [filename] — export every cached village's chronicle +
+            // roster (docs/world.md "Legends-лог подій") to a text file, read
+            // by the standalone legends_viewer.exe. No filename = "legends.txt".
+            if (cmd == "legends" || cmd.rfind("legends ", 0) == 0) {
+                std::string fname = cmd.size() > 8 ? cmd.substr(8) : "legends.txt";
+                if (fname.empty()) fname = "legends.txt";
+                pendingExportLegends  = true;
+                pendingLegendsFilename = fname;
+                result   = "Exporting legends to " + fname + "...";
+                resultOk = true;
+                return;
+            }
+
             // unlocktech <name>
             char tname[32];
             if (sscanf(cmd.c_str(), "unlocktech %31s", tname) == 1) {
@@ -351,7 +373,7 @@ struct CheatConsole {
             return input.rfind(prefix, 0) == 0;
         };
         if (input.empty())
-            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  setage  skipyears  unlocktech  unlockspell  gp  help    (Tab autocompletes)";
+            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  setage  skipyears  unlocktech  unlockspell  legends  gp  help    (Tab autocompletes)";
         if (input == "spawn" || starts("spawn "))
             return "spawn: goblin  orc  skeleton  wolf  bandit   e.g. spawn goblin 3";
         if (input == "give" || starts("give "))
@@ -377,10 +399,13 @@ struct CheatConsole {
             return "unlockspell: spark  fireball  wallofire  explosion  fireshield  createwater  "
                    "waterjet  raincall  slowness  stone  stonewall  reclaimwall  wallthrow  architect  "
                    "skinhardening  gust  vortex  lightness  acceleration  minorheal  withering";
+        if (input == "legends" || starts("legends "))
+            return "legends [filename]   exports every cached village's chronicle + roster to a text "
+                   "file (default legends.txt) — read it with legends_viewer.exe. e.g. legends";
         // Partial command suggestions
         static const char* cmds[] = {
             "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","unlocktech","unlockspell","help", nullptr
+            "setskill","setage","skipyears","unlocktech","unlockspell","legends","help", nullptr
         };
         std::string sugg;
         for (int i = 0; cmds[i]; i++) {
@@ -396,7 +421,7 @@ struct CheatConsole {
         // Complete top-level command
         static const char* cmds[] = {
             "reveal_map","hide_map","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","unlocktech","unlockspell","help", nullptr
+            "setskill","setage","skipyears","unlocktech","unlockspell","legends","help", nullptr
         };
         if (input.find(' ') == std::string::npos) {
             for (int i = 0; cmds[i]; i++) {

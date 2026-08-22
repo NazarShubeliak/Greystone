@@ -17,3 +17,8 @@ g++ src/main.cpp src/core/astar.cpp src/core/map.cpp src/render/render.cpp \
 g++ src/tools/worldgen_sim.cpp \
   -Isrc/entities -I/mingw64/include/SDL2 \
   -o worldgen_sim
+
+# Standalone Legends Viewer (src/tools/legends_viewer.cpp) — reads the plain-
+# text export the real game's `legends` cheat-console command writes. No game
+# headers at all, so no -I flags or SDL2 needed here either.
+g++ src/tools/legends_viewer.cpp -o legends_viewer
