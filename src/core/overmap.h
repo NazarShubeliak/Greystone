@@ -6,7 +6,9 @@
 #include <SDL2/SDL_ttf.h>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <algorithm>
+#include <queue>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,8 @@ struct SectorInfo {
     bool      isWater     = false; // river or lake cell
     int8_t    flowDX = 0, flowDY = 0; // isWater only: direction toward the next downstream sector (0,0 = lake/edge terminus)
     float     fertility   = 0.0f;  // 0..1, from height + distance to water — drives village siting
+    bool      hasRoad = false;
+    int8_t    roadDX = 0, roadDY = 0; // hasRoad only: direction toward the next sector along the road (docs/world.md "Шар 2: Розселення" — roads via A*)
 };
 
 struct BiomeVisual {
@@ -60,6 +64,7 @@ struct Overmap {
     SDL_Texture* playerTex   = nullptr;
     SDL_Texture* villageTex  = nullptr;
     SDL_Texture* waterTex    = nullptr; // rivers/lakes — separate glyph+colour from Swamp's "~"
+    SDL_Texture* roadTex     = nullptr; // inter-village roads (buildRoads())
 
     // ---------------------------------------------------------------- generate
 
@@ -268,6 +273,137 @@ struct Overmap {
         }
     }
 
+    // Overmap-scale A* — same octile-heuristic shape as src/core/astar.cpp's
+    // findPath(), but a separate implementation: that one is hard-wired to
+    // the 200x200 in-sector Tile grid (Tile::walkable()/moveCost()), this
+    // one runs over the 100x100 SectorInfo grid with a terrain-height cost
+    // function instead (docs/world.md: "вартість за рельєфом: рівнина
+    // дешева, гори дорогі"). Water is costly, not forbidden — fording, no
+    // bridges exist.
+    struct PathNode { int x, y, g, h, f; PathNode* parent; };
+
+    std::vector<SDL_Point> findOvermapPath(int startX, int startY, int endX, int endY) {
+        static bool      closedSet[OVERMAP_H][OVERMAP_W];
+        static PathNode* openMap  [OVERMAP_H][OVERMAP_W];
+        memset(closedSet, 0, sizeof(closedSet));
+        memset(openMap,   0, sizeof(openMap));
+        std::vector<PathNode*> allNodes;
+
+        auto heuristic = [](int x1, int y1, int x2, int y2) {
+            int dx = std::abs(x1 - x2), dy = std::abs(y1 - y2);
+            return 100 * (dx + dy) - 60 * std::min(dx, dy);
+        };
+        auto stepCost = [&](int x, int y) {
+            const SectorInfo& s = sectors[y][x];
+            return s.isWater ? 800 : (int)(100 + s.height * 300);
+        };
+
+        auto cmp = [](const PathNode* a, const PathNode* b) { return a->f > b->f; };
+        std::priority_queue<PathNode*, std::vector<PathNode*>, decltype(cmp)> openQueue(cmp);
+
+        PathNode* start = new PathNode{startX, startY, 0, heuristic(startX, startY, endX, endY), 0, nullptr};
+        start->f = start->h;
+        allNodes.push_back(start);
+        openQueue.push(start);
+        openMap[startY][startX] = start;
+
+        const int dx8[] = { 0,  0,  1, -1,  1,  1, -1, -1 };
+        const int dy8[] = { 1, -1,  0,  0,  1, -1,  1, -1 };
+
+        std::vector<SDL_Point> result;
+        while (!openQueue.empty()) {
+            PathNode* current = openQueue.top();
+            openQueue.pop();
+            int cx = current->x, cy = current->y;
+            if (closedSet[cy][cx]) continue;
+            if (openMap[cy][cx] != current) continue;
+            closedSet[cy][cx] = true;
+
+            if (cx == endX && cy == endY) {
+                PathNode* n = current;
+                while (n) { result.push_back({n->x, n->y}); n = n->parent; }
+                std::reverse(result.begin(), result.end());
+                break;
+            }
+
+            for (int i = 0; i < 8; i++) {
+                int nx = cx + dx8[i], ny = cy + dy8[i];
+                if (nx < 0 || nx >= OVERMAP_W || ny < 0 || ny >= OVERMAP_H) continue;
+                if (closedSet[ny][nx]) continue;
+
+                int tileCost = stepCost(nx, ny);
+                int moveCost = (i < 4) ? tileCost : tileCost * 14 / 10;
+                int newG     = current->g + moveCost;
+
+                if (openMap[ny][nx] == nullptr || newG < openMap[ny][nx]->g) {
+                    int h = heuristic(nx, ny, endX, endY);
+                    PathNode* neighbor = new PathNode{nx, ny, newG, h, newG + h, current};
+                    allNodes.push_back(neighbor);
+                    openMap[ny][nx] = neighbor;
+                    openQueue.push(neighbor);
+                }
+            }
+        }
+
+        for (PathNode* n : allNodes) delete n;
+        return result;
+    }
+
+    // Connects every village into one road network (docs/world.md: "Дороги
+    // з'єднують поселення"). MST (Prim's, O(n^2) — trivial for ~15 nodes)
+    // over Euclidean distance picks which ~14 village pairs actually get a
+    // road — a cheap proxy so findOvermapPath() (real terrain-cost A*) only
+    // has to run for the edges that matter, not all C(15,2) pairs. Every
+    // sector each resulting path crosses gets hasRoad + the direction to the
+    // next step; a village sector touched by more than one edge just keeps
+    // whichever was processed last — same best-effort tolerance already
+    // accepted for river tracing.
+    void buildRoads() {
+        std::vector<SDL_Point> villages;
+        for (int y = 0; y < OVERMAP_H; y++)
+            for (int x = 0; x < OVERMAP_W; x++)
+                if (sectors[y][x].hasVillage) villages.push_back({x, y});
+        if (villages.size() < 2) return;
+
+        int n = (int)villages.size();
+        std::vector<bool>  inTree(n, false);
+        std::vector<float> minDist(n, 1e18f);
+        std::vector<int>   parent(n, -1);
+        minDist[0] = 0;
+
+        for (int iter = 0; iter < n; iter++) {
+            int u = -1;
+            for (int i = 0; i < n; i++)
+                if (!inTree[i] && (u == -1 || minDist[i] < minDist[u])) u = i;
+            if (u == -1) break;
+            inTree[u] = true;
+
+            if (parent[u] >= 0) {
+                std::vector<SDL_Point> path = findOvermapPath(
+                    villages[parent[u]].x, villages[parent[u]].y, villages[u].x, villages[u].y);
+                for (size_t i = 0; i < path.size(); i++) {
+                    SectorInfo& s = sectors[path[i].y][path[i].x];
+                    s.hasRoad = true;
+                    if (i + 1 < path.size()) {
+                        s.roadDX = (int8_t)(path[i + 1].x - path[i].x);
+                        s.roadDY = (int8_t)(path[i + 1].y - path[i].y);
+                    } else if (i > 0) {
+                        s.roadDX = (int8_t)(path[i].x - path[i - 1].x);
+                        s.roadDY = (int8_t)(path[i].y - path[i - 1].y);
+                    }
+                }
+            }
+
+            for (int v = 0; v < n; v++) {
+                if (inTree[v]) continue;
+                float dx = (float)(villages[u].x - villages[v].x);
+                float dy = (float)(villages[u].y - villages[v].y);
+                float d  = dx * dx + dy * dy;
+                if (d < minDist[v]) { minDist[v] = d; parent[v] = u; }
+            }
+        }
+    }
+
     void generate() {
         for (int y = 0; y < OVERMAP_H; y++)
             for (int x = 0; x < OVERMAP_W; x++)
@@ -278,6 +414,7 @@ struct Overmap {
         traceRivers();
         computeFertility();
         placeVillages();
+        buildRoads();
     }
 
     // Reveal the 3x3 area around a sector when the player enters it.
@@ -351,6 +488,7 @@ struct Overmap {
         playerTex   = make("@",  {255, 255, 180, 255});
         villageTex  = make("#",  {255, 210,  60, 255});
         waterTex    = make("=",  {110, 170, 230, 255});
+        roadTex     = make("+",  {170, 140,  90, 255});
     }
 
     void destroyTextures() {
@@ -359,6 +497,7 @@ struct Overmap {
         SDL_DestroyTexture(playerTex);   playerTex   = nullptr;
         SDL_DestroyTexture(villageTex);  villageTex  = nullptr;
         SDL_DestroyTexture(waterTex);    waterTex    = nullptr;
+        SDL_DestroyTexture(roadTex);     roadTex     = nullptr;
     }
 
     // ---------------------------------------------------------------- render
@@ -409,7 +548,13 @@ struct Overmap {
                 SDL_Color bgc = biomeVisuals[bi].bg;
                 SDL_SetRenderDrawColor(r, bgc.r, bgc.g, bgc.b, 255);
                 SDL_RenderFillRect(r, &cell);
-                SDL_RenderCopy(r, sec.hasVillage ? villageTex : biomeTex[bi], nullptr, &cell);
+                // Road overlay skipped on village sectors — the village
+                // marker already dominates and every village sits at a road
+                // endpoint anyway (buildRoads()).
+                SDL_Texture* glyphTex = sec.hasVillage ? villageTex
+                                      : sec.hasRoad     ? roadTex
+                                                         : biomeTex[bi];
+                SDL_RenderCopy(r, glyphTex, nullptr, &cell);
             }
         }
 
@@ -518,7 +663,7 @@ struct Overmap {
         SDL_RenderFillRect(r, &legBar);
         SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
-        const char* legend = ".: Plains   %: Forest   ~: Swamp   .: Desert   .: Tundra   &: Cursed Lands   =: River/Lake   ?: Unexplored";
+        const char* legend = ".: Plains   %: Forest   ~: Swamp   .: Desert   .: Tundra   &: Cursed Lands   =: River/Lake   +: Road   ?: Unexplored";
         SDL_Surface* ls = TTF_RenderUTF8_Solid(f, legend, {75, 75, 70, 255});
         SDL_Texture* lt = SDL_CreateTextureFromSurface(r, ls);
         SDL_FreeSurface(ls);

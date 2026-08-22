@@ -568,10 +568,61 @@ static void carveRiver(int flowDX, int flowDY) {
     }
 }
 
+// Physically carves a road through this sector (Overmap::buildRoads()) —
+// same "step distance from path length" band approach as carveRiver(), but
+// narrower (roads aren't rivers) and paints ground cover (G_ROAD) instead of
+// swapping terrain, so grass/sand/etc. underneath stays visually varied.
+// Never overwrites an occupied tile (existing object — tree, building wall,
+// the village well...) — skips over it instead, same tolerance
+// pathToPlaza() already has for the in-village dirt paths, rather than
+// risking clearing something that matters (a wall, the indestructible
+// well). A village sector's road aims at the map center (same anchor
+// placeVillage()/villageWellX/Y already use) instead of the far edge, so it
+// visibly leads to the plaza; roadDX/roadDY there is the direction the road
+// arrived FROM, used to pick which edge to start from.
+static void carveRoad(bool isVillage, int roadDX, int roadDY) {
+    const int EDGE_MARGIN = 3;
+    int startX, startY, endX, endY;
+    if (isVillage) {
+        startX = (roadDX > 0) ? EDGE_MARGIN : (roadDX < 0 ? MAP_WIDTH  - EDGE_MARGIN : MAP_WIDTH  / 2);
+        startY = (roadDY > 0) ? EDGE_MARGIN : (roadDY < 0 ? MAP_HEIGHT - EDGE_MARGIN : MAP_HEIGHT / 2);
+        endX   = MAP_WIDTH  / 2;
+        endY   = MAP_HEIGHT / 2;
+    } else {
+        startX = (roadDX < 0) ? MAP_WIDTH - EDGE_MARGIN : (roadDX > 0 ? EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
+        startY = (roadDY < 0) ? MAP_HEIGHT - EDGE_MARGIN : (roadDY > 0 ? EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
+        endX   = (roadDX < 0) ? EDGE_MARGIN : (roadDX > 0 ? MAP_WIDTH  - EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
+        endY   = (roadDY < 0) ? EDGE_MARGIN : (roadDY > 0 ? MAP_HEIGHT - EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
+    }
+
+    const int   PATCH_R  = 2;
+    const float STEP_LEN = 1.5f;
+    float dx = (float)(endX - startX), dy = (float)(endY - startY);
+    float length = std::sqrt(dx * dx + dy * dy);
+    int steps = std::max(1, (int)(length / STEP_LEN));
+
+    for (int i = 0; i <= steps; i++) {
+        float t = (float)i / steps;
+        int cx = startX + (int)(dx * t) + (rand() % 3 - 1);
+        int cy = startY + (int)(dy * t) + (rand() % 3 - 1);
+        for (int py = cy - PATCH_R; py <= cy + PATCH_R; py++) {
+            for (int px = cx - PATCH_R; px <= cx + PATCH_R; px++) {
+                if ((px - cx) * (px - cx) + (py - cy) * (py - cy) > PATCH_R * PATCH_R) continue;
+                if (px <= 0 || px >= MAP_WIDTH - 1 || py <= 0 || py >= MAP_HEIGHT - 1) continue;
+                Tile& tile = map[py][px];
+                if (tile.terrainId == T_BEDROCK || tile.terrainId == T_WATER || tile.terrainId == T_FLOOR) continue;
+                if (tile.objectId >= 0) continue;
+                tile.groundId = G_ROAD;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- sector generation
 
 void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage,
-                     bool hasRiver, int flowDX, int flowDY) {
+                     bool hasRiver, int flowDX, int flowDY,
+                     bool hasRoad, int roadDX, int roadDY) {
     // Deterministic seed from sector coords so revisiting gives same layout.
     unsigned int seed = (seedX >= 0)
         ? (unsigned int)(seedX * 73856093u ^ seedY * 19349663u)
@@ -668,6 +719,10 @@ void generateSector(BiomeType biome, int seedX, int seedY, bool isVillage,
     }
 
     if (isVillage) placeVillage(seedX, seedY);
+
+    // Road carved last, after village buildings — so it can be routed
+    // around whatever's already there instead of the other way around.
+    if (hasRoad) carveRoad(isVillage, roadDX, roadDY);
 }
 
 // ---------------------------------------------------------------- visibility

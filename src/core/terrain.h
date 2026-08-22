@@ -25,6 +25,7 @@ enum GroundId {
     G_REEDS,
     G_LEAVES,
     G_SCORCHED,  // fire spells landing on flammable ground swap it to this (cosmetic only)
+    G_ROAD,      // inter-village roads (Overmap::buildRoads()) and village plaza paths
     G_COUNT
 };
 
@@ -139,6 +140,11 @@ static const GroundDef groundDefs[G_COUNT] = {
     ".", {160,100, 30,255},  20  },
   { "Scorched ground", "Blackened earth, still smoking faintly where fire caught the grass.",
     ".", { 40, 35, 30,255},  15  },
+  { "Road",       "A well-trodden dirt path, packed hard by years of foot traffic.",
+    "=", {150,120, 70,255}, -20  }, // negative moveCostMod — first one in this table;
+                                     // Tile::moveCost() just adds it, and a road is
+                                     // meant to be genuinely faster than bare grass,
+                                     // not just cosmetic like every other ground cover
 };
 
 static const ObjectDef objectDefs[O_COUNT] = {
