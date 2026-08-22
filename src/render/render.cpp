@@ -98,6 +98,20 @@ void renderMap(SDL_Renderer* r) {
             }
 
             SDL_Rect dst = {x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE};
+
+            // Water is the one terrain type that gets a filled background
+            // instead of just a bare glyph — every other terrain (grass,
+            // sand, swamp...) stays glyph-only, but water uniquely blocks
+            // movement and marks a whole physical feature (river/lake), and
+            // a lone dim "~" on the black canvas was unreadable at a glance
+            // (user report). Dimmed the same way the glyph itself dims for
+            // explored-but-not-currently-visible tiles.
+            if (t.terrainId == T_WATER && t.objectId < 0 && t.groundId < 0) {
+                SDL_Color wbg = t.visible ? SDL_Color{10, 40, 90, 255} : SDL_Color{5, 16, 32, 255};
+                SDL_SetRenderDrawColor(r, wbg.r, wbg.g, wbg.b, 255);
+                SDL_RenderFillRect(r, &dst);
+            }
+
             SDL_RenderCopy(r, tex, nullptr, &dst);
         }
     }

@@ -536,10 +536,16 @@ static void carveRiver(int flowDX, int flowDY) {
         return;
     }
 
-    int startX = (flowDX < 0) ? MAP_WIDTH - 10 : (flowDX > 0 ? 10 : MAP_WIDTH  / 2 + rand() % 41 - 20);
-    int startY = (flowDY < 0) ? MAP_HEIGHT - 10 : (flowDY > 0 ? 10 : MAP_HEIGHT / 2 + rand() % 41 - 20);
-    int endX   = (flowDX < 0) ? 10 : (flowDX > 0 ? MAP_WIDTH  - 10 : MAP_WIDTH  / 2 + rand() % 41 - 20);
-    int endY   = (flowDY < 0) ? 10 : (flowDY > 0 ? MAP_HEIGHT - 10 : MAP_HEIGHT / 2 + rand() % 41 - 20);
+    // Margin from the true edge (x/y == 0 or MAP_WIDTH/HEIGHT-1) is small —
+    // just enough for paintPatch()'s inBounds() (x>0, x<MAP_WIDTH-1) to still
+    // paint most of a PATCH_R-radius circle there. A bigger margin (used
+    // before) left the river visibly stopping well short of the sector's
+    // actual edge instead of flowing off it.
+    const int EDGE_MARGIN = 3;
+    int startX = (flowDX < 0) ? MAP_WIDTH - EDGE_MARGIN : (flowDX > 0 ? EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
+    int startY = (flowDY < 0) ? MAP_HEIGHT - EDGE_MARGIN : (flowDY > 0 ? EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
+    int endX   = (flowDX < 0) ? EDGE_MARGIN : (flowDX > 0 ? MAP_WIDTH  - EDGE_MARGIN : MAP_WIDTH  / 2 + rand() % 41 - 20);
+    int endY   = (flowDY < 0) ? EDGE_MARGIN : (flowDY > 0 ? MAP_HEIGHT - EDGE_MARGIN : MAP_HEIGHT / 2 + rand() % 41 - 20);
 
     // Step distance is derived from the path's actual length (not a fixed
     // step COUNT) so consecutive patches always overlap into one continuous
