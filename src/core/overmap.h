@@ -121,6 +121,39 @@ struct Overmap {
         camY = std::max(0, std::min(OVERMAP_H - 1, camY + dy));
     }
 
+    // Jumps the camera directly to a sector (same clamp as moveCam()) — used
+    // by mouse click/drag panning (main.cpp), as an alternative to the arrow
+    // keys' relative moveCam().
+    void setCam(int sx, int sy) {
+        camX = std::max(0, std::min(OVERMAP_W - 1, sx));
+        camY = std::max(0, std::min(OVERMAP_H - 1, sy));
+    }
+
+    // Converts a screen pixel to the overmap sector it falls on, or {-1,-1}
+    // if outside the grid (title bar/legend strip) — mirrors render()'s exact
+    // viewport geometry below so a click always lands on the cell the player
+    // actually sees. const int/int-division here must stay identical to
+    // render()'s CS/TOP/TITH/GRIDY/vW/vH/offX/offY — kept in sync by hand
+    // since duplicating a handful of ints isn't worth a third helper both
+    // this and render() call into.
+    SDL_Point sectorAtScreen(int mx, int my) const {
+        const int CS    = TILE_SIZE;
+        const int TOP   = MenuHub::TAB_H;
+        const int TITH  = 26;
+        const int GRIDY = TOP + TITH;
+        const int vW    = SCREEN_WIDTH             / CS;
+        const int vH    = (MAP_VIEW_HEIGHT - GRIDY) / CS;
+        const int offX  = camX - vW / 2;
+        const int offY  = camY - vH / 2;
+
+        if (my < GRIDY || my >= GRIDY + vH * CS) return {-1, -1};
+        if (mx < 0 || mx >= vW * CS) return {-1, -1};
+
+        int vx = mx / CS;
+        int vy = (my - GRIDY) / CS;
+        return SDL_Point{ offX + vx, offY + vy };
+    }
+
     // ---------------------------------------------------------------- textures
 
     void initTextures(SDL_Renderer* r, TTF_Font* f) {
@@ -261,7 +294,7 @@ struct Overmap {
                             + biomeVisuals[bi].name;
         std::string playerInfo = std::string("@:[") + std::to_string(playerSX) + ","
                                + std::to_string(playerSY) + "]";
-        std::string title = camInfo + "   " + playerInfo + "   |   Arrows: pan   M: close";
+        std::string title = camInfo + "   " + playerInfo + "   |   Arrows/Click/Drag: pan   M: close";
         SDL_Surface* ts = TTF_RenderUTF8_Solid(f, title.c_str(), {175, 150, 65, 255});
         SDL_Texture* tt = SDL_CreateTextureFromSurface(r, ts);
         SDL_FreeSurface(ts);

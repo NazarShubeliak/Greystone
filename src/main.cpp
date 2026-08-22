@@ -3457,7 +3457,7 @@ void handleInput(SDL_Event& event, bool& running) {
         return;
     }
 
-    // Overmap handles arrow keys and M while open.
+    // Overmap handles arrow keys, mouse, and M while open.
     if (overmap.visible) {
         if (event.type == SDL_KEYDOWN) {
             switch (event.key.keysym.sym) {
@@ -3478,6 +3478,15 @@ void handleInput(SDL_Event& event, bool& running) {
                 case SDLK_RIGHT: overmap.moveCam( 1,  0); break;
                 default: break;
             }
+        } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
+            // Click a cell to jump the camera straight there.
+            SDL_Point sec = overmap.sectorAtScreen(event.button.x, event.button.y);
+            if (sec.x >= 0) overmap.setCam(sec.x, sec.y);
+        } else if (event.type == SDL_MOUSEMOTION && (event.motion.state & SDL_BUTTON_LMASK)) {
+            // Dragging with the button held keeps following the cursor —
+            // reads like grabbing and panning the map, not just a single jump.
+            SDL_Point sec = overmap.sectorAtScreen(event.motion.x, event.motion.y);
+            if (sec.x >= 0) overmap.setCam(sec.x, sec.y);
         }
         return;
     }
