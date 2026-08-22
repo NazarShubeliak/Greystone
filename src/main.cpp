@@ -741,6 +741,7 @@ void tickEnemyNeeds();     // forward declaration — defined below, called once
 void tickFireHazards();    // forward declaration — defined near Wall of Fire casting, called once per player action
 void interruptCrafting(bool playerHit); // forward declaration — defined in villager section
 void simulateVillageYear(std::vector<Villager>& vs); // forward declaration — defined next to spawnVillagers()
+void advanceDistantVillageHistories(); // forward declaration — defined next to tickYearlyEvents()
 
 // One world tick: give everyone energy, then let enemies spend theirs.
 // NOTE: this can run several times per single player action (see onPlayerAct()), with the
@@ -859,6 +860,29 @@ void tickYearlyEvents() {
         lastYear++;
         tickAgingOneYear();
         simulateVillageYear(villagers);
+        advanceDistantVillageHistories();
+    }
+}
+
+// Ticks every village's cached pre-history forward by one year, except the
+// one currently loaded on the map (that one just advanced live, above, via
+// tickAgingOneYear()/simulateVillageYear() acting on the real placed
+// Villager objects) — docs/world.md step 5: "Подієва симуляція віддалених
+// сіл під час гри (той самий рушій)". Reuses the exact map-free engine
+// (VillageHistory::advanceVillageOneYear(), same simulateOneYear() call
+// generateAllVillageHistories() used to build the initial pre-history) so a
+// village the player hasn't visited in a while reflects however many more
+// years actually passed — new graves, new heirs, new marriages — instead of
+// staying frozen at whatever generateAllVillageHistories() baked at game
+// start. Note: a village the player is *currently standing in* only has its
+// cache brought back in sync with what happened live on their next visit
+// after leaving (spawnVillagers() re-resolves headIdx/graves from the cache
+// every time) — reconciling live in-visit changes back into the cache in
+// real time is a separate, bigger piece of work, not done here.
+void advanceDistantVillageHistories() {
+    for (auto& kv : villageHistoryStore) {
+        if (kv.first.first == playerSectorX && kv.first.second == playerSectorY) continue;
+        VillageHistory::advanceVillageOneYear(kv.second);
     }
 }
 
@@ -1483,14 +1507,14 @@ void spawnVillagers(bool isVillage) {
 
     // A household's residents today are the survivors of a pre-history
     // simulated once for the whole overmap at game start
-    // (generateAllVillageHistories(), docs/world.md step 2), not a fresh
-    // roll on every sector visit — docs/world.md: "Історія при worldgen —
-    // це не текстовий флейвор, а результат тієї самої симуляції." Isolated
-    // per household (no marriage across households during pre-history —
-    // today's bed-assignment shape below can't absorb that kind of
-    // reshuffling); see village_history.h's HouseholdHistory for why 60
-    // years and not fewer.
-    constexpr int HISTORY_YEARS = 60;
+    // (generateAllVillageHistories(), docs/world.md step 2) and ticked
+    // forward every year the village wasn't the one loaded on the map
+    // (advanceDistantVillageHistories(), step 5) — not a fresh roll on every
+    // sector visit. docs/world.md: "Історія при worldgen — це не текстовий
+    // флейвор, а результат тієї самої симуляції." Isolated per household (no
+    // marriage across households — today's bed-assignment shape below can't
+    // absorb that kind of reshuffling); see village_history.h's
+    // HouseholdHistory for why 60 founding years and not fewer.
     VillageHistory::VillageHistoryRecord& villageRec = villageHistoryStore[{playerSectorX, playerSectorY}];
     int nextFarmHousehold = 0, nextTradeHousehold = 0;
 
@@ -1534,32 +1558,39 @@ void spawnVillagers(bool isVillage) {
         Occupation placeholderOcc = isFarmHousehold ? Occupation::FARMER : Occupation::WOODCUTTER;
 
         // Resolve today's head of household: whoever currently holds the
-        // pre-history placeholder trade, else the eldest living adult
-        // descendant if it went vacant (a real possible outcome — see
-        // village_history.h's apprenticeship comments — not forced back to
-        // "always staffed"). Then relabel to the *real* trade this building
-        // turned out to be — the cached history only knows "has a trade or
-        // not", not which one.
+        // trade, else the eldest living adult descendant if it went vacant
+        // (a real possible outcome — see village_history.h's apprenticeship
+        // comments — not forced back to "always staffed"). Checks both the
+        // pre-history placeholder AND the real trade — a household visited
+        // before already had its head relabeled from placeholderOcc to occ
+        // below, and on a later revisit only the real name is still present
+        // (checking only the placeholder would miss them and misresolve to
+        // whichever adult happens to be oldest instead).
         int headIdx = -1;
         for (int k = 0; k < (int)hist.size(); k++)
-            if (hist[k].alive && hist[k].occupation == placeholderOcc) { headIdx = k; break; }
+            if (hist[k].alive && (hist[k].occupation == placeholderOcc || hist[k].occupation == occ)) { headIdx = k; break; }
         if (headIdx < 0)
             for (int k = 0; k < (int)hist.size(); k++)
                 if (hist[k].alive && !hist[k].isChild && (headIdx < 0 || hist[k].age > hist[headIdx].age))
                     headIdx = k;
         if (headIdx >= 0) hist[headIdx].occupation = occ;
 
-        // Places graves for the whole simulated household regardless of
-        // whether anyone survived — even a fully extinct line left a mark.
-        // All households share the one graveyard (villageCemeteryX/Y), not a
-        // plot behind each individual house. Guarded so a revisit doesn't
-        // place the same ancestors' graves a second time.
-        if (!villageRec.gravesPlaced) {
-            for (int k = 0; k < (int)hist.size(); k++)
-                if (diedAtYear[k] >= 0)
-                    placeGraveNear(villageCemeteryX, villageCemeteryY,
-                                    hist[k].name, hist[k].age, HISTORY_YEARS - diedAtYear[k]);
-        }
+        // Places graves for anyone who died since the last time we placed
+        // graves for this household (gravesPlacedThroughYear) — covers the
+        // whole simulated household regardless of whether anyone survived
+        // (even a fully extinct line left a mark) on a first visit, and only
+        // the newly dead on a later revisit after this village was ticked
+        // forward while distant (advanceDistantVillageHistories()) — without
+        // this check, a revisit would either re-place the same ancestors'
+        // graves a second time, or (with a village-wide one-shot guard)
+        // silently skip anyone who died while the player was away. All
+        // households share the one graveyard (villageCemeteryX/Y), not a
+        // plot behind each individual house.
+        for (int k = 0; k < (int)hist.size(); k++)
+            if (diedAtYear[k] > hh->gravesPlacedThroughYear)
+                placeGraveNear(villageCemeteryX, villageCemeteryY,
+                                hist[k].name, hist[k].age, villageRec.yearsSimulated - diedAtYear[k]);
+        hh->gravesPlacedThroughYear = villageRec.yearsSimulated;
 
         // Extremely unlucky household — everyone died out with no living
         // descendant at all (rare inside just 60 years, but not impossible).
@@ -1689,7 +1720,6 @@ void spawnVillagers(bool isVillage) {
             }
         }
     }
-    villageRec.gravesPlaced = true;
 
     // One real goal per sector visit (docs/village.md "Цілі NPC → квести") — pick a
     // random non-child villager to be worried about an actual threat already spawned

@@ -328,6 +328,14 @@ struct HouseholdHistory {
     std::string surname;
     std::vector<Villager> hist;   // full simulated roster, dead members kept (alive=false)
     std::vector<int> diedAtYear;  // parallel to hist; -1 = still alive at "now"
+    // Deaths with diedAtYear <= this have already had a grave physically
+    // placed by spawnVillagers() on some earlier visit. Starts at 0 (nobody
+    // placed yet) and advances to VillageHistoryRecord::yearsSimulated each
+    // time spawnVillagers() processes this household — so a village ticked
+    // forward while the player was elsewhere (advanceVillageOneYear() below)
+    // only gets graves for the *newly* dead placed on the next visit, not a
+    // second copy of ones already standing in the graveyard.
+    int gravesPlacedThroughYear = 0;
 };
 
 inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFarmHousehold, int historyYears) {
@@ -369,17 +377,39 @@ inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFar
     return h;
 }
 
+// Advances one already-simulated household by exactly one more year (docs/
+// world.md step 5: "Подієва симуляція віддалених сіл під час гри"). Same
+// mechanics as the yearly loop inside simulateHousehold() above, just for a
+// single `year` number handed in by the caller instead of an internal 1..N
+// loop — used to keep ticking a village that already has a founding history
+// but isn't the one currently loaded on the map.
+inline void advanceHousehold(HouseholdHistory& h, int year) {
+    std::vector<LegendEvent> log; // discarded, same as simulateHousehold()
+    size_t before = h.hist.size();
+    std::vector<bool> wasAlive(before);
+    for (size_t k = 0; k < before; k++) wasAlive[k] = h.hist[k].alive;
+
+    simulateOneYear(h.hist, year, log);
+
+    h.diedAtYear.resize(h.hist.size(), -1);
+    for (size_t k = 0; k < before; k++)
+        if (wasAlive[k] && !h.hist[k].alive) h.diedAtYear[k] = year;
+}
+
 // One village's cached pre-history: 2 farm-type + 3 trade-type households,
 // matching worldgen_sim.cpp's seedVillage() role count (2 farms always
 // guaranteed by placeVillage(); Smith/Elder/Woodcutter may or may not
 // actually get placed on the map — unused cached households are simply
-// never consumed by the caller). gravesPlaced guards spawnVillagers()
-// against placing this village's ancestor graves more than once across
-// repeated sector visits.
+// never consumed by the caller). yearsSimulated is the total number of
+// years this record has been advanced since founding (starts at
+// simulateVillageHistory()'s historyYears, +1 per advanceVillageOneYear()
+// call) — it's the "year" argument fed to advanceHousehold() and also what
+// a grave's diedYearsAgo is computed relative to, since pre-history and
+// later distant-tick years share one continuous numbering.
 struct VillageHistoryRecord {
     std::vector<HouseholdHistory> farmHouseholds;
     std::vector<HouseholdHistory> tradeHouseholds;
-    bool gravesPlaced = false;
+    int yearsSimulated = 0;
 };
 
 inline VillageHistoryRecord simulateVillageHistory(int villageSurnameSeed, int historyYears = 60) {
@@ -392,7 +422,18 @@ inline VillageHistoryRecord simulateVillageHistory(int villageSurnameSeed, int h
     rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(2), false, historyYears)); // Smith
     rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(3), false, historyYears)); // Elder
     rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(4), false, historyYears)); // Woodcutter
+    rec.yearsSimulated = historyYears;
     return rec;
+}
+
+// Ticks every household of one village forward by one year — called for
+// every village *other* than the one currently loaded on the map (that one
+// advances live instead, via main.cpp's tickAgingOneYear()/
+// simulateVillageYear() acting on the real placed Villager objects).
+inline void advanceVillageOneYear(VillageHistoryRecord& rec) {
+    rec.yearsSimulated++;
+    for (HouseholdHistory& h : rec.farmHouseholds)  advanceHousehold(h, rec.yearsSimulated);
+    for (HouseholdHistory& h : rec.tradeHouseholds) advanceHousehold(h, rec.yearsSimulated);
 }
 
 } // namespace VillageHistory
