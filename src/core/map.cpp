@@ -572,14 +572,32 @@ static void carveRiver(int flowDX, int flowDY) {
 // same "step distance from path length" band approach as carveRiver(), but
 // narrower (roads aren't rivers) and paints ground cover (G_ROAD) instead of
 // swapping terrain, so grass/sand/etc. underneath stays visually varied.
-// Never overwrites an occupied tile (existing object — tree, building wall,
-// the village well...) — skips over it instead, same tolerance
-// pathToPlaza() already has for the in-village dirt paths, rather than
-// risking clearing something that matters (a wall, the indestructible
-// well). A village sector's road aims at the map center (same anchor
-// placeVillage()/villageWellX/Y already use) instead of the far edge, so it
-// visibly leads to the plaza; roadDX/roadDY there is the direction the road
-// arrived FROM, used to pick which edge to start from.
+// Clears wilderness objects in its way (trees, rocks, ...) via
+// isClearableWildObject() below — a road cutting through a forest should
+// actually look cleared, not just painted under the trees (user report) —
+// but never touches anything built or farmed (wall, the indestructible
+// well, crops...), same tolerance pathToPlaza() already has for the
+// in-village dirt paths: route around it, don't bulldoze it. A village
+// sector's road aims at the map center (same anchor placeVillage()/
+// villageWellX/Y already use) instead of the far edge, so it visibly leads
+// to the plaza; roadDX/roadDY there is the direction the road arrived FROM,
+// used to pick which edge to start from.
+//
+// Wilderness objects spawnObject() can actually place (trees, bushes, rocks,
+// boulders, fallen logs, wild herbs/mushrooms) — carveRoad() clears these so
+// a road doesn't just run underneath a forest looking untouched. Explicitly
+// NOT wall/door/table/bed/barrel/well/anvil/grave/stump/wheat — anything
+// built or farmed, which a road should route around, not bulldoze.
+static bool isClearableWildObject(int objectId) {
+    switch (objectId) {
+        case O_TREE: case O_DEAD_TREE: case O_BUSH: case O_ROCK:
+        case O_BOULDER: case O_FALLEN_LOG: case O_HERB: case O_MUSHROOM:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void carveRoad(bool isVillage, int roadDX, int roadDY) {
     const int EDGE_MARGIN = 3;
     int startX, startY, endX, endY;
@@ -611,7 +629,11 @@ static void carveRoad(bool isVillage, int roadDX, int roadDY) {
                 if (px <= 0 || px >= MAP_WIDTH - 1 || py <= 0 || py >= MAP_HEIGHT - 1) continue;
                 Tile& tile = map[py][px];
                 if (tile.terrainId == T_BEDROCK || tile.terrainId == T_WATER || tile.terrainId == T_FLOOR) continue;
-                if (tile.objectId >= 0) continue;
+                if (tile.objectId >= 0) {
+                    if (!isClearableWildObject(tile.objectId)) continue; // building, well, crop, etc. — route around it, don't touch
+                    tile.objectId = -1;
+                    tile.objectHp = 0;
+                }
                 tile.groundId = G_ROAD;
             }
         }
