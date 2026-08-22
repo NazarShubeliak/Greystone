@@ -1264,8 +1264,9 @@ int spawnChild(std::vector<Villager>& vs, int motherIdx, int fatherIdx, int ageO
 // passes to an heir, eligible adults marry, and married couples might have a
 // child. Runs once per elapsed in-game year via tickYearlyEvents(). Operates
 // only on `vs` — the live `villagers` vector for whichever village the player
-// is currently standing in. Distant, unvisited villages don't tick yet (no
-// persistent per-sector village store exists — see CLAUDE.md roadmap).
+// is currently standing in. Every other (distant, unvisited) village ticks
+// too, via the separate map-free advanceDistantVillageHistories() called
+// right alongside this one in tickYearlyEvents() — see village_history.h.
 static constexpr int MARRIAGE_CHANCE_PERCENT   = 20;
 static constexpr int BIRTH_CHANCE_PERCENT      = 15;
 static constexpr int APPRENTICE_CHANCE_PERCENT = 25;
