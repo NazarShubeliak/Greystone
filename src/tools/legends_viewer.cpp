@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
     std::vector<VillageRecord> villages = loadLegends(filename);
     if (villages.empty()) {
         std::cout << "No villages loaded from " << filename
-                   << " — run the game, use the `legends` cheat-console command, then re-run this tool.\n";
+                   << " -- run the game, use the `legends` cheat-console command, then re-run this tool.\n";
         return 1;
     }
 
