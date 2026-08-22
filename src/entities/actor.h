@@ -246,16 +246,17 @@ struct Body {
              + legL.bleed + legR.bleed;
     }
 
-    // Wounds clot on their own over time if left untreated — each part's
-    // bleed decays independently, floored at 0. Doesn't replace Herbal
-    // Poultice (instant, cures everything at once); this just means
-    // bleeding isn't a permanent condition without one. Call once per tick,
-    // same cadence as tickNeeds()'s hunger/thirst — 0.01/tick means a
-    // severe bleed (2.0) takes roughly 200 in-game minutes (~3.3h) to stop
-    // on its own, light bleed (1.0) about half that.
+    // Only a light cut (bleed<=1.0 — BodyPart::applyDamage()'s WOUNDED-tier
+    // threshold, or forceBleed from a sword hit) clots on its own over time;
+    // a severe wound (2.0 — SEVERE-tier, or a guaranteedDeepWound technique
+    // like Brutal Strike) won't budge without actual treatment (Herbal
+    // Poultice) — a deep wound doesn't just stop on its own (user request).
+    // Call once per tick, same cadence as tickNeeds()'s hunger/thirst —
+    // 0.01/tick means a light bleed (1.0) takes roughly 100 in-game minutes
+    // (~1.7h) to stop.
     void clot() {
         constexpr float RATE = 0.01f;
-        auto decay = [](BodyPart& p) { p.bleed = std::max(0.0f, p.bleed - RATE); };
+        auto decay = [](BodyPart& p) { if (p.bleed <= 1.0f) p.bleed = std::max(0.0f, p.bleed - RATE); };
         decay(head); decay(torso); decay(armL); decay(armR); decay(legL); decay(legR);
     }
 
