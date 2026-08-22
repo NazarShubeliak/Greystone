@@ -40,6 +40,7 @@
 #include <functional>
 #include <ctime>
 #include <algorithm>
+#include <utility>
 
 SDL_Color white = {255, 255, 255, 255};
 SDL_Color red   = {255,   0,   0, 255};
@@ -64,6 +65,14 @@ struct Grave {
     int diedYearsAgo;
 };
 std::vector<Grave> graves;
+
+// One entry per village sector, filled once by generateAllVillageHistories()
+// at game start (docs/world.md step 2: "Worldgen: прогін N років для кожного
+// села"). spawnVillagers() reads from here instead of re-simulating each
+// household's pre-history on every sector visit — without this, revisiting a
+// village re-rolled its whole ancestry (different graves, different family)
+// because the household simulation ran on an unseeded rand() stream.
+std::map<std::pair<int,int>, VillageHistory::VillageHistoryRecord> villageHistoryStore;
 
 Player player(20, 15);
 std::vector<Enemy>    enemies;
@@ -969,6 +978,7 @@ void closeMenuHub();
 void toggleMenuTab(MenuTab t);
 void doTeleport(int newSX, int newSY);
 void interactWithObject(int tx, int ty);
+void generateAllVillageHistories();
 void spawnVillagers(bool isVillage);
 void updateVillagers();
 void tickVillagerNeeds();
@@ -1341,12 +1351,53 @@ void simulateVillageYear(std::vector<Villager>& vs) {
     }
 }
 
+// Runs every village's map-free pre-history once, at game start (before the
+// first generateSector() call) — docs/world.md step 2. Reseeds rand() per
+// village with the same coordinate-seed formula generateSector() uses (XORed
+// with a constant salt so it isn't the identical stream as that sector's
+// physical-map seed), so results are reproducible from the overmap seed
+// alone. Cheap: 15 villages x 5 households x 60 years is well under a
+// second, same engine worldgen_sim.exe already runs interactively.
+void generateAllVillageHistories() {
+    int villageSurnameSeed = 0;
+    for (int sy = 0; sy < OVERMAP_H; sy++) {
+        for (int sx = 0; sx < OVERMAP_W; sx++) {
+            if (!overmap.sectors[sy][sx].hasVillage) continue;
+            srand((unsigned int)(sx * 73856093u ^ sy * 19349663u ^ 0x9E3779B9u));
+            villageHistoryStore[{sx, sy}] = VillageHistory::simulateVillageHistory(villageSurnameSeed);
+            villageSurnameSeed += 5;
+        }
+    }
+}
+
 void spawnVillagers(bool isVillage) {
     villagers.clear();
-    graves.clear();
+    // graves are NOT cleared here — sector-tagged (like Corpse/GroundItem) and
+    // placed at most once per village (VillageHistoryRecord::gravesPlaced
+    // below), so they persist correctly across repeated visits to this sector
+    // and every other sector's graves are untouched regardless.
     villageWellX = villageWellY = -1;
     villageCemeteryX = villageCemeteryY = -1;
     if (!isVillage) return;
+
+    // Re-stamp this sector's already-known graves onto the freshly
+    // regenerated map. generateSector() rebuilds map[][] from scratch on
+    // every visit — deterministic for terrain/buildings, but with no memory
+    // of manual tile edits made during a previous visit (placeGraveNear()
+    // writes O_GRAVE directly onto the tile). Without this, a graveyard
+    // physically vanishes on revisit even though the Grave records survive
+    // in `graves` — both pre-history graves (placed further down, guarded by
+    // gravesPlaced) and graves added by live burial AI mid-session
+    // (assignBurial()/CARRY_TO_GRAVE) share that one vector, so a single pass
+    // here restores both. No-op on a village's first-ever visit (nothing
+    // recorded for this sector yet).
+    for (const Grave& g : graves) {
+        if (g.sectorX != playerSectorX || g.sectorY != playerSectorY) continue;
+        if (g.x < 0 || g.x >= MAP_WIDTH || g.y < 0 || g.y >= MAP_HEIGHT) continue;
+        Tile& t = map[g.y][g.x];
+        t.objectId = O_GRAVE;
+        t.objectHp = objectDefs[O_GRAVE].durability;
+    }
 
     // Walkable tile beside the well — every village has exactly one, at map center.
     {
@@ -1369,8 +1420,9 @@ void spawnVillagers(bool isVillage) {
 
     if (beds.empty()) return;
 
-    // Pair nearby beds → same surname (same household, ≤ 8 tiles apart)
-    int nSurnames = countStrings(NPC_SURNAMES);
+    // Group nearby beds into the same household (≤ 8 tiles apart) — the
+    // actual surname now comes from the cached pre-history (village_history.h),
+    // this index is only used to cluster beds together below.
     std::vector<int> surnameIdx(beds.size(), -1);
     int nextSurnameSlot = 0;
     for (int i = 0; i < (int)beds.size(); i++) {
@@ -1429,26 +1481,18 @@ void spawnVillagers(bool isVillage) {
         break;
     }
 
-    // A household's residents today are the survivors of a short simulated
-    // past, not a fresh roll — docs/world.md: "Історія при worldgen — це не
-    // текстовий флейвор, а результат тієї самої симуляції." Reuses the
-    // shared map-free engine (village_history.h) that worldgen_sim.exe also
-    // runs, isolated per household (no marriage across households during
-    // this window — today's bed-assignment shape below can't absorb that
-    // kind of reshuffling).
-    //
-    // 60, not 30: founders are seeded as young adults (18-26) and a human's
-    // rolled naturalDeathAge is never below ~72 (raceTraits.maxAge * 0.90).
-    // At 30 years, the oldest a founder could possibly reach is ~56 — old-age
-    // death was mathematically impossible, and since a household's own
-    // occupation-holder shields their whole immediate family from famine
-    // risk (hasReliableTrade() checks spouse/parent), nobody could die at
-    // all — confirmed no graves ever appeared. 60 years puts a founder's
-    // reachable age (78-86) inside the real death-age range, giving a
-    // genuine chance (roughly 60% for a mid-range roll) of natural
-    // succession happening before "now", which is also what actually
-    // produces famine-vulnerable gap years for the family left behind.
+    // A household's residents today are the survivors of a pre-history
+    // simulated once for the whole overmap at game start
+    // (generateAllVillageHistories(), docs/world.md step 2), not a fresh
+    // roll on every sector visit — docs/world.md: "Історія при worldgen —
+    // це не текстовий флейвор, а результат тієї самої симуляції." Isolated
+    // per household (no marriage across households during pre-history —
+    // today's bed-assignment shape below can't absorb that kind of
+    // reshuffling); see village_history.h's HouseholdHistory for why 60
+    // years and not fewer.
     constexpr int HISTORY_YEARS = 60;
+    VillageHistory::VillageHistoryRecord& villageRec = villageHistoryStore[{playerSectorX, playerSectorY}];
+    int nextFarmHousehold = 0, nextTradeHousehold = 0;
 
     for (auto& kv : bedHouseholds) {
         int primaryBed    = kv.second[0];
@@ -1473,67 +1517,52 @@ void spawnVillagers(bool isVillage) {
         }
         bool isFarmHousehold = (role == BuildingRole::FARM || role == BuildingRole::HERBALIST_FARM);
 
-        // ---- Pre-history: found this household ~HISTORY_YEARS ago, simulate forward ----
-        std::string surname = NPC_SURNAMES[surnameIdx[primaryBed] % nSurnames];
-        std::vector<Villager> hist;
+        // Pull this household's pre-simulated history from the cache instead
+        // of simulating it here. Matched by farm/trade type only (the real
+        // trade name isn't decided until now, see village_history.h's
+        // comment on HouseholdHistory) — if the map generated more of one
+        // type than generateAllVillageHistories() pre-simulated (shouldn't
+        // normally happen given placeVillage()'s fixed layout), leave this
+        // household's beds empty rather than inventing a fresh one.
+        VillageHistory::HouseholdHistory* hh = isFarmHousehold
+            ? (nextFarmHousehold  < (int)villageRec.farmHouseholds.size()  ? &villageRec.farmHouseholds[nextFarmHousehold++]   : nullptr)
+            : (nextTradeHousehold < (int)villageRec.tradeHouseholds.size() ? &villageRec.tradeHouseholds[nextTradeHousehold++] : nullptr);
+        if (!hh) continue;
 
-        Villager founder;
-        founder.name = VillageHistory::pickFirstName(hist, surname);
-        founder.age  = Names::generateAge(Race::HUMAN, raceTraits[(int)Race::HUMAN].minAge,
-                                                         raceTraits[(int)Race::HUMAN].minAge + 8);
-        VillageHistory::giveOccupation(founder, occ);
-        hist.push_back(founder);
+        std::vector<Villager>& hist       = hh->hist;
+        std::vector<int>&       diedAtYear = hh->diedAtYear;
+        Occupation placeholderOcc = isFarmHousehold ? Occupation::FARMER : Occupation::WOODCUTTER;
 
-        if (hasSpouseBed) {
-            Villager foundingSpouse;
-            int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, hist[0].age - 5);
-            int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, hist[0].age + 5);
-            foundingSpouse.age  = Names::generateAge(Race::HUMAN, lo, hi);
-            foundingSpouse.name = VillageHistory::pickFirstName(hist, surname);
-            hist.push_back(foundingSpouse);
-            hist[0].spouseId = 1;
-            hist[1].spouseId = 0;
-            if (!isFarmHousehold && (rand() % 100) < 20)
-                VillageHistory::giveOccupation(hist[1], Occupation::SEAMSTRESS);
-        }
-
-        std::vector<VillageHistory::LegendEvent> histLog;
-        std::vector<int> diedAtYear(hist.size(), -1);
-        for (int year = 1; year <= HISTORY_YEARS; year++) {
-            size_t before = hist.size();
-            std::vector<bool> wasAlive(before);
-            for (size_t k = 0; k < before; k++) wasAlive[k] = hist[k].alive;
-
-            VillageHistory::simulateOneYear(hist, year, histLog);
-
-            diedAtYear.resize(hist.size(), -1);
-            for (size_t k = 0; k < before; k++)
-                if (wasAlive[k] && !hist[k].alive) diedAtYear[k] = year;
-        }
-
-        // Resolve today's head of household: whoever currently holds `occ`,
-        // else the eldest living adult descendant if the trade went vacant
-        // (a real possible outcome — see village_history.h's apprenticeship
-        // comments — not forced back to "always staffed").
+        // Resolve today's head of household: whoever currently holds the
+        // pre-history placeholder trade, else the eldest living adult
+        // descendant if it went vacant (a real possible outcome — see
+        // village_history.h's apprenticeship comments — not forced back to
+        // "always staffed"). Then relabel to the *real* trade this building
+        // turned out to be — the cached history only knows "has a trade or
+        // not", not which one.
         int headIdx = -1;
         for (int k = 0; k < (int)hist.size(); k++)
-            if (hist[k].alive && hist[k].occupation == occ) { headIdx = k; break; }
+            if (hist[k].alive && hist[k].occupation == placeholderOcc) { headIdx = k; break; }
         if (headIdx < 0)
             for (int k = 0; k < (int)hist.size(); k++)
                 if (hist[k].alive && !hist[k].isChild && (headIdx < 0 || hist[k].age > hist[headIdx].age))
                     headIdx = k;
+        if (headIdx >= 0) hist[headIdx].occupation = occ;
 
         // Places graves for the whole simulated household regardless of
         // whether anyone survived — even a fully extinct line left a mark.
         // All households share the one graveyard (villageCemeteryX/Y), not a
-        // plot behind each individual house.
-        for (int k = 0; k < (int)hist.size(); k++)
-            if (diedAtYear[k] >= 0)
-                placeGraveNear(villageCemeteryX, villageCemeteryY,
-                                hist[k].name, hist[k].age, HISTORY_YEARS - diedAtYear[k]);
+        // plot behind each individual house. Guarded so a revisit doesn't
+        // place the same ancestors' graves a second time.
+        if (!villageRec.gravesPlaced) {
+            for (int k = 0; k < (int)hist.size(); k++)
+                if (diedAtYear[k] >= 0)
+                    placeGraveNear(villageCemeteryX, villageCemeteryY,
+                                    hist[k].name, hist[k].age, HISTORY_YEARS - diedAtYear[k]);
+        }
 
         // Extremely unlucky household — everyone died out with no living
-        // descendant at all (rare inside just 30 years, but not impossible).
+        // descendant at all (rare inside just 60 years, but not impossible).
         // Leave the beds empty rather than inventing a fresh unrelated
         // resident — an abandoned house is a legitimate simulated outcome.
         if (headIdx < 0) continue;
@@ -1660,6 +1689,7 @@ void spawnVillagers(bool isVillage) {
             }
         }
     }
+    villageRec.gravesPlaced = true;
 
     // One real goal per sector visit (docs/village.md "Цілі NPC → квести") — pick a
     // random non-child villager to be worried about an actual threat already spawned
@@ -4462,6 +4492,7 @@ int main(int argc, char* argv[]) {
     TTF_Init();
     srand((unsigned int)time(nullptr));
     overmap.generate();
+    generateAllVillageHistories();
     overmap.reveal(playerSectorX, playerSectorY);
     generateSector(overmap.sectors[playerSectorY][playerSectorX].biome,
                    playerSectorX, playerSectorY,

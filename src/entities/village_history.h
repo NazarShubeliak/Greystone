@@ -305,4 +305,94 @@ inline void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
     }
 }
 
+// ==================================================================
+// Persistent per-village pre-history (docs/world.md step 2: "Worldgen:
+// прогін N років для кожного села, spawnVillagers() читає результат").
+//
+// One simulated household — founder + spouse seeded young, aged forward
+// historyYears in isolation (no cross-household marriage; today's
+// "2 beds per building" model can't absorb a spouse relocating to a
+// different house during pre-history — a documented limit, not an
+// oversight). occupation on every member is a placeholder (FARMER for
+// farm-type, WOODCUTTER for trade-type) — hasReliableTrade()/succession
+// only ever check occupation != NONE, never the specific trade, so the
+// exact enum value is inert here. Which *real* trade this household
+// actually represents (Farmer/Herbalist/Blacksmith/Elder/Woodcutter)
+// isn't knowable map-free — it depends on which building placeVillage()
+// (map.cpp, map-dependent, can skip a role after 30 failed placement
+// tries) actually generates for a given village. The caller overwrites
+// the resolved head-of-household's occupation with the real one once
+// the physical building is known.
+struct HouseholdHistory {
+    bool isFarmHousehold;
+    std::string surname;
+    std::vector<Villager> hist;   // full simulated roster, dead members kept (alive=false)
+    std::vector<int> diedAtYear;  // parallel to hist; -1 = still alive at "now"
+};
+
+inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFarmHousehold, int historyYears) {
+    HouseholdHistory h;
+    h.isFarmHousehold = isFarmHousehold;
+    h.surname         = surname;
+
+    Villager founder;
+    founder.name = pickFirstName(h.hist, surname);
+    founder.age  = Names::generateAge(Race::HUMAN, raceTraits[(int)Race::HUMAN].minAge,
+                                                     raceTraits[(int)Race::HUMAN].minAge + 8);
+    giveOccupation(founder, isFarmHousehold ? Occupation::FARMER : Occupation::WOODCUTTER);
+    h.hist.push_back(founder);
+
+    Villager foundingSpouse;
+    int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, h.hist[0].age - 5);
+    int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, h.hist[0].age + 5);
+    foundingSpouse.age  = Names::generateAge(Race::HUMAN, lo, hi);
+    foundingSpouse.name = pickFirstName(h.hist, surname);
+    h.hist.push_back(foundingSpouse);
+    h.hist[0].spouseId = 1;
+    h.hist[1].spouseId = 0;
+    if (!isFarmHousehold && (rand() % 100) < 20)
+        giveOccupation(h.hist[1], Occupation::SEAMSTRESS);
+
+    std::vector<LegendEvent> log; // discarded — nothing reads it back yet, same as main.cpp's use today
+    h.diedAtYear.assign(h.hist.size(), -1);
+    for (int year = 1; year <= historyYears; year++) {
+        size_t before = h.hist.size();
+        std::vector<bool> wasAlive(before);
+        for (size_t k = 0; k < before; k++) wasAlive[k] = h.hist[k].alive;
+
+        simulateOneYear(h.hist, year, log);
+
+        h.diedAtYear.resize(h.hist.size(), -1);
+        for (size_t k = 0; k < before; k++)
+            if (wasAlive[k] && !h.hist[k].alive) h.diedAtYear[k] = year;
+    }
+    return h;
+}
+
+// One village's cached pre-history: 2 farm-type + 3 trade-type households,
+// matching worldgen_sim.cpp's seedVillage() role count (2 farms always
+// guaranteed by placeVillage(); Smith/Elder/Woodcutter may or may not
+// actually get placed on the map — unused cached households are simply
+// never consumed by the caller). gravesPlaced guards spawnVillagers()
+// against placing this village's ancestor graves more than once across
+// repeated sector visits.
+struct VillageHistoryRecord {
+    std::vector<HouseholdHistory> farmHouseholds;
+    std::vector<HouseholdHistory> tradeHouseholds;
+    bool gravesPlaced = false;
+};
+
+inline VillageHistoryRecord simulateVillageHistory(int villageSurnameSeed, int historyYears = 60) {
+    VillageHistoryRecord rec;
+    int nSurnames = countStrings(NPC_SURNAMES);
+    auto surnameFor = [&](int slot) { return std::string(NPC_SURNAMES[(villageSurnameSeed + slot) % nSurnames]); };
+
+    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(0), true,  historyYears));
+    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(1), true,  historyYears));
+    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(2), false, historyYears)); // Smith
+    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(3), false, historyYears)); // Elder
+    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(4), false, historyYears)); // Woodcutter
+    return rec;
+}
+
 } // namespace VillageHistory
