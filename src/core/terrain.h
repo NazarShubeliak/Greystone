@@ -69,7 +69,11 @@ struct TerrainDef {
     const char* description;
     const char* symbol;
     SDL_Color   color;
-    int         moveCost;   // 0 = impassable
+    int         moveCost;      // 0 = impassable
+    bool        blocksVision = false; // separate from moveCost==0 (ObjectDef already
+                                       // splits blocksMove/blocksVision the same way) —
+                                       // Water is impassable but see-through; only
+                                       // Bedrock (solid rock) actually blocks sight
 };
 
 struct GroundDef {
@@ -99,25 +103,25 @@ struct ObjectDef {
 
 static const TerrainDef terrainDefs[T_COUNT] = {
   { "Bedrock",      "Solid rock foundation. Completely impassable.",
-    "#", {100,100,100,255},  0   },
+    "#", {100,100,100,255},  0,   true  },
   { "Grassland",    "Open meadow with firm, even ground.",
-    ".", { 34,139, 34,255},  100 },
+    ".", { 34,139, 34,255},  100, false },
   { "Forest floor", "Dark, rich soil beneath a dense forest canopy.",
-    ".", { 20, 80, 20,255},  110 },
+    ".", { 20, 80, 20,255},  110, false },
   { "Sand",         "Fine desert sand. Soft and tiring to walk through.",
-    ".", {210,180,140,255},  150 },
+    ".", {210,180,140,255},  150, false },
   { "Swamp",        "Murky, waterlogged ground. Exhausting to traverse.",
-    "~", { 47, 79, 47,255},  200 },
+    "~", { 47, 79, 47,255},  200, false },
   { "Mud",          "Thick, wet mud that clings to boots.",
-    ".", {101, 67, 33,255},  170 },
+    ".", {101, 67, 33,255},  170, false },
   { "Stone",        "Rocky terrain. Firm but uneven underfoot.",
-    ".", {120,120,120,255},  120 },
+    ".", {120,120,120,255},  120, false },
   { "Snow",         "A blanket of fresh snow muffles all sound.",
-    ".", {220,235,255,255},  130 },
-  { "Water",        "Deep water. Impassable without swimming.",
-    "~", { 30, 80,200,255},  0   },
+    ".", {220,235,255,255},  130, false },
+  { "Water",        "Deep water. Impassable without swimming, but you can see across it.",
+    "~", { 30, 80,200,255},  0,   false },
   { "Stone floor",  "Flat stone paving worn smooth by foot traffic.",
-    ".", {160,150,130,255},  100 },
+    ".", {160,150,130,255},  100, false },
 };
 
 static const GroundDef groundDefs[G_COUNT] = {

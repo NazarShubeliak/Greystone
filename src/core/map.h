@@ -38,9 +38,12 @@ struct Tile {
         return true;
     }
 
-    // Does this tile block line-of-sight?
+    // Does this tile block line-of-sight? Separate from impassability
+    // (moveCost==0) — Water is impassable-without-swimming but you can see
+    // straight across it, same as ObjectDef already splits blocksMove from
+    // blocksVision for objects (e.g. a low Rock blocks movement, not sight).
     bool blocksVision() const {
-        if (terrainDefs[terrainId].moveCost == 0) return true;
+        if (terrainDefs[terrainId].blocksVision) return true;
         if (objectId >= 0 && objectDefs[objectId].blocksVision) return true;
         return false;
     }
