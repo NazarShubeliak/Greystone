@@ -853,6 +853,45 @@ void tickAgingOneYear() {
     }
 }
 
+// Crop tiles physically grow back after harvest instead of staying barren
+// forever (docs/village.md economic-cycle gap — "жати" already existed,
+// regrowth never did). calcPlantAge() (map.cpp) only ever ran at sector
+// generation, giving a freshly-placed field staggered maturity from a
+// deterministic date formula — nothing advanced an already-placed tile's
+// plantAge again afterward, so a harvest that reset it to 0 left the plant
+// dead forever (and even a never-harvested, generation-time-immature tile
+// never finished growing either — the same underlying gap, not
+// harvest-specific). Runs once per elapsed in-game day (same "static lastX,
+// while elapsed" idiom as tickYearlyEvents() below), advancing every plant
+// object's plantAge at the same 255/daysToMature-per-day rate
+// calcPlantAge() already uses, so regrowth timing matches what generation
+// would have produced. Paused (not reversed) outside growSeasons — winter
+// wheat waits, doesn't wilt. Only the currently-loaded sector — same scope
+// as every other live per-sector tick in this game (fire hazards, needs);
+// a distant sector's fields just regenerate fresh (via calcPlantAge()) on
+// the next visit, like everything else about it.
+void tickPlantGrowth() {
+    static long long lastDay = worldTime.minutes / (60 * 24);
+    long long curDay = worldTime.minutes / (60 * 24);
+    if (curDay <= lastDay) return;
+    int daysPassed = (int)(curDay - lastDay);
+    lastDay = curDay;
+
+    int season = worldTime.season();
+    for (int y = 1; y < MAP_HEIGHT - 1; y++) {
+        for (int x = 1; x < MAP_WIDTH - 1; x++) {
+            Tile& t = map[y][x];
+            if (t.objectId < 0) continue;
+            const ObjectDef& od = objectDefs[t.objectId];
+            if (!od.isPlant || t.plantAge >= 255) continue;
+            if (!((od.growSeasons >> season) & 1)) continue; // dormant this season — paused, not reversed
+            int growPerDay = std::max(1, 255 / std::max(1, od.daysToMature));
+            int newAge = (int)t.plantAge + growPerDay * daysPassed;
+            t.plantAge = (uint8_t)std::min(255, newAge);
+        }
+    }
+}
+
 // Runs tickAgingOneYear() + simulateVillageYear() once for every in-game year
 // crossed since the last call — not just once per call — so a jump of several
 // years in one go (skipyears cheat, or a future instant travel/time-skip
@@ -941,6 +980,7 @@ void onPlayerAct(int extraEnergy = 0) {
     tickEnemyNeeds();
     tickFireHazards();
     tickYearlyEvents();
+    tickPlantGrowth();
     if (player.hunger >= 1.0f) {
         player.body.torso.hp = std::max(0, player.body.torso.hp - 1);
         player.sync();
@@ -4825,6 +4865,7 @@ int main(int argc, char* argv[]) {
             worldTime.minutes += console.pendingSkipYears * WorldTime::MINUTES_PER_YEAR;
             console.pendingSkipYears = 0;
             tickYearlyEvents(); // apply immediately, don't wait for the player's next action
+            tickPlantGrowth();
         }
 
         if (console.pendingExportLegends) {
@@ -4889,6 +4930,7 @@ int main(int argc, char* argv[]) {
                 player.tickNeeds(map[player.y][player.x].terrainId == T_WATER);
                 tickVillagerNeeds();
                 tickYearlyEvents();
+                tickPlantGrowth();
 
                 // Starvation/dehydration damage + message throttled to once per game hour.
                 if (worldTime.hour() != lastNeedsHour) {
