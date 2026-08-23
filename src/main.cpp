@@ -1935,6 +1935,26 @@ static bool followPath(Villager& v, int tx, int ty) {
     return false;
 }
 
+// Nearest OTHER living villager who actually owns a granary (only farm/
+// herbalist households have one — see npc.h) — the closed loop docs/
+// village.md describes ("коваль купує хліб у фермера") starts here: a
+// villager with nothing left to eat of their own picks the closest
+// granary-owning household to buy from instead of just going hungry.
+// Chebyshev distance from the buyer's own bed, same metric spawnVillagers()
+// already uses for household clustering. -1 if nobody in this sector has a
+// granary at all (rare — every village has 2 farm-type households, but not
+// impossible if both died out with no heir, see village_history.h).
+int findGranarySeller(const Villager& buyer) {
+    int bestIdx = -1, bestDist = INT_MAX;
+    for (int i = 0; i < (int)villagers.size(); i++) {
+        const Villager& cand = villagers[i];
+        if (!cand.alive || &cand == &buyer || !cand.granary) continue;
+        int dist = std::max(std::abs(cand.granaryX - buyer.bedX), std::abs(cand.granaryY - buyer.bedY));
+        if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+    }
+    return bestIdx;
+}
+
 void updateVillagers() {
     float dark     = worldTime.darkness();
     float sunriseH = worldTime.sunriseHour();
@@ -2040,11 +2060,77 @@ void updateVillagers() {
                                 }
                             }
                     }
+                    // No food of their own — try to buy some instead of just
+                    // starving (docs/village.md economic cycle: "коваль
+                    // купує хліб у фермера"). Only makes sense for
+                    // non-farmers; a farmer/herbalist with an empty granary
+                    // already tried harvesting above and failed for a real
+                    // reason (nothing mature yet), not a missing market.
+                    if (!ate && v.occupation != Occupation::FARMER && v.occupation != Occupation::HERBALIST && v.bag) {
+                        int gold = 0;
+                        for (const Item& it : v.bag->contents) if (it.name == "Gold Coin") gold += it.count;
+                        int seller = findGranarySeller(v);
+                        if (gold > 0 && seller >= 0) {
+                            v.tradeTargetId = seller;
+                            v.state = Villager::State::BUY_FOOD;
+                            v.homePath.clear();
+                            break;
+                        }
+                    }
                     // If nothing worked, hunger stays high — a real risk, not just flavor.
                     if (ate) v.hunger = 0.0f;
                     v.state = Villager::State::WANDER;
                 }
                 break;
+            case Villager::State::BUY_FOOD: {
+                if (v.tradeTargetId < 0 || v.tradeTargetId >= (int)villagers.size()) { v.state = Villager::State::WANDER; break; }
+                Villager& seller = villagers[v.tradeTargetId];
+                if (!seller.alive || !seller.granary) { v.state = Villager::State::WANDER; break; } // owner died/lost the granary since we set out — give up gracefully
+                if (followPath(v, seller.granaryX, seller.granaryY)) {
+                    // First nutrition>0 stack in the seller's granary, same
+                    // "first match" rule eatFrom() (above) already uses.
+                    auto& stock = seller.granary->contents;
+                    int idx = -1;
+                    for (int i = 0; i < (int)stock.size(); i++)
+                        if (stock[i].nutrition > 0) { idx = i; break; }
+
+                    if (idx >= 0 && v.bag) {
+                        Item food  = stock[idx];
+                        food.count = 1;
+                        int price  = std::max(1, food.value);
+
+                        int gold = 0;
+                        for (const Item& it : v.bag->contents) if (it.name == "Gold Coin") gold += it.count;
+
+                        if (gold >= price) {
+                            // Pay the seller directly (their purse, not the
+                            // granary — coins aren't food) and hand over one
+                            // portion, same pattern TradePanel already uses
+                            // for player<->merchant trades.
+                            int need = price;
+                            for (int i = (int)v.bag->contents.size() - 1; i >= 0 && need > 0; i--) {
+                                Item& it = v.bag->contents[i];
+                                if (it.name != "Gold Coin") continue;
+                                int take = std::min(need, it.count);
+                                it.count -= take; need -= take;
+                                if (it.count <= 0) v.bag->contents.erase(v.bag->contents.begin() + i);
+                            }
+                            if (seller.bag) {
+                                Item payment = Items::goldCoin();
+                                payment.count = price;
+                                addToContainer(*seller.bag, std::move(payment));
+                            }
+                            if (stock[idx].count > 1) stock[idx].count--;
+                            else                       stock.erase(stock.begin() + idx);
+                            v.hunger = 0.0f;
+                            panel.addMessage(v.name + " buys " + food.name + " from " + seller.name + ".");
+                        }
+                    }
+                    v.tradeTargetId = -1;
+                    v.state = Villager::State::WANDER;
+                }
+                break;
+            }
             case Villager::State::DRINK:
                 if (villageWellX < 0) { v.state = Villager::State::WANDER; break; }
                 if (followPath(v, villageWellX, villageWellY)) {

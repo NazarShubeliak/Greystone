@@ -97,7 +97,8 @@ struct Villager : Actor {
     enum class State {
         WANDER, WALK_HOME, SLEEP, EAT, DRINK, FLEE, FIGHT,
         GO_TO_CORPSE,   // walking to a dead villager's body to bury it
-        CARRY_TO_GRAVE  // body picked up, walking to the village graveyard
+        CARRY_TO_GRAVE, // body picked up, walking to the village graveyard
+        BUY_FOOD        // no food of their own (bag/granary empty, not a farmer) — walking to buy some off another villager's granary
     } state = State::SLEEP;
 
     // Path used when walking home, to the well, to a corpse, or to the
@@ -153,6 +154,12 @@ struct Villager : Actor {
     std::optional<Item> granary;
     int granaryX = -1, granaryY = -1;
     int granaryOwnerId = -1;
+
+    // NPC-to-NPC trade (docs/village.md economic cycle: "коваль купує хліб у
+    // фермера") — a non-farmer with nothing left to eat targets the nearest
+    // other villager who owns a granary, set once when BUY_FOOD starts and
+    // read again on arrival (findGranarySeller() in main.cpp picks it).
+    int tradeTargetId = -1;
 
     // A real goal (docs/village.md "Цілі NPC → квести") — references an
     // actual Enemy already spawned in this sector by its stable Actor::id,
