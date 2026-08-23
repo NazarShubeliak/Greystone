@@ -1789,8 +1789,19 @@ void spawnVillagers(bool isVillage) {
             Item loaves = Items::bread();
             loaves.count = v.isChild ? 3 : 6;
             addToContainer(*v.bag, std::move(loaves));
-            if (!v.isChild)
+            if (!v.isChild) {
                 for (Item& g : goodsFor(v.occupation)) addToContainer(*v.bag, std::move(g));
+                // A little personal coin — without this, BUY_FOOD (docs/
+                // village.md NPC-to-NPC trade) could never actually fire:
+                // nothing else ever puts Gold Coin in a villager's bag
+                // unless the player specifically bought goods off them
+                // first (TradePanel), so most villagers would sit at 0
+                // gold forever (found testing skipyears/simulatedays — no
+                // "X buys Y from Z" ever appeared).
+                Item coins = Items::goldCoin();
+                coins.count = 5 + rand() % 11; // 5-15
+                addToContainer(*v.bag, std::move(coins));
+            }
             v.outfit = Items::commonClothes(); // never "naked with a backpack"
 
             if (worldTime.darkness() > 0.5f) {
