@@ -339,6 +339,8 @@ inline void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
     }
 }
 
+inline constexpr int ECONOMY_FLAVOR_CHANCE_PERCENT = 20; // per household, per year — occasional texture, not a full ledger
+
 // ==================================================================
 // Persistent per-village pre-history (docs/world.md step 2: "Worldgen:
 // прогін N років для кожного села, spawnVillagers() читає результат").
@@ -372,6 +374,26 @@ struct HouseholdHistory {
     int gravesPlacedThroughYear = 0;
 };
 
+// Map-free flavor for docs/village.md's economic cycle (real Item harvest/
+// trade only happens for whichever village the player is actually standing
+// in — main.cpp's HARVEST/CARRY_HARVEST/BUY_FOOD states — but every OTHER
+// village still deserves *some* record of it happening, for a Legends log
+// that doesn't depend on the player having visited or waited there — user
+// request). Called once per simulated year per household (from
+// simulateHousehold()/advanceHousehold() below). Not a real economy — no
+// Items move, nothing is counted — same abstraction the rest of
+// pre-history/distant-tick already is.
+inline void logEconomicFlavor(const HouseholdHistory& h, int year, std::vector<LegendEvent>& log) {
+    if ((rand() % 100) >= ECONOMY_FLAVOR_CHANCE_PERCENT) return;
+    for (const Villager& v : h.hist) {
+        if (!v.alive || v.isChild || v.occupation == Occupation::NONE) continue;
+        log.push_back({year, h.isFarmHousehold
+            ? v.name + "'s household brings in a good harvest this year."
+            : v.name + " trades with the farms to keep the household fed."});
+        return; // one line per household per year is plenty
+    }
+}
+
 inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFarmHousehold, int historyYears,
                                            std::vector<LegendEvent>& log) {
     HouseholdHistory h;
@@ -403,6 +425,7 @@ inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFar
         for (size_t k = 0; k < before; k++) wasAlive[k] = h.hist[k].alive;
 
         simulateOneYear(h.hist, year, log);
+        logEconomicFlavor(h, year, log);
 
         h.diedAtYear.resize(h.hist.size(), -1);
         for (size_t k = 0; k < before; k++)
@@ -423,6 +446,7 @@ inline void advanceHousehold(HouseholdHistory& h, int year, std::vector<LegendEv
     for (size_t k = 0; k < before; k++) wasAlive[k] = h.hist[k].alive;
 
     simulateOneYear(h.hist, year, log);
+    logEconomicFlavor(h, year, log);
 
     h.diedAtYear.resize(h.hist.size(), -1);
     for (size_t k = 0; k < before; k++)

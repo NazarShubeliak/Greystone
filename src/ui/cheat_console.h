@@ -43,6 +43,14 @@ struct CheatConsole {
     // without waiting the real number of actions that many years would take.
     int pendingSkipYears = 0;
 
+    // Pending simulatedays — number of in-game days to actually tick minute
+    // by minute (unlike skipyears, which just jumps the calendar), consumed
+    // by main.cpp. 0 = none pending. Runs the same per-minute tick sequence
+    // the Wait panel does (needs, plant growth, live village demography) —
+    // for testing hunger-gated behavior (NPC-to-NPC trade, the harvest/
+    // carry cycle) without manually sitting through real Wait presses.
+    int pendingSimulateDays = 0;
+
     // Pending legends export — filename set by execute(), consumed by
     // main.cpp. Empty string = none pending (a non-empty filename is always
     // needed even for the default, so an explicit bool flag alongside it —
@@ -151,7 +159,7 @@ struct CheatConsole {
 
         } else if (cmd == "help") {
             result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  "
-                       "setskill <skill> <lvl>  setage <age>  skipyears <n>  unlocktech <name>  unlockspell <name>  "
+                       "setskill <skill> <lvl>  setage <age>  skipyears <n>  simulatedays <n>  unlocktech <name>  unlockspell <name>  "
                        "legends [file]  gp  help";
             resultOk = true;
 
@@ -313,6 +321,20 @@ struct CheatConsole {
                 return;
             }
 
+            // simulatedays <n>
+            int nDays;
+            if (sscanf(cmd.c_str(), "simulatedays %d", &nDays) == 1) {
+                if (nDays < 1 || nDays > 3650) {
+                    result   = "Days must be 1-3650.";
+                    resultOk = false;
+                } else {
+                    pendingSimulateDays = nDays;
+                    result   = "Simulating " + std::to_string(nDays) + " day(s) minute by minute...";
+                    resultOk = true;
+                }
+                return;
+            }
+
             // legends [filename] — export every cached village's chronicle +
             // roster (docs/world.md "Legends-лог подій") to a text file, read
             // by the standalone legends_viewer.exe. No filename = "legends.txt".
@@ -393,6 +415,9 @@ struct CheatConsole {
         if (input == "skipyears" || starts("skipyears "))
             return "skipyears <n>   fast-forwards n in-game years — tests marriage/births/growing up/"
                    "occupation succession in the current village. e.g. skipyears 20";
+        if (input == "simulatedays" || starts("simulatedays "))
+            return "simulatedays <n>   actually ticks n days minute-by-minute (needs, plant growth, "
+                   "village demography) — unlike skipyears, hunger/harvest/trade states fire for real. e.g. simulatedays 10";
         if (input == "unlocktech" || starts("unlocktech "))
             return "unlocktech: brutalstrike  lunge  backstab";
         if (input == "unlockspell" || starts("unlockspell "))
@@ -405,7 +430,7 @@ struct CheatConsole {
         // Partial command suggestions
         static const char* cmds[] = {
             "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","unlocktech","unlockspell","legends","help", nullptr
+            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","help", nullptr
         };
         std::string sugg;
         for (int i = 0; cmds[i]; i++) {
@@ -421,7 +446,7 @@ struct CheatConsole {
         // Complete top-level command
         static const char* cmds[] = {
             "reveal_map","hide_map","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","unlocktech","unlockspell","legends","help", nullptr
+            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","help", nullptr
         };
         if (input.find(' ') == std::string::npos) {
             for (int i = 0; cmds[i]; i++) {

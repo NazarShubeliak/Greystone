@@ -5037,6 +5037,35 @@ int main(int argc, char* argv[]) {
             tickPlantGrowth();
         }
 
+        // simulatedays — unlike skipyears (which just jumps the calendar),
+        // this actually ticks every simulated minute in between (same
+        // sequence the Wait loop uses below), so hunger/thirst genuinely
+        // build up and the new BUY_FOOD/HARVEST/CARRY_HARVEST states fire
+        // for real — testing them no longer needs the player to manually
+        // sit through real Wait presses (user request).
+        if (console.pendingSimulateDays > 0) {
+            int n = console.pendingSimulateDays;
+            console.pendingSimulateDays = 0;
+            int targetMinutes = worldTime.minutes + n * 24 * 60;
+            int lastNeedsHour = worldTime.hour();
+            while (worldTime.minutes < targetMinutes && player.isAlive()) {
+                worldTime.advance();
+                tickWorld();
+                player.energy = 0;
+                player.tickNeeds(map[player.y][player.x].terrainId == T_WATER);
+                tickVillagerNeeds();
+                tickYearlyEvents();
+                tickPlantGrowth();
+
+                if (worldTime.hour() != lastNeedsHour) {
+                    lastNeedsHour = worldTime.hour();
+                    if (player.hunger >= 1.0f) { player.body.torso.hp = std::max(0, player.body.torso.hp - 1); player.sync(); }
+                    if (player.thirst >= 1.0f) { player.body.torso.hp = std::max(0, player.body.torso.hp - 2); player.sync(); }
+                }
+            }
+            panel.addMessage("Simulated " + std::to_string(n) + " day(s).");
+        }
+
         if (console.pendingExportLegends) {
             exportLegends(console.pendingLegendsFilename);
             console.pendingExportLegends = false;
