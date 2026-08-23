@@ -96,9 +96,11 @@ struct Villager : Actor {
 
     enum class State {
         WANDER, WALK_HOME, SLEEP, EAT, DRINK, FLEE, FIGHT,
-        GO_TO_CORPSE,   // walking to a dead villager's body to bury it
-        CARRY_TO_GRAVE, // body picked up, walking to the village graveyard
-        BUY_FOOD        // no food of their own (bag/granary empty, not a farmer) — walking to buy some off another villager's granary
+        GO_TO_CORPSE,    // walking to a dead villager's body to bury it
+        CARRY_TO_GRAVE,  // body picked up, walking to the village graveyard
+        BUY_FOOD,        // no food of their own (bag/granary empty, not a farmer) — walking to buy some off another villager's granary
+        HARVEST,         // Farmer/Herbalist walking to a specific mature crop tile to pick it
+        CARRY_HARVEST    // picked, walking back to the granary to drop it off
     } state = State::SLEEP;
 
     // Path used when walking home, to the well, to a corpse, or to the
@@ -160,6 +162,12 @@ struct Villager : Actor {
     // other villager who owns a granary, set once when BUY_FOOD starts and
     // read again on arrival (findGranarySeller() in main.cpp picks it).
     int tradeTargetId = -1;
+
+    // Physical harvest cycle (docs/village.md: "фермер фізично... жне →
+    // несе снопи в комору") — set once when HARVEST starts (a specific
+    // mature crop tile, found near the farmer's bed) and read again on
+    // arrival there and then at the granary during CARRY_HARVEST.
+    int harvestTargetX = -1, harvestTargetY = -1;
 
     // A real goal (docs/village.md "Цілі NPC → квести") — references an
     // actual Enemy already spawned in this sector by its stable Actor::id,

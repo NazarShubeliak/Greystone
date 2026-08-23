@@ -2041,24 +2041,28 @@ void updateVillagers() {
                     }
 
                     if (!ate && (v.occupation == Occupation::FARMER || v.occupation == Occupation::HERBALIST) && v.granary) {
-                        // Granary's empty too — harvest a mature crop from
-                        // their own field straight into it (a real Item, not
-                        // an invisible hunger reset), then eat one portion.
+                        // Granary's empty too — go physically harvest a
+                        // mature crop from their own field instead of an
+                        // instant scan-and-consume (docs/village.md:
+                        // "фермер фізично... жне → несе снопи в комору").
+                        // HARVEST/CARRY_HARVEST (below) do the actual walk;
+                        // this just finds where to walk to.
                         int wantId = (v.occupation == Occupation::FARMER) ? O_WHEAT : O_HERB;
-                        for (int dy = -6; dy <= 6 && !ate; dy++)
-                            for (int dx = -6; dx <= 6 && !ate; dx++) {
+                        int bestX = -1, bestY = -1;
+                        for (int dy = -6; dy <= 6 && bestX < 0; dy++)
+                            for (int dx = -6; dx <= 6 && bestX < 0; dx++) {
                                 int fx = v.bedX + dx, fy = v.bedY + dy;
                                 if (fx < 0 || fx >= MAP_WIDTH || fy < 0 || fy >= MAP_HEIGHT) continue;
-                                Tile& t = map[fy][fx];
-                                if (t.objectId == wantId && t.plantAge >= 170) {
-                                    t.plantAge = 0; // harvested — regrows over the season
-                                    Item food = (v.occupation == Occupation::FARMER)
-                                              ? Items::flatbread() : Items::mushroomStew();
-                                    food.count = 3;
-                                    addToContainer(*v.granary, food);
-                                    ate = eatFrom(*v.granary);
-                                }
+                                const Tile& t = map[fy][fx];
+                                if (t.objectId == wantId && t.plantAge >= 170) { bestX = fx; bestY = fy; }
                             }
+                        if (bestX >= 0) {
+                            v.harvestTargetX = bestX;
+                            v.harvestTargetY = bestY;
+                            v.state = Villager::State::HARVEST;
+                            v.homePath.clear();
+                            break;
+                        }
                     }
                     // No food of their own — try to buy some instead of just
                     // starving (docs/village.md economic cycle: "коваль
@@ -2080,6 +2084,47 @@ void updateVillagers() {
                     // If nothing worked, hunger stays high — a real risk, not just flavor.
                     if (ate) v.hunger = 0.0f;
                     v.state = Villager::State::WANDER;
+                }
+                break;
+            case Villager::State::HARVEST: {
+                if (v.harvestTargetX < 0) { v.state = Villager::State::WANDER; break; }
+                if (followPath(v, v.harvestTargetX, v.harvestTargetY)) {
+                    Tile& t = map[v.harvestTargetY][v.harvestTargetX];
+                    bool isFarmer = (v.occupation == Occupation::FARMER);
+                    int  wantId   = isFarmer ? O_WHEAT : O_HERB;
+                    if (t.objectId == wantId && t.plantAge >= 170 && v.bag) {
+                        t.plantAge = 0; // harvested — regrows over time via tickPlantGrowth()
+                        Item food  = isFarmer ? Items::flatbread() : Items::mushroomStew();
+                        food.count = 3;
+                        addToContainer(*v.bag, std::move(food));
+                        v.state = Villager::State::CARRY_HARVEST;
+                    } else {
+                        // No longer mature (regrowth is gradual, not instant)
+                        // or something else claimed it — give up gracefully,
+                        // same tolerance as everywhere else in this loop.
+                        v.state = Villager::State::WANDER;
+                    }
+                    v.harvestTargetX = v.harvestTargetY = -1;
+                    v.homePath.clear();
+                }
+                break;
+            }
+            case Villager::State::CARRY_HARVEST:
+                if (!v.granary) { v.state = Villager::State::WANDER; break; }
+                if (followPath(v, v.granaryX, v.granaryY)) {
+                    // Whole harvest, not just what's needed for one meal —
+                    // "несе снопи в комору", the granary is the shared
+                    // family stock from here, not the farmer's personal bag.
+                    if (v.bag) {
+                        auto& c = v.bag->contents;
+                        for (int i = (int)c.size() - 1; i >= 0; i--) {
+                            if (c[i].nutrition <= 0) continue;
+                            addToContainer(*v.granary, c[i]);
+                            c.erase(c.begin() + i);
+                        }
+                    }
+                    v.state = Villager::State::EAT; // re-enter EAT — existing granary-eat logic (above) picks it up from here
+                    v.homePath.clear();
                 }
                 break;
             case Villager::State::BUY_FOOD: {
