@@ -239,6 +239,28 @@ WorldTime worldTime;
 int playerSectorX = 50;
 int playerSectorY = 50;
 
+// Logs a significant live event (marriage, birth, death, trade, harvest...)
+// into the CURRENTLY loaded village's persistent chronicle
+// (villageHistoryStore[{playerSectorX,playerSectorY}].log) — the same
+// VillageHistoryRecord::log the pre-history simulation and
+// advanceDistantVillageHistories() already write to, and the `legends`
+// cheat/legends_viewer.exe already read. Before this, anything that
+// happened live while the player was actually standing in a village only
+// ever reached the transient on-screen message panel — gone the moment it
+// scrolled off (user request: "програма має записувати лог кожного села
+// кожного жителя, щоб... розібратись хто вмер хто женився").
+//
+// Year is an absolute game-year count from campaign start
+// (worldTime.minutes / MINUTES_PER_YEAR) — NOT the same numbering as this
+// village's own yearsSimulated, which stays frozen while it's the live
+// village being played (advanceDistantVillageHistories() deliberately
+// skips it — a separate, already-documented gap). Just a consistent global
+// timestamp, comparable across every village's log the same way.
+void logVillageEvent(const std::string& text) {
+    long long year = worldTime.minutes / WorldTime::MINUTES_PER_YEAR;
+    villageHistoryStore[{playerSectorX, playerSectorY}].log.push_back({(int)year, text});
+}
+
 // ------------------------------------------------------------------ helpers
 //
 // randomHitPart()/partName() and the resolveAttack() formula now live in combat.h
@@ -538,6 +560,13 @@ void assignBurial(const Corpse& c, const Villager& deceased) {
 // else) — also drops what they were wearing, not just what they carried, so
 // nothing survives them as an invisible "worn" item.
 void dropVillagerLoot(Villager& v) {
+    // Every villager death funnels through here regardless of cause (old
+    // age, starvation, combat, fire, drowning, crushed...) — one hook
+    // covers all of it instead of chasing down every "X dies" message site
+    // individually. Cause itself only ever reaches the transient on-screen
+    // message, same as before; the persistent chronicle just needs who and
+    // when.
+    logVillageEvent(v.name + " has died.");
     transferGranary(v);
     dropBag(v, v.bag);
     if (v.outfit) {
@@ -1340,6 +1369,7 @@ void simulateVillageYear(std::vector<Villager>& vs) {
         if (v.age >= raceTraits[(int)v.race].minAge) {
             v.isChild = false;
             panel.addMessage(v.name + " has grown into an adult.");
+            logVillageEvent(v.name + " has grown into an adult.");
         }
     }
 
@@ -1382,9 +1412,11 @@ void simulateVillageYear(std::vector<Villager>& vs) {
             Occupation occ = deceased.occupation;
             giveOccupation(vs[heirIdx], occ);
             deceased.occupation = Occupation::NONE;
-            panel.addMessage(viaFamily
+            std::string msg = viaFamily
                 ? vs[heirIdx].name + " takes up the family trade as " + occupationName(occ) + "."
-                : vs[heirIdx].name + " apprentices as the village's new " + occupationName(occ) + ", the trade having no heir.");
+                : vs[heirIdx].name + " apprentices as the village's new " + occupationName(occ) + ", the trade having no heir.";
+            panel.addMessage(msg);
+            logVillageEvent(msg);
         }
     }
 
@@ -1415,6 +1447,7 @@ void simulateVillageYear(std::vector<Villager>& vs) {
         vs[j].spouseId = i;
         matchedThisYear[i] = matchedThisYear[j] = true;
         panel.addMessage(vs[i].name + " and " + vs[j].name + " are married.");
+        logVillageEvent(vs[i].name + " and " + vs[j].name + " are married.");
     }
 
     // ---- Births: married couples at full adulthood might have a child --------
@@ -1432,6 +1465,7 @@ void simulateVillageYear(std::vector<Villager>& vs) {
         if ((rand() % 100) < BIRTH_CHANCE_PERCENT) {
             int childId = spawnChild(vs, i, j);
             panel.addMessage(vs[childId].name + " was born to " + vs[i].name + " and " + vs[j].name + ".");
+            logVillageEvent(vs[childId].name + " was born to " + vs[i].name + " and " + vs[j].name + ".");
         }
     }
 }
@@ -2117,11 +2151,14 @@ void updateVillagers() {
                     // family stock from here, not the farmer's personal bag.
                     if (v.bag) {
                         auto& c = v.bag->contents;
+                        bool carried = false;
                         for (int i = (int)c.size() - 1; i >= 0; i--) {
                             if (c[i].nutrition <= 0) continue;
                             addToContainer(*v.granary, c[i]);
                             c.erase(c.begin() + i);
+                            carried = true;
                         }
+                        if (carried) logVillageEvent(v.name + " harvests the field and carries it to the granary.");
                     }
                     v.state = Villager::State::EAT; // re-enter EAT — existing granary-eat logic (above) picks it up from here
                     v.homePath.clear();
@@ -2169,6 +2206,7 @@ void updateVillagers() {
                             else                       stock.erase(stock.begin() + idx);
                             v.hunger = 0.0f;
                             panel.addMessage(v.name + " buys " + food.name + " from " + seller.name + ".");
+                            logVillageEvent(v.name + " buys " + food.name + " from " + seller.name + ".");
                         }
                     }
                     v.tradeTargetId = -1;
