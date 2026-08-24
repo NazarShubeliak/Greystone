@@ -65,6 +65,14 @@ struct CheatConsole {
     // Pending unlockspell — spell token, consumed by main.cpp.
     std::string pendingUnlockSpell;
 
+    // Pending lich transformation — consumed by main.cpp (sets player.race =
+    // Race::LICH and clears naturalDeathAge, same undead-immortal pattern
+    // Vampire/Skeleton/Ghost already use). Cheat-only for now — a real Death
+    // school ritual is future work (docs/magic.md); this exists so long
+    // multi-day simulatedays/skipyears tests don't require constantly
+    // re-feeding/re-watering the player character just to keep testing.
+    bool pendingBecomeLich = false;
+
     // Lowercase, no-space tokens — order MUST match enum Skill (skill.h) so
     // main.cpp can map token index -> Skill index directly.
     static constexpr const char* SKILL_TOKENS[] = {
@@ -160,7 +168,12 @@ struct CheatConsole {
         } else if (cmd == "help") {
             result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  "
                        "setskill <skill> <lvl>  setage <age>  skipyears <n>  simulatedays <n>  unlocktech <name>  unlockspell <name>  "
-                       "legends [file]  gp  help";
+                       "legends [file]  lich  gp  help";
+            resultOk = true;
+
+        } else if (cmd == "lich") {
+            pendingBecomeLich = true;
+            result   = "You feel your heart stop. Hunger and thirst no longer touch you.";
             resultOk = true;
 
         } else {
@@ -395,7 +408,7 @@ struct CheatConsole {
             return input.rfind(prefix, 0) == 0;
         };
         if (input.empty())
-            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  setage  skipyears  unlocktech  unlockspell  legends  gp  help    (Tab autocompletes)";
+            return "Commands: rm  hm  tp  time  season  spawn  give  setskill  setage  skipyears  unlocktech  unlockspell  legends  lich  gp  help    (Tab autocompletes)";
         if (input == "spawn" || starts("spawn "))
             return "spawn: goblin  orc  skeleton  wolf  bandit   e.g. spawn goblin 3";
         if (input == "give" || starts("give "))
@@ -427,10 +440,13 @@ struct CheatConsole {
         if (input == "legends" || starts("legends "))
             return "legends [filename]   exports every cached village's chronicle + roster to a text "
                    "file (default legends.txt) — read it with legends_viewer.exe. e.g. legends";
+        if (input == "lich")
+            return "lich   transforms you into a Lich (cheat-only for now) — no more hunger/thirst/aging, "
+                   "for long simulatedays/skipyears tests without needing to eat/drink.";
         // Partial command suggestions
         static const char* cmds[] = {
             "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","help", nullptr
+            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","lich","help", nullptr
         };
         std::string sugg;
         for (int i = 0; cmds[i]; i++) {
@@ -446,7 +462,7 @@ struct CheatConsole {
         // Complete top-level command
         static const char* cmds[] = {
             "reveal_map","hide_map","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","help", nullptr
+            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","lich","help", nullptr
         };
         if (input.find(' ') == std::string::npos) {
             for (int i = 0; cmds[i]; i++) {

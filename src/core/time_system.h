@@ -3,8 +3,18 @@
 #include <cstdio>
 
 struct WorldTime {
-    // Total game minutes elapsed. Start at 07:00, Day 1.
-    int minutes = 7 * 60;
+    // Total game minutes elapsed. Start well into Summer (Day 10 of
+    // Hearthfire), not Day 1 of Spring — wheat/herb only grow in
+    // summer+autumn (ObjectDef::growSeasons, terrain.h), and calcPlantAge()
+    // (map.cpp) returns 0 for every crop tile outside its growing season. A
+    // Spring start meant every freshly-generated village had zero
+    // harvestable wheat for ~90 days, long enough to starve the whole
+    // village (both farmers included) before the first possible harvest —
+    // silently breaking the NPC harvest/trade economy (docs/village.md) for
+    // every new game. 40 days into the season is comfortably past wheat's
+    // 20-day daysToMature for any staggered offset, so fields are ripe from
+    // the very start.
+    int minutes = (4 * 30 + 9) * 24 * 60 + 7 * 60; // Day 10, Hearthfire (Summer), 07:00
 
     // 1 action = 1 game minute (1440 actions per full day).
     static constexpr int MINS_PER_ACTION = 1;

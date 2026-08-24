@@ -15,7 +15,7 @@ inline int nextActorId = 1;
 
 enum class Race {
     HUMAN, ELF, DWARF, ORC, HALFLING,
-    VAMPIRE, SKELETON, GHOST
+    VAMPIRE, SKELETON, GHOST, LICH
 };
 
 struct RaceTraits {
@@ -38,6 +38,10 @@ static const RaceTraits raceTraits[] = {
   { "Vampire",    false, false, false,  0,     0,     +2,   0,  +1,  +2,  +1,  +1 },
   { "Skeleton",   false, false, false,  0,     0,     +1,  -1,   0,  +2,   0,  -3 },
   { "Ghost",      false, false, false,  0,     0,      0,   0,  +2,   0,  +2,   0 },
+  // Cheat-only transformation for now (docs/magic.md Death school will
+  // eventually offer this as a real ritual) — undead, so same needsFood/
+  // needsWater/canBleed/ageless pattern as Vampire/Skeleton/Ghost above.
+  { "Lich",       false, false, false,  0,     0,      0,   0,  +2,  +1,   0,  -2 },
 };
 
 // ================================================================ Life stages (docs/village.md "Шар 4: Вік і демографія")

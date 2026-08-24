@@ -1784,10 +1784,16 @@ void spawnVillagers(bool isVillage) {
 
             // Everything they carry lives in one real container — no floating
             // inventory. Children get a smaller personal stock; adults also
-            // get their trade's goods to sell, same quantities as before.
+            // get their trade's goods to sell. Bumped from 3/6 to give a
+            // wider safety margin against the food economy's inherent lag
+            // (harvest/buy only kick in once bag+granary are both empty) —
+            // the Summer game-start fix (time_system.h) already keeps wheat
+            // ripe from day one, but a family of 8-9 sharing one granary can
+            // still burn through a small stock fast before the harvest
+            // cycle catches up.
             v.bag = Items::backpack();
             Item loaves = Items::bread();
-            loaves.count = v.isChild ? 3 : 6;
+            loaves.count = v.isChild ? 5 : 10;
             addToContainer(*v.bag, std::move(loaves));
             if (!v.isChild) {
                 for (Item& g : goodsFor(v.occupation)) addToContainer(*v.bag, std::move(g));
@@ -1857,14 +1863,30 @@ void spawnVillagers(bool isVillage) {
         if (isFarmHousehold) {
             SDL_Point barrel = findNearbyBarrel(villagers[primaryLiveIdx].bedX, villagers[primaryLiveIdx].bedY);
             if (barrel.x >= 0) {
+                // O_BARREL has blocksMove=true (terrain.h) — same as O_BED,
+                // O_WELL — so granaryX/Y must be a walkable tile ADJACENT to
+                // the barrel, not the barrel's own tile, or followPath()'s
+                // A* can never reach it (the goal tile itself is filtered
+                // out of the search as non-walkable) and CARRY_HARVEST/
+                // BUY_FOOD get stuck retrying forever — exactly the pattern
+                // sleepX/Y already uses for the equally-unwalkable bed.
+                int gx = barrel.x, gy = barrel.y;
+                const int DIRS[4][2] = {{0,-1},{0,1},{-1,0},{1,0}};
+                for (auto& d : DIRS) {
+                    int nx = barrel.x + d[0], ny = barrel.y + d[1];
+                    if (nx < 1 || nx >= MAP_WIDTH-1 || ny < 1 || ny >= MAP_HEIGHT-1) continue;
+                    if (!map[ny][nx].walkable()) continue;
+                    gx = nx; gy = ny;
+                    break;
+                }
                 Item stock   = Items::grainBarrel();
                 Item starter = (villagers[primaryLiveIdx].occupation == Occupation::HERBALIST)
                               ? Items::mushroomStew() : Items::flatbread();
-                starter.count = 8;
+                starter.count = 20; // bumped from 8, same safety-margin reasoning as the personal bag above
                 addToContainer(stock, starter);
                 villagers[primaryLiveIdx].granary        = stock;
-                villagers[primaryLiveIdx].granaryX       = barrel.x;
-                villagers[primaryLiveIdx].granaryY       = barrel.y;
+                villagers[primaryLiveIdx].granaryX       = gx;
+                villagers[primaryLiveIdx].granaryY       = gy;
                 villagers[primaryLiveIdx].granaryOwnerId = primaryLiveIdx;
                 if (spouseLiveIdx >= 0) villagers[spouseLiveIdx].granaryOwnerId = primaryLiveIdx;
                 for (int cidx : childLiveIdxs) villagers[cidx].granaryOwnerId = primaryLiveIdx;
@@ -2094,8 +2116,17 @@ void updateVillagers() {
                         // this just finds where to walk to.
                         int wantId = (v.occupation == Occupation::FARMER) ? O_WHEAT : O_HERB;
                         int bestX = -1, bestY = -1;
-                        for (int dy = -6; dy <= 6 && bestX < 0; dy++)
-                            for (int dx = -6; dx <= 6 && bestX < 0; dx++) {
+                        // Radius 20, not 6: placeFarmstead() (map.cpp) always puts the
+                        // bed in the same fixed back corner of the house, but rolls
+                        // which of the two perpendicular sides the field goes on
+                        // (sideB) independently — so about half the time the field
+                        // ends up on the OPPOSITE side from the bed, ~9-19 tiles away
+                        // (house depth + gap + field depth). A radius of 6 silently
+                        // missed the field entirely whenever that roll went the "far"
+                        // way, so HARVEST almost never found anything even with ripe
+                        // wheat sitting right outside.
+                        for (int dy = -20; dy <= 20 && bestX < 0; dy++)
+                            for (int dx = -20; dx <= 20 && bestX < 0; dx++) {
                                 int fx = v.bedX + dx, fy = v.bedY + dy;
                                 if (fx < 0 || fx >= MAP_WIDTH || fy < 0 || fy >= MAP_HEIGHT) continue;
                                 const Tile& t = map[fy][fx];
@@ -5039,6 +5070,13 @@ int main(int argc, char* argv[]) {
         if (console.pendingSetAge >= 0) {
             player.age = console.pendingSetAge;
             console.pendingSetAge = -1;
+        }
+
+        if (console.pendingBecomeLich) {
+            console.pendingBecomeLich = false;
+            player.race = Race::LICH;
+            player.naturalDeathAge = 0; // ageless, same as Vampire/Skeleton/Ghost
+            panel.addMessage("You are now a Lich. Hunger, thirst, and aging no longer affect you.");
         }
 
         if (console.pendingSkipYears > 0) {
