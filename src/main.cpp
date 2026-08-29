@@ -18,6 +18,7 @@
 #include "npc.h"
 #include "village_history.h"
 #include "villager_examine_panel.h"
+#include "census_panel.h"
 #include "combat.h"
 #include "magic.h"
 #include "craft_panel.h"
@@ -215,6 +216,7 @@ InventoryPanel inventoryPanel;
 ItemExaminePanel  itemExaminePanel;
 EnemyExaminePanel   enemyExaminePanel;
 VillagerExaminePanel villagerExaminePanel;
+CensusPanel censusPanel;
 CraftPanel craftPanel;
 PickupPanel pickupPanel;
 MenuHub hub;
@@ -1517,16 +1519,20 @@ void exportLegends(const std::string& filename) {
         for (const VillageHistory::LegendEvent& e : rec.log)
             f << e.year << "|" << e.text << "\n";
 
-        auto writeHousehold = [&](const VillageHistory::HouseholdHistory& h) {
-            f << "HOUSEHOLD " << (h.isFarmHousehold ? 1 : 0) << " " << h.hist.size() << "\n";
-            for (const Villager& v : h.hist)
-                f << v.name << "|" << v.age << "|" << (v.alive ? 1 : 0) << "|"
-                  << occupationName(v.occupation) << "|" << (v.isChild ? 1 : 0) << "\n";
+        // Households no longer keep their own roster vector (shared pop,
+        // see village_history.h) — filter by Villager::homeHousehold to
+        // rebuild the same per-household text block the export always had.
+        auto writeHousehold = [&](int h) {
+            std::vector<const Villager*> members;
+            for (const Villager& v : rec.pop) if (v.homeHousehold == h) members.push_back(&v);
+            f << "HOUSEHOLD " << (rec.households[h].isFarmHousehold ? 1 : 0) << " " << members.size() << "\n";
+            for (const Villager* v : members)
+                f << v->name << "|" << v->age << "|" << (v->alive ? 1 : 0) << "|"
+                  << occupationName(v->occupation) << "|" << (v->isChild ? 1 : 0) << "\n";
             f << "ENDHOUSEHOLD\n";
         };
-        f << "ROSTER " << (rec.farmHouseholds.size() + rec.tradeHouseholds.size()) << "\n";
-        for (const auto& h : rec.farmHouseholds)  writeHousehold(h);
-        for (const auto& h : rec.tradeHouseholds) writeHousehold(h);
+        f << "ROSTER " << rec.households.size() << "\n";
+        for (int h = 0; h < (int)rec.households.size(); h++) writeHousehold(h);
 
         f << "ENDVILLAGE\n";
     }
@@ -1537,7 +1543,7 @@ void exportLegends(const std::string& filename) {
 void spawnVillagers(bool isVillage) {
     villagers.clear();
     // graves are NOT cleared here — sector-tagged (like Corpse/GroundItem) and
-    // placed at most once per death (HouseholdHistory::gravesPlacedThroughYear
+    // placed at most once per death (VillageHistoryRecord::gravesPlacedThroughYear
     // below), so they persist correctly across repeated visits to this sector
     // and every other sector's graves are untouched regardless.
     villageWellX = villageWellY = -1;
@@ -1651,12 +1657,20 @@ void spawnVillagers(bool isVillage) {
     // forward every year the village wasn't the one loaded on the map
     // (advanceDistantVillageHistories(), step 5) — not a fresh roll on every
     // sector visit. docs/world.md: "Історія при worldgen — це не текстовий
-    // флейвор, а результат тієї самої симуляції." Isolated per household (no
-    // marriage across households — today's bed-assignment shape below can't
-    // absorb that kind of reshuffling); see village_history.h's
-    // HouseholdHistory for why 60 founding years and not fewer.
+    // флейвор, а результат тієї самої симуляції." All 5 households share one
+    // population (Villager::homeHousehold says which building someone
+    // currently belongs to) — cross-household marriage IS possible during
+    // pre-history now (village_history.h's simulateOneYear() reassigns
+    // homeHousehold on marriage/apprenticeship), fixing a real dead-end: an
+    // isolated household whose both founders died had no one left to marry
+    // (their only other living relatives were siblings) and was stuck at
+    // one childless resident forever — confirmed via the `census` cheat
+    // panel showing 5 households, 5 living villagers, exactly one each.
     VillageHistory::VillageHistoryRecord& villageRec = villageHistoryStore[{playerSectorX, playerSectorY}];
+    std::vector<Villager>& pop        = villageRec.pop;
+    std::vector<int>&      diedAtYear = villageRec.diedAtYear;
     int nextFarmHousehold = 0, nextTradeHousehold = 0;
+    int graveCheckpoint   = villageRec.gravesPlacedThroughYear; // snapshot — see the end of this loop
 
     for (auto& kv : bedHouseholds) {
         int primaryBed    = kv.second[0];
@@ -1681,42 +1695,45 @@ void spawnVillagers(bool isVillage) {
         }
         bool isFarmHousehold = (role == BuildingRole::FARM || role == BuildingRole::HERBALIST_FARM);
 
-        // Pull this household's pre-simulated history from the cache instead
-        // of simulating it here. Matched by farm/trade type only (the real
-        // trade name isn't decided until now, see village_history.h's
-        // comment on HouseholdHistory) — if the map generated more of one
-        // type than generateAllVillageHistories() pre-simulated (shouldn't
-        // normally happen given placeVillage()'s fixed layout), leave this
-        // household's beds empty rather than inventing a fresh one.
-        VillageHistory::HouseholdHistory* hh = isFarmHousehold
-            ? (nextFarmHousehold  < (int)villageRec.farmHouseholds.size()  ? &villageRec.farmHouseholds[nextFarmHousehold++]   : nullptr)
-            : (nextTradeHousehold < (int)villageRec.tradeHouseholds.size() ? &villageRec.tradeHouseholds[nextTradeHousehold++] : nullptr);
-        if (!hh) continue;
+        // This building's household slot in the shared population — matched
+        // by farm/trade type only (the real trade name isn't decided until
+        // now, see village_history.h's comment on HouseholdMeta). farm
+        // households are slots 0-1, trade households 2-4 (construction
+        // order in simulateVillageHistory()). If the map generated more of
+        // one type than generateAllVillageHistories() pre-simulated
+        // (shouldn't normally happen given placeVillage()'s fixed layout),
+        // leave this household's beds empty rather than inventing a fresh one.
+        int householdIdx = isFarmHousehold
+            ? (nextFarmHousehold  < 2 ? nextFarmHousehold++       : -1)
+            : (nextTradeHousehold < 3 ? 2 + nextTradeHousehold++  : -1);
+        if (householdIdx < 0) continue;
 
-        std::vector<Villager>& hist       = hh->hist;
-        std::vector<int>&       diedAtYear = hh->diedAtYear;
         Occupation placeholderOcc = isFarmHousehold ? Occupation::FARMER : Occupation::WOODCUTTER;
 
         // Resolve today's head of household: whoever currently holds the
-        // trade, else the eldest living adult descendant if it went vacant
-        // (a real possible outcome — see village_history.h's apprenticeship
-        // comments — not forced back to "always staffed"). Checks both the
-        // pre-history placeholder AND the real trade — a household visited
-        // before already had its head relabeled from placeholderOcc to occ
-        // below, and on a later revisit only the real name is still present
-        // (checking only the placeholder would miss them and misresolve to
-        // whichever adult happens to be oldest instead).
+        // trade, else the eldest living adult member of this household if
+        // it went vacant (a real possible outcome — see village_history.h's
+        // apprenticeship comments — not forced back to "always staffed").
+        // Checks both the pre-history placeholder AND the real trade — a
+        // household visited before already had its head relabeled from
+        // placeholderOcc to occ below, and on a later revisit only the real
+        // name is still present (checking only the placeholder would miss
+        // them and misresolve to whichever adult happens to be oldest
+        // instead).
         int headIdx = -1;
-        for (int k = 0; k < (int)hist.size(); k++)
-            if (hist[k].alive && (hist[k].occupation == placeholderOcc || hist[k].occupation == occ)) { headIdx = k; break; }
+        for (int k = 0; k < (int)pop.size(); k++)
+            if (pop[k].alive && pop[k].homeHousehold == householdIdx
+                && (pop[k].occupation == placeholderOcc || pop[k].occupation == occ)) { headIdx = k; break; }
         if (headIdx < 0)
-            for (int k = 0; k < (int)hist.size(); k++)
-                if (hist[k].alive && !hist[k].isChild && (headIdx < 0 || hist[k].age > hist[headIdx].age))
+            for (int k = 0; k < (int)pop.size(); k++)
+                if (pop[k].alive && pop[k].homeHousehold == householdIdx && !pop[k].isChild
+                    && (headIdx < 0 || pop[k].age > pop[headIdx].age))
                     headIdx = k;
-        if (headIdx >= 0) hist[headIdx].occupation = occ;
+        if (headIdx >= 0) pop[headIdx].occupation = occ;
 
-        // Places graves for anyone who died since the last time we placed
-        // graves for this household (gravesPlacedThroughYear) — covers the
+        // Places graves for anyone of this household who died since the
+        // last time graves were placed for this village (graveCheckpoint,
+        // snapshotted once above this loop — see its comment) — covers the
         // whole simulated household regardless of whether anyone survived
         // (even a fully extinct line left a mark) on a first visit, and only
         // the newly dead on a later revisit after this village was ticked
@@ -1726,27 +1743,26 @@ void spawnVillagers(bool isVillage) {
         // silently skip anyone who died while the player was away. All
         // households share the one graveyard (villageCemeteryX/Y), not a
         // plot behind each individual house.
-        for (int k = 0; k < (int)hist.size(); k++)
-            if (diedAtYear[k] > hh->gravesPlacedThroughYear)
+        for (int k = 0; k < (int)pop.size(); k++)
+            if (pop[k].homeHousehold == householdIdx && diedAtYear[k] > graveCheckpoint)
                 placeGraveNear(villageCemeteryX, villageCemeteryY,
-                                hist[k].name, hist[k].age, villageRec.yearsSimulated - diedAtYear[k]);
-        hh->gravesPlacedThroughYear = villageRec.yearsSimulated;
+                                pop[k].name, pop[k].age, villageRec.yearsSimulated - diedAtYear[k]);
 
         // Extremely unlucky household — everyone died out with no living
-        // descendant at all (rare inside just 60 years, but not impossible).
-        // Leave the beds empty rather than inventing a fresh unrelated
-        // resident — an abandoned house is a legitimate simulated outcome.
+        // descendant at all (rare, but not impossible). Leave the beds
+        // empty rather than inventing a fresh unrelated resident — an
+        // abandoned house is a legitimate simulated outcome.
         if (headIdx < 0) continue;
 
-        // Places a resolved hist[] member onto the map — at their own bed if
+        // Places a resolved pop[] member onto the map — at their own bed if
         // bedIdx>=0, otherwise sharing (homeX,homeY) with a small ring search
         // (bedless children, same as before this feature).
         auto placeFromHistory = [&](int histIdx, int bedIdx, int homeX, int homeY) -> int {
             Villager v;
-            v.name       = hist[histIdx].name;
-            v.age        = hist[histIdx].age;
-            v.isChild    = hist[histIdx].isChild;
-            v.occupation = hist[histIdx].occupation;
+            v.name       = pop[histIdx].name;
+            v.age        = pop[histIdx].age;
+            v.isChild    = pop[histIdx].isChild;
+            v.occupation = pop[histIdx].occupation;
 
             if (bedIdx >= 0) {
                 v.bedX = beds[bedIdx].x; v.bedY = beds[bedIdx].y;
@@ -1831,8 +1847,8 @@ void spawnVillagers(bool isVillage) {
         int primaryLiveIdx = placeFromHistory(headIdx, primaryBed, beds[primaryBed].x, beds[primaryBed].y);
 
         int spouseLiveIdx = -1;
-        if (hasSpouseBed && hist[headIdx].spouseId >= 0 && hist[hist[headIdx].spouseId].alive) {
-            spouseLiveIdx = placeFromHistory(hist[headIdx].spouseId, spouseBed,
+        if (hasSpouseBed && pop[headIdx].spouseId >= 0 && pop[pop[headIdx].spouseId].alive) {
+            spouseLiveIdx = placeFromHistory(pop[headIdx].spouseId, spouseBed,
                                               beds[primaryBed].x, beds[primaryBed].y);
             villagers[primaryLiveIdx].spouseId = spouseLiveIdx;
             villagers[spouseLiveIdx].spouseId  = primaryLiveIdx;
@@ -1842,11 +1858,15 @@ void spawnVillagers(bool isVillage) {
         // the household's home tile, same as before this feature. Grown
         // survivors who aren't part of this nuclear family (a sibling who
         // didn't inherit the trade, etc.) simply aren't placed — an accepted
-        // simplification, see the plan.
+        // simplification, see the plan. Also re-checks homeHousehold: a
+        // remarried widow(er)'s childIds can include kids from their FIRST
+        // marriage, who stay tagged to that earlier household (see the
+        // marriage pass in village_history.h) rather than moving here too.
         std::vector<int> childLiveIdxs;
-        for (int cid : hist[headIdx].childIds) {
-            if (cid < 0 || cid >= (int)hist.size()) continue;
-            if (!hist[cid].alive || !hist[cid].isChild) continue;
+        for (int cid : pop[headIdx].childIds) {
+            if (cid < 0 || cid >= (int)pop.size()) continue;
+            if (!pop[cid].alive || !pop[cid].isChild) continue;
+            if (pop[cid].homeHousehold != householdIdx) continue;
             int idx = placeFromHistory(cid, -1, beds[primaryBed].x, beds[primaryBed].y);
             villagers[idx].motherId = primaryLiveIdx;
             villagers[idx].fatherId = spouseLiveIdx >= 0 ? spouseLiveIdx : primaryLiveIdx;
@@ -1856,11 +1876,20 @@ void spawnVillagers(bool isVillage) {
         }
 
         // Family granary — shared food reserve tied to the barrel map.cpp
-        // already furnishes every farmstead room with (repurposed from pure
+        // furnishes every household room with (repurposed from pure
         // decoration). The primary worker holds the real Item;
         // granaryOwnerId (set on the primary itself, then propagated to
         // spouse/children below) is how everyone else reaches it.
-        if (isFarmHousehold) {
+        //
+        // No longer restricted to farm households: every home now gets a
+        // small household garden beside it (map.cpp's placeRoleBuilding(),
+        // user request) — a farm's field is just the bigger version of the
+        // same thing, not a different mechanic, so every household earns a
+        // granary the same way. Without a food source of their own,
+        // non-farm villagers were a dead end once their one-time starting
+        // gold ran out (confirmed via simulatedays + census — whole
+        // households starving with nothing left to sell or buy with).
+        {
             SDL_Point barrel = findNearbyBarrel(villagers[primaryLiveIdx].bedX, villagers[primaryLiveIdx].bedY);
             if (barrel.x >= 0) {
                 // O_BARREL has blocksMove=true (terrain.h) — same as O_BED,
@@ -1882,7 +1911,12 @@ void spawnVillagers(bool isVillage) {
                 Item stock   = Items::grainBarrel();
                 Item starter = (villagers[primaryLiveIdx].occupation == Occupation::HERBALIST)
                               ? Items::mushroomStew() : Items::flatbread();
-                starter.count = 20; // bumped from 8, same safety-margin reasoning as the personal bag above
+                // Farm households keep the bumped 40 (same population-
+                // doubling reasoning as the harvest-yield bump above);
+                // trade households' garden is the smaller one, so a
+                // smaller starting cushion fits — still real slack before
+                // HARVEST has to make its first physical trip.
+                starter.count = isFarmHousehold ? 40 : 15;
                 addToContainer(stock, starter);
                 villagers[primaryLiveIdx].granary        = stock;
                 villagers[primaryLiveIdx].granaryX       = gx;
@@ -1893,6 +1927,10 @@ void spawnVillagers(bool isVillage) {
             }
         }
     }
+    // Advance the village-wide grave checkpoint once, after every household
+    // has had a chance to place graves against the same graveCheckpoint
+    // snapshot above — not per-household, since pop/diedAtYear are shared now.
+    villageRec.gravesPlacedThroughYear = villageRec.yearsSimulated;
 
     // One real goal per sector visit (docs/village.md "Цілі NPC → квести") — pick a
     // random non-child villager to be worried about an actual threat already spawned
@@ -1960,7 +1998,7 @@ static void buildPathTo(Villager& v, int tx, int ty) {
 // Advances one step of v.homePath toward (tx,ty), (re)building the path as needed and
 // opening/closing doors along the way. Returns true once the villager has arrived.
 static bool followPath(Villager& v, int tx, int ty) {
-    if (v.x == tx && v.y == ty) return true;
+    if (v.x == tx && v.y == ty) { v.pathFailCount = 0; return true; }
 
     // Cooldown prevents rebuilding a failed path every tick.
     if (v.pathRetryCool > 0) { v.pathRetryCool--; return false; }
@@ -1970,9 +2008,11 @@ static bool followPath(Villager& v, int tx, int ty) {
         buildPathTo(v, tx, ty);
         if (v.homePath.empty()) {
             v.pathRetryCool = 30; // wait 30 ticks before retrying
+            v.pathFailCount++;    // caller (updateVillagers()) gives up the errand past a threshold
             return false;
         }
     }
+    v.pathFailCount = 0; // got a usable path this round
 
     if (v.homePathIdx < (int)v.homePath.size()) {
         SDL_Point next = v.homePath[v.homePathIdx];
@@ -2049,8 +2089,128 @@ void updateVillagers() {
             v.x = v.sleepX; v.y = v.sleepY; // step off the bed tile
         }
 
+        // Critical-needs interrupt: only WANDER re-checks hunger/thirst under
+        // normal conditions (above) — every other state, INCLUDING SLEEP,
+        // just keeps going while tickVillagerNeeds() drains hunger/thirst
+        // unconditionally and kills at 1.0 regardless of state. Debug
+        // instrumentation on a simulatedays die-off caught villagers dying
+        // asleep in bed (dark takes priority over hunger in the WANDER
+        // check above, so a hungry villager can get marched home right as
+        // it happens and then never wakes to eat) as well as mid-errand.
+        // 0.9 leaves a buffer before the hourly kill-check at 1.0. Skips
+        // combat (FLEE/FIGHT — own priority) and burial carrying
+        // (GO_TO_CORPSE/CARRY_TO_GRAVE — abandoning mid-carry would just
+        // lose the corpse with no grave, worse than letting it finish).
+        bool thirstEligible =
+            v.state != Villager::State::FLEE && v.state != Villager::State::FIGHT &&
+            v.state != Villager::State::GO_TO_CORPSE && v.state != Villager::State::CARRY_TO_GRAVE &&
+            v.state != Villager::State::WANDER && v.state != Villager::State::DRINK;
+        // DRINK used to be excluded here unconditionally too (not just EAT/
+        // HARVEST/CARRY_HARVEST/BUY_FOOD): thirst is the more urgent need
+        // (see the WANDER-tier check above), so once thirst had taken over
+        // as DRINK, a simultaneously-critical hunger must NOT bounce them
+        // back to EAT. Without that, two villagers whose hunger AND thirst
+        // crossed 0.9 together flipped DRINK<->EAT every single tick
+        // forever — thirst (state!=DRINK) kept redirecting EAT back to
+        // DRINK, hunger (state!=EAT, but DRINK wasn't excluded) kept
+        // redirecting DRINK back to EAT — clearing homePath each flip and
+        // never actually moving, so they starved AND dehydrated mid-
+        // "errand" (found via the pathFail/pos/bed debug fields added to
+        // the death log: 0 failed path builds, yet stuck at hunger=1.0
+        // thirst=1.0 for hours).
+        //
+        // That blanket exclusion had its own cost though: a villager who
+        // starts a long DRINK trip (the village well can be dozens of
+        // tiles from a distant household) while already fairly hungry has
+        // hunger climb unconditionally, uninterruptible, for the whole
+        // walk — debug instrumentation on a later simulatedays die-off
+        // caught three villagers dying of starvation (hunger=1.000000)
+        // right as they arrived at the well, thirst still only ~0.3-0.5
+        // (nowhere near its own emergency threshold). Now DRINK can be
+        // interrupted, but ONLY when hunger has actually overtaken thirst
+        // as the bigger threat (v.hunger > v.thirst, not just >=0.9 on its
+        // own) — the original flip required both needs to cross 0.9
+        // together with neither ever strictly ahead, so this comparison
+        // still refuses to fire in that exact case. Safe from reopening
+        // the old loop for an unrelated reason too: EAT no longer persists
+        // across ticks waiting on followPath (see its own case) — it
+        // resolves synchronously the same tick it's entered, so there's no
+        // multi-tick window left for the two states to keep clearing each
+        // other's homePath without making progress.
+        bool hungerEligible =
+            v.state != Villager::State::FLEE && v.state != Villager::State::FIGHT &&
+            v.state != Villager::State::GO_TO_CORPSE && v.state != Villager::State::CARRY_TO_GRAVE &&
+            v.state != Villager::State::WANDER &&
+            v.state != Villager::State::EAT && v.state != Villager::State::HARVEST &&
+            v.state != Villager::State::CARRY_HARVEST && v.state != Villager::State::BUY_FOOD &&
+            !(v.state == Villager::State::DRINK && v.thirst >= v.hunger);
+
+        if (thirstEligible && v.thirst >= 0.9f) {
+            if (v.state == Villager::State::SLEEP) { v.x = v.sleepX; v.y = v.sleepY; } // step off the bed (unwalkable tile) before pathing out
+            v.state = Villager::State::DRINK;
+            v.homePath.clear();
+            v.harvestTargetX = v.harvestTargetY = -1;
+            v.tradeTargetId  = -1;
+        } else if (hungerEligible && v.hunger >= 0.9f) {
+            if (v.state == Villager::State::SLEEP) { v.x = v.sleepX; v.y = v.sleepY; }
+            v.state = Villager::State::EAT;
+            v.homePath.clear();
+        }
+
+        // Pathfinding give-up: a genuinely unreachable target (bad geometry,
+        // a blocked route) made followPath() retry forever with no cap —
+        // debug instrumentation showed the BUY_FOOD deaths above sitting in
+        // that exact state at hunger=1.0, stuck mid-errand rather than
+        // caught by a missing needs-check. ~8 failed rebuilds * 30-tick
+        // cooldown is a few in-game hours before giving up and letting
+        // WANDER retry the whole errand fresh (possibly against a
+        // different, reachable target next time).
+        //
+        // GO_TO_CORPSE/CARRY_TO_GRAVE were deliberately left out of this
+        // (and out of the thirst/hunger interrupt above) on the reasoning
+        // that abandoning mid-carry just loses the corpse with no grave,
+        // worse than letting it finish — true for the "interrupted by
+        // combat" case this was written for, but wrong if "finish" is
+        // actually impossible: a burier stuck on an unreachable cemetery/
+        // corpse (bad geometry, same class of failure as everything else
+        // here) never gives up and just dehydrates to death still holding
+        // the body (confirmed via simulatedays + census: pathFail 30-55,
+        // thirst=1.0, still in CARRY_TO_GRAVE). Losing the corpse in that
+        // rare case is the same accepted tradeoff as the combat-interrupt
+        // one — the burier's own life takes priority.
+        if (v.pathFailCount > 8 &&
+            (v.state == Villager::State::WALK_HOME || v.state == Villager::State::EAT ||
+             v.state == Villager::State::DRINK || v.state == Villager::State::HARVEST ||
+             v.state == Villager::State::CARRY_HARVEST || v.state == Villager::State::BUY_FOOD ||
+             v.state == Villager::State::GO_TO_CORPSE || v.state == Villager::State::CARRY_TO_GRAVE)) {
+            v.state = Villager::State::WANDER;
+            v.homePath.clear();
+            v.pathFailCount  = 0;
+            v.harvestTargetX = v.harvestTargetY = -1;
+            v.tradeTargetId  = -1;
+        }
+
         switch (v.state) {
             case Villager::State::WANDER: {
+                // Too far from home (e.g. dragged out to the far-off well by
+                // a DRINK trip, or back from a distant BUY_FOOD run) — walk
+                // straight back via real pathfinding instead of random-
+                // stepping. An earlier fix let a stray villager "drift"
+                // home by only rejecting steps that made the distance
+                // worse, but that's an undirected walk that can take a very
+                // long time to close a large gap — and every extra hour
+                // spent drifting is an hour hunger/thirst keep climbing
+                // unconditionally underneath it. Confirmed the real cost:
+                // debug instrumentation caught EAT/BUY_FOOD paths of 50-90+
+                // tiles right before a starvation death, from villagers who
+                // must have spent a long stretch drifting before hunger
+                // even triggered the walk home.
+                int curDist = std::max(std::abs(v.x - v.bedX), std::abs(v.y - v.bedY));
+                if (curDist > 18) {
+                    followPath(v, v.sleepX, v.sleepY);
+                    break;
+                }
+
                 // 40% chance to stay put (makes movement look natural)
                 if (rand() % 10 < 4) break;
                 int dx = (rand() % 3) - 1;
@@ -2080,98 +2240,186 @@ void updateVillagers() {
                     v.state = Villager::State::SLEEP;
                 }
                 break;
-            case Villager::State::EAT:
-                if (followPath(v, v.sleepX, v.sleepY)) {
-                    bool ate = false;
-                    // Eats the first nutrition>0 stack out of a container.
-                    auto eatFrom = [](Item& container) {
-                        auto& c = container.contents;
-                        for (int i = 0; i < (int)c.size(); i++) {
-                            if (c[i].nutrition > 0) {
-                                if (c[i].count > 1) c[i].count--;
-                                else                 c.erase(c.begin() + i);
-                                return true;
-                            }
-                        }
-                        return false;
-                    };
-
-                    if (v.bag) ate = eatFrom(*v.bag);
-
-                    // Family granary — shared reserve, tried before anyone
-                    // goes hungry. Every household member (owner included)
-                    // points at it via granaryOwnerId, so this is the same
-                    // lookup for everyone, not a special case for the farmer.
-                    if (!ate && v.granaryOwnerId >= 0 && v.granaryOwnerId < (int)villagers.size()) {
-                        Villager& owner = villagers[v.granaryOwnerId];
-                        if (owner.granary) ate = eatFrom(*owner.granary);
-                    }
-
-                    if (!ate && (v.occupation == Occupation::FARMER || v.occupation == Occupation::HERBALIST) && v.granary) {
-                        // Granary's empty too — go physically harvest a
-                        // mature crop from their own field instead of an
-                        // instant scan-and-consume (docs/village.md:
-                        // "фермер фізично... жне → несе снопи в комору").
-                        // HARVEST/CARRY_HARVEST (below) do the actual walk;
-                        // this just finds where to walk to.
-                        int wantId = (v.occupation == Occupation::FARMER) ? O_WHEAT : O_HERB;
-                        int bestX = -1, bestY = -1;
-                        // Radius 20, not 6: placeFarmstead() (map.cpp) always puts the
-                        // bed in the same fixed back corner of the house, but rolls
-                        // which of the two perpendicular sides the field goes on
-                        // (sideB) independently — so about half the time the field
-                        // ends up on the OPPOSITE side from the bed, ~9-19 tiles away
-                        // (house depth + gap + field depth). A radius of 6 silently
-                        // missed the field entirely whenever that roll went the "far"
-                        // way, so HARVEST almost never found anything even with ripe
-                        // wheat sitting right outside.
-                        for (int dy = -20; dy <= 20 && bestX < 0; dy++)
-                            for (int dx = -20; dx <= 20 && bestX < 0; dx++) {
-                                int fx = v.bedX + dx, fy = v.bedY + dy;
-                                if (fx < 0 || fx >= MAP_WIDTH || fy < 0 || fy >= MAP_HEIGHT) continue;
-                                const Tile& t = map[fy][fx];
-                                if (t.objectId == wantId && t.plantAge >= 170) { bestX = fx; bestY = fy; }
-                            }
-                        if (bestX >= 0) {
-                            v.harvestTargetX = bestX;
-                            v.harvestTargetY = bestY;
-                            v.state = Villager::State::HARVEST;
-                            v.homePath.clear();
-                            break;
+            case Villager::State::EAT: {
+                // No walk-home gate here on purpose (there used to be one,
+                // wrapping this whole block in followPath(v, sleepX, sleepY)
+                // before any of it ran). Debug instrumentation on a
+                // simulatedays die-off caught villagers dying with
+                // hunger=1.0 mid-path, pathIdx far short of pathLen — they'd
+                // gone straight from a distant DRINK/BUY_FOOD trip into EAT
+                // (the WANDER->EAT transition has no distance check) and
+                // then had to walk potentially dozens of tiles home just to
+                // ask "do I have food in my bag?" — a question that doesn't
+                // need them to be anywhere in particular. None of the checks
+                // below actually require the villager to be physically
+                // home: the bag is carried wherever they are, the granary
+                // lookup is a plain data read (not gated on v.x/v.y even
+                // before this fix), and HARVEST/BUY_FOOD do their own
+                // pathing to wherever the food actually is. So the decision
+                // now resolves instantly, and only the follow-up states
+                // (HARVEST/BUY_FOOD) spend real travel time — on a trip that
+                // is actually going somewhere useful.
+                bool ate = false;
+                // Eats the first nutrition>0 stack out of a container.
+                auto eatFrom = [](Item& container) {
+                    auto& c = container.contents;
+                    for (int i = 0; i < (int)c.size(); i++) {
+                        if (c[i].nutrition > 0) {
+                            if (c[i].count > 1) c[i].count--;
+                            else                 c.erase(c.begin() + i);
+                            return true;
                         }
                     }
-                    // No food of their own — try to buy some instead of just
-                    // starving (docs/village.md economic cycle: "коваль
-                    // купує хліб у фермера"). Only makes sense for
-                    // non-farmers; a farmer/herbalist with an empty granary
-                    // already tried harvesting above and failed for a real
-                    // reason (nothing mature yet), not a missing market.
-                    if (!ate && v.occupation != Occupation::FARMER && v.occupation != Occupation::HERBALIST && v.bag) {
-                        int gold = 0;
-                        for (const Item& it : v.bag->contents) if (it.name == "Gold Coin") gold += it.count;
-                        int seller = findGranarySeller(v);
-                        if (gold > 0 && seller >= 0) {
-                            v.tradeTargetId = seller;
-                            v.state = Villager::State::BUY_FOOD;
-                            v.homePath.clear();
-                            break;
-                        }
-                    }
-                    // If nothing worked, hunger stays high — a real risk, not just flavor.
-                    if (ate) v.hunger = 0.0f;
-                    v.state = Villager::State::WANDER;
+                    return false;
+                };
+
+                if (v.bag) ate = eatFrom(*v.bag);
+
+                // Family granary — shared reserve, tried before anyone
+                // goes hungry. Every household member (owner included)
+                // points at it via granaryOwnerId, so this is the same
+                // lookup for everyone, not a special case for the farmer.
+                if (!ate && v.granaryOwnerId >= 0 && v.granaryOwnerId < (int)villagers.size()) {
+                    Villager& owner = villagers[v.granaryOwnerId];
+                    if (owner.granary) ate = eatFrom(*owner.granary);
                 }
+
+                // Whoever actually holds the shared granary Item — usually
+                // v itself (the household's primary worker), but a spouse
+                // or child only carries granaryOwnerId, not the granary
+                // itself (see spawnVillagers()). Without this fallback,
+                // only the primary worker could ever go harvest — everyone
+                // else in the household just sat on WANDER->EAT retrying
+                // forever once the granary ran dry, with no way to help
+                // restock it themselves even though the same garden was
+                // right outside (confirmed via simulatedays + census: 5 of
+                // 6 deaths in one household were non-primary members while
+                // the primary was mid-harvest-cycle elsewhere, unable to
+                // keep up alone with that many dependents).
+                Villager* granaryHolder = v.granary ? &v
+                    : (v.granaryOwnerId >= 0 && v.granaryOwnerId < (int)villagers.size()
+                       && villagers[v.granaryOwnerId].granary ? &villagers[v.granaryOwnerId] : nullptr);
+
+                if (!ate && granaryHolder) {
+                    // Granary's empty too — go physically harvest a mature
+                    // crop instead of an instant scan-and-consume
+                    // (docs/village.md: "фермер фізично... жне → несе
+                    // снопи в комору"). HARVEST/CARRY_HARVEST (below) do
+                    // the actual walk; this just finds where to walk to.
+                    //
+                    // No longer gated on FARMER/HERBALIST — every
+                    // household now gets a small household garden beside
+                    // their home (map.cpp's placeRoleBuilding(), user
+                    // request: non-farm villagers were a dead end once
+                    // their one-time starting gold ran out, with no food
+                    // source of their own at all). A farm household's
+                    // field is just the bigger version of the same thing.
+                    // Either crop counts — whichever's actually mature.
+                    int bestX = -1, bestY = -1;
+                    // Radius 20, not 6: placeFarmstead() (map.cpp) always puts the
+                    // bed in the same fixed back corner of the house, but rolls
+                    // which of the two perpendicular sides the field goes on
+                    // (sideB) independently — so about half the time the field
+                    // ends up on the OPPOSITE side from the bed, ~9-19 tiles away
+                    // (house depth + gap + field depth). A radius of 6 silently
+                    // missed the field entirely whenever that roll went the "far"
+                    // way, so HARVEST almost never found anything even with ripe
+                    // wheat sitting right outside.
+                    for (int dy = -20; dy <= 20 && bestX < 0; dy++)
+                        for (int dx = -20; dx <= 20 && bestX < 0; dx++) {
+                            int fx = v.bedX + dx, fy = v.bedY + dy;
+                            if (fx < 0 || fx >= MAP_WIDTH || fy < 0 || fy >= MAP_HEIGHT) continue;
+                            const Tile& t = map[fy][fx];
+                            if ((t.objectId == O_WHEAT || t.objectId == O_HERB) && t.plantAge >= 170) {
+                                bestX = fx; bestY = fy;
+                            }
+                        }
+                    if (bestX >= 0) {
+                        v.harvestTargetX = bestX;
+                        v.harvestTargetY = bestY;
+                        v.state = Villager::State::HARVEST;
+                        v.homePath.clear();
+                        break;
+                    }
+                }
+                // No food of their own — try to buy some instead of just
+                // starving (docs/village.md economic cycle: "коваль
+                // купує хліб у фермера"). No longer gated to non-farmers:
+                // now that every household has its own small garden (see
+                // the harvest search above), reaching this point means
+                // THEIRS specifically has nothing mature yet — a real
+                // reason to fall back on the market regardless of trade.
+                if (!ate && v.bag) {
+                    int gold = 0;
+                    for (const Item& it : v.bag->contents) if (it.name == "Gold Coin") gold += it.count;
+                    int seller = findGranarySeller(v);
+                    // Check the actual price before committing to the trip —
+                    // gold never regenerates for non-farmers (one-time spawn
+                    // stipend, nothing else ever pays them), so it runs out
+                    // after 1-3 lifetime purchases. A stale "gold > 0" check
+                    // still sent them on the same 40+ tile trek with too few
+                    // coins to afford even one portion — a guaranteed-wasted
+                    // trip that burned the whole hunger budget for nothing
+                    // (confirmed via simulatedays + census: several deaths
+                    // were villagers arriving at BUY_FOOD with 1-3 gold
+                    // against a 4-5 gold price). Not a fix for the gold
+                    // supply itself (that needs a real income loop for
+                    // non-farmers — separate design work), just stops the
+                    // pointless fatal errand.
+                    int sellerPrice = 0;
+                    if (seller >= 0 && villagers[seller].granary) {
+                        for (const Item& it : villagers[seller].granary->contents)
+                            if (it.nutrition > 0) { sellerPrice = std::max(1, it.value); break; }
+                    }
+                    if (seller >= 0 && sellerPrice > 0 && gold >= sellerPrice) {
+                        v.tradeTargetId = seller;
+                        v.state = Villager::State::BUY_FOOD;
+                        v.homePath.clear();
+                        break;
+                    }
+                }
+                // If nothing worked, hunger stays high — a real risk, not just flavor.
+                if (ate) v.hunger = 0.0f;
+                v.state = Villager::State::WANDER;
                 break;
+            }
             case Villager::State::HARVEST: {
                 if (v.harvestTargetX < 0) { v.state = Villager::State::WANDER; break; }
                 if (followPath(v, v.harvestTargetX, v.harvestTargetY)) {
                     Tile& t = map[v.harvestTargetY][v.harvestTargetX];
-                    bool isFarmer = (v.occupation == Occupation::FARMER);
-                    int  wantId   = isFarmer ? O_WHEAT : O_HERB;
-                    if (t.objectId == wantId && t.plantAge >= 170 && v.bag) {
+                    // Which crop is actually standing there decides the food,
+                    // not occupation (every household garden mixes wheat and
+                    // herb the same way placeFarmstead()'s field does — see
+                    // map.cpp).
+                    bool isWheat = (t.objectId == O_WHEAT);
+                    if ((t.objectId == O_WHEAT || t.objectId == O_HERB) && t.plantAge >= 170 && v.bag) {
                         t.plantAge = 0; // harvested — regrows over time via tickPlantGrowth()
-                        Item food  = isFarmer ? Items::flatbread() : Items::mushroomStew();
-                        food.count = 3;
+                        Item food  = isWheat ? Items::flatbread() : Items::mushroomStew();
+                        // Yield scales with household size instead of a
+                        // flat 6 — the marriage-merge fix (village_history.h)
+                        // lets a household keep growing across generations
+                        // without ever getting a second house/garden (no
+                        // physical village growth yet), so a long-lived
+                        // household can end up 3-4x the size the small
+                        // garden was ever going to feed at a fixed yield
+                        // (confirmed via simulatedays + census: a 7-member
+                        // household still starved repeatedly even with
+                        // every member correctly taking turns harvesting —
+                        // not a routing bug, a carrying-capacity one). Same
+                        // owner-or-dependent resolution as EAT/CARRY_HARVEST
+                        // above, since a dependent harvesting doesn't hold
+                        // the granary Item to read household size off of.
+                        {
+                            int vIdx = (int)(&v - &villagers[0]);
+                            int ownerIdx = v.granary ? vIdx : v.granaryOwnerId;
+                            int householdSize = 0;
+                            for (const Villager& hv : villagers) {
+                                if (!hv.alive) continue;
+                                int hvIdx = (int)(&hv - &villagers[0]);
+                                if (hvIdx == ownerIdx || hv.granaryOwnerId == ownerIdx) householdSize++;
+                            }
+                            food.count = std::max(6, householdSize * 2);
+                        }
                         addToContainer(*v.bag, std::move(food));
                         v.state = Villager::State::CARRY_HARVEST;
                     } else {
@@ -2185,9 +2433,15 @@ void updateVillagers() {
                 }
                 break;
             }
-            case Villager::State::CARRY_HARVEST:
-                if (!v.granary) { v.state = Villager::State::WANDER; break; }
-                if (followPath(v, v.granaryX, v.granaryY)) {
+            case Villager::State::CARRY_HARVEST: {
+                // Same owner-or-dependent resolution as EAT's harvest
+                // search above — a spouse/child carrying a harvest doesn't
+                // hold the granary Item themselves, only granaryOwnerId.
+                Villager* granaryHolder = v.granary ? &v
+                    : (v.granaryOwnerId >= 0 && v.granaryOwnerId < (int)villagers.size()
+                       && villagers[v.granaryOwnerId].granary ? &villagers[v.granaryOwnerId] : nullptr);
+                if (!granaryHolder) { v.state = Villager::State::WANDER; break; }
+                if (followPath(v, granaryHolder->granaryX, granaryHolder->granaryY)) {
                     // Whole harvest, not just what's needed for one meal —
                     // "несе снопи в комору", the granary is the shared
                     // family stock from here, not the farmer's personal bag.
@@ -2196,7 +2450,7 @@ void updateVillagers() {
                         bool carried = false;
                         for (int i = (int)c.size() - 1; i >= 0; i--) {
                             if (c[i].nutrition <= 0) continue;
-                            addToContainer(*v.granary, c[i]);
+                            addToContainer(*granaryHolder->granary, c[i]);
                             c.erase(c.begin() + i);
                             carried = true;
                         }
@@ -2206,6 +2460,7 @@ void updateVillagers() {
                     v.homePath.clear();
                 }
                 break;
+            }
             case Villager::State::BUY_FOOD: {
                 if (v.tradeTargetId < 0 || v.tradeTargetId >= (int)villagers.size()) { v.state = Villager::State::WANDER; break; }
                 Villager& seller = villagers[v.tradeTargetId];
@@ -2219,19 +2474,36 @@ void updateVillagers() {
                         if (stock[i].nutrition > 0) { idx = i; break; }
 
                     if (idx >= 0 && v.bag) {
-                        Item food  = stock[idx];
-                        food.count = 1;
-                        int price  = std::max(1, food.value);
+                        int unitPrice = std::max(1, stock[idx].value);
 
                         int gold = 0;
                         for (const Item& it : v.bag->contents) if (it.name == "Gold Coin") gold += it.count;
 
-                        if (gold >= price) {
+                        // Stock up, don't just buy one meal — a buyer who
+                        // walked this far (findGranarySeller() has no
+                        // distance cap; seen up to ~45 tiles in testing)
+                        // used to spend exactly one nutrition point per trip
+                        // and come straight back once hunger refilled.
+                        // Debug instrumentation on a simulatedays die-off
+                        // caught villagers dying mid-repeat-trip to the same
+                        // distant farm (several successful single-portion
+                        // buys logged right before the death) — the ~19h
+                        // hunger budget from the EAT trigger to death is
+                        // barely enough for one such round trip, let alone
+                        // one per meal. Buying several portions at once
+                        // means the next few hunger cycles resolve instantly
+                        // from the bag (EAT checks it first, no travel
+                        // needed) instead of forcing another trek.
+                        constexpr int MAX_BUY = 8;
+                        int qty = std::min({stock[idx].count, gold / unitPrice, MAX_BUY});
+
+                        if (qty > 0) {
+                            int totalPrice = unitPrice * qty;
                             // Pay the seller directly (their purse, not the
-                            // granary — coins aren't food) and hand over one
-                            // portion, same pattern TradePanel already uses
-                            // for player<->merchant trades.
-                            int need = price;
+                            // granary — coins aren't food), same pattern
+                            // TradePanel already uses for player<->merchant
+                            // trades.
+                            int need = totalPrice;
                             for (int i = (int)v.bag->contents.size() - 1; i >= 0 && need > 0; i--) {
                                 Item& it = v.bag->contents[i];
                                 if (it.name != "Gold Coin") continue;
@@ -2241,14 +2513,20 @@ void updateVillagers() {
                             }
                             if (seller.bag) {
                                 Item payment = Items::goldCoin();
-                                payment.count = price;
+                                payment.count = totalPrice;
                                 addToContainer(*seller.bag, std::move(payment));
                             }
-                            if (stock[idx].count > 1) stock[idx].count--;
-                            else                       stock.erase(stock.begin() + idx);
-                            v.hunger = 0.0f;
-                            panel.addMessage(v.name + " buys " + food.name + " from " + seller.name + ".");
-                            logVillageEvent(v.name + " buys " + food.name + " from " + seller.name + ".");
+                            std::string foodName = stock[idx].name;
+                            Item food  = stock[idx];
+                            food.count = qty;
+                            if (stock[idx].count > qty) stock[idx].count -= qty;
+                            else                         stock.erase(stock.begin() + idx);
+                            addToContainer(*v.bag, std::move(food));
+                            v.hunger = 0.0f; // eats one portion right away, rest goes in the bag for next time
+                            std::string msg = v.name + " buys " + std::to_string(qty) + "x "
+                                             + foodName + " from " + seller.name + ".";
+                            panel.addMessage(msg);
+                            logVillageEvent(msg);
                         }
                     }
                     v.tradeTargetId = -1;
@@ -3851,6 +4129,10 @@ void handleInput(SDL_Event& event, bool& running) {
             villagerExaminePanel.hide();
             return;
         }
+        if (censusPanel.visible) {
+            censusPanel.hide();
+            return;
+        }
 
         // Pickup panel handles its own clicks (item toggle, button, outside-close).
         if (pickupPanel.visible) {
@@ -5103,6 +5385,7 @@ int main(int argc, char* argv[]) {
                 player.energy = 0;
                 player.tickNeeds(map[player.y][player.x].terrainId == T_WATER);
                 tickVillagerNeeds();
+                tickEnemyNeeds(); // missing here — enemies never ate/aged/died during simulatedays (user report: 9 before, 9 after)
                 tickYearlyEvents();
                 tickPlantGrowth();
 
@@ -5119,6 +5402,16 @@ int main(int argc, char* argv[]) {
             exportLegends(console.pendingLegendsFilename);
             console.pendingExportLegends = false;
             console.pendingLegendsFilename.clear();
+        }
+
+        if (console.pendingShowCensus) {
+            console.pendingShowCensus = false;
+            int corpsesHere = 0, gravesHere = 0;
+            for (const Corpse& c : corpses)
+                if (c.sectorX == playerSectorX && c.sectorY == playerSectorY) corpsesHere++;
+            for (const Grave& g : graves)
+                if (g.sectorX == playerSectorX && g.sectorY == playerSectorY) gravesHere++;
+            censusPanel.show(villagers, enemies, corpsesHere, gravesHere);
         }
 
         if (!console.pendingUnlockTech.empty()) {
@@ -5337,7 +5630,7 @@ int main(int argc, char* argv[]) {
         // "reference" screens) keep their own independent dim + rendering.
         bool anyPopupOpen = tradePanel.visible || examinePanel.visible || itemExaminePanel.visible
             || enemyExaminePanel.visible || villagerExaminePanel.visible || pickupPanel.visible
-            || waitPanel.visible || needsConfirmPanel.visible;
+            || waitPanel.visible || needsConfirmPanel.visible || censusPanel.visible;
         if (anyPopupOpen) PanelStyle::dimBackdrop(renderer);
 
         tradePanel.render(renderer, font, player, villagers);
@@ -5346,6 +5639,7 @@ int main(int argc, char* argv[]) {
         itemExaminePanel.render(renderer, font);
         enemyExaminePanel.render(renderer, font);
         villagerExaminePanel.render(renderer, font);
+        censusPanel.render(renderer, font);
         pickupPanel.render(renderer, font);
         waitPanel.render(renderer, font, worldTime);
         needsConfirmPanel.render(renderer, font);

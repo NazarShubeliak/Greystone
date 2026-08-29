@@ -334,11 +334,41 @@ static BldgRect placeFarmstead(Dir dir, int VCX, int VCY, int secX, int secY, Bu
     return {minX, minY, maxX-minX, maxY-minY};
 }
 
+// Small household garden — every home grows a little food now, not just
+// the farmsteads (docs/village.md; user request after simulatedays
+// testing showed non-farm households running out of both their bag and
+// their one-time starting gold with no food source of their own at all —
+// a farm's field is just the bigger version of the same mechanic, not a
+// different one). Same mixed wheat/herb mud patch as placeFarmstead()'s
+// field, just much smaller. Best-effort: skips any tile something else
+// (a decoration placed earlier, a neighboring building) already claims
+// instead of overwriting it, rather than aborting the whole patch.
+static void placeGarden(int gx0, int gy0, int gw, int gh, int secX, int secY) {
+    for (int y = gy0; y < gy0 + gh; y++)
+        for (int x = gx0; x < gx0 + gw; x++) {
+            if (!inBounds(x, y)) continue;
+            if (map[y][x].objectId >= 0 || !map[y][x].walkable()) continue;
+            map[y][x].terrainId = T_MUD;
+            map[y][x].groundId  = -1;
+            if ((x + y) % 2 == 0) {
+                map[y][x].objectId = O_WHEAT;
+                map[y][x].objectHp = objectDefs[O_WHEAT].durability;
+                map[y][x].plantAge = calcPlantAge(x, y, secX, secY,
+                    objectDefs[O_WHEAT].growSeasons, objectDefs[O_WHEAT].daysToMature);
+            } else {
+                map[y][x].objectId = O_HERB;
+                map[y][x].objectHp = objectDefs[O_HERB].durability;
+                map[y][x].plantAge = calcPlantAge(x, y, secX, secY,
+                    objectDefs[O_HERB].growSeasons, objectDefs[O_HERB].daysToMature);
+            }
+        }
+}
+
 // Places a single-room occupation building (Smithy/Elder/Woodcutter) at a random
 // position and distance band around the village center, door facing back toward it,
 // rejecting overlaps against everything already placed. Returns false if it couldn't
 // find room after several tries (village stays smaller — no building forced in).
-static bool placeRoleBuilding(BuildingRole role, int VCX, int VCY,
+static bool placeRoleBuilding(BuildingRole role, int VCX, int VCY, int secX, int secY,
                               int minDist, int maxDist, int hw, int hh,
                               std::vector<BldgRect>& footprints) {
     for (int attempt = 0; attempt < 30; attempt++) {
@@ -438,6 +468,11 @@ static bool placeRoleBuilding(BuildingRole role, int VCX, int VCY,
                 putFurniture(bedX+1, bedY, O_BED);
                 putFurniture(hx+2, hy+hh-2, O_TABLE);
                 putFurniture(hx+hw-3, hy+hh-2, O_TABLE);
+                // Unlike Smithy/Woodcutter, the Elder's hall never had a
+                // barrel at all — needed now so this household's granary
+                // (spawnVillagers(), main.cpp) has something to attach to,
+                // same as every other household.
+                putFurniture(hx+hw-3, hy+1, O_BARREL);
                 break;
             case BuildingRole::WOODCUTTER: {
                 putFurniture(bedX, bedY, O_BED);
@@ -456,6 +491,18 @@ static bool placeRoleBuilding(BuildingRole role, int VCX, int VCY,
                 break;
             }
             default: break;
+        }
+
+        // Small household garden beside the building footprint (not
+        // through the door, which pathToPlaza() below routes through) —
+        // right edge by default, left if that would run off the map.
+        // placeGarden()'s own best-effort tile-skip handles the rest (role
+        // decoration placed above, a neighboring building).
+        {
+            int gw = 3, gh = 3;
+            int gx0 = hx + hw + 1, gy0 = hy + (hh - gh) / 2;
+            if (gx0 + gw >= MAP_WIDTH - 5) gx0 = hx - gw - 1;
+            placeGarden(gx0, gy0, gw, gh, secX, secY);
         }
 
         pathToPlaza(doorX, doorY, doorDir, VCX, VCY);
@@ -497,9 +544,9 @@ static void placeVillage(int secX, int secY) {
     };
 
     // Elder's hall sits close to the plaza; smithy and woodcutter's lodge range further out.
-    placeRoleBuilding(BuildingRole::ELDER,      VCX, VCY, 14, 22, 12, 9, footprints);
-    placeRoleBuilding(BuildingRole::SMITHY,     VCX, VCY, 22, 42,  9, 8, footprints);
-    placeRoleBuilding(BuildingRole::WOODCUTTER, VCX, VCY, 22, 42,  9, 8, footprints);
+    placeRoleBuilding(BuildingRole::ELDER,      VCX, VCY, secX, secY, 14, 22, 12, 9, footprints);
+    placeRoleBuilding(BuildingRole::SMITHY,     VCX, VCY, secX, secY, 22, 42,  9, 8, footprints);
+    placeRoleBuilding(BuildingRole::WOODCUTTER, VCX, VCY, secX, secY, 22, 42,  9, 8, footprints);
 
     // Central stone plaza
     for (int y = VCY - 4; y <= VCY + 4; y++)

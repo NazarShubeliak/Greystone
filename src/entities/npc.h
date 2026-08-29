@@ -109,6 +109,9 @@ struct Villager : Actor {
     std::vector<SDL_Point> homePath;
     int homePathIdx    = 0;
     int pathRetryCool  = 0; // ticks to wait before rebuilding a failed path
+    int pathFailCount  = 0; // consecutive rebuild failures — followPath()'s give-up counter
+                             // (main.cpp): an unreachable target used to retry forever while
+                             // hunger/thirst kept climbing unconditionally underneath it
 
     // Live burial AI (docs/world.md "Могили і сліди історії", extended to
     // deaths during actual play) — set by main.cpp's assignBurial() when this
@@ -145,6 +148,14 @@ struct Villager : Actor {
     int fatherId = -1;
     std::vector<int> childIds;
     bool isChild = false;
+
+    // Which of the village's 5 pre-history household slots (0-1 farm, 2-4
+    // trade) this person currently belongs to — used only by the map-free
+    // village-history engine (village_history.h) once cross-household
+    // marriage lets a spouse move into a different household's line than
+    // the one they were born into. -1 = unset; a live, map-placed Villager
+    // (spawnVillagers()'s output, not its input) never reads this field.
+    int homeHousehold = -1;
 
     // Family granary — shared food reserve, physically the barrel object
     // map.cpp already furnishes every farmstead with (repurposed from pure

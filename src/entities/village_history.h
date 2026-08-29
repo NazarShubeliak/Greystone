@@ -97,16 +97,19 @@ inline void giveOccupation(Villager& v, Occupation occ) { v.occupation = occ; }
 // Creates one child of motherIdx/fatherIdx. Simpler than main.cpp's spawnChild() —
 // no map means no tile search, no bag/outfit; just the demographic facts.
 // motherIdx/fatherIdx are just consistent slot names, same as main.cpp's version —
-// the game has no gender mechanic.
+// the game has no gender mechanic. Inherits the father's homeHousehold (by
+// this point marriage has already synced both parents to the same one — see
+// the marriage pass below — so either parent would give the same answer).
 inline int spawnChild(std::vector<Villager>& vs, int motherIdx, int fatherIdx, int ageOverride = 0) {
     const Villager& father = vs[fatherIdx];
+    std::string surname = father.name.substr(father.name.find(' ') + 1);
+    int homeHH = father.homeHousehold;
 
     Villager child;
     child.isChild = true;
     child.age     = ageOverride;
-
-    std::string surname = father.name.substr(father.name.find(' ') + 1);
-    child.name = pickFirstName(vs, surname);
+    child.name    = pickFirstName(vs, surname);
+    child.homeHousehold = homeHH;
 
     child.motherId = motherIdx;
     child.fatherId = fatherIdx;
@@ -227,6 +230,13 @@ inline void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
         if (heirIdx >= 0 && vs[heirIdx].occupation == Occupation::NONE) {
             Occupation occ = deceased.occupation;
             giveOccupation(vs[heirIdx], occ);
+            // A family heir (spouse/child) already shares the deceased's
+            // homeHousehold. An apprentice from elsewhere physically moves
+            // into the now-vacant household to take up its trade — without
+            // this, two different households could end up both tagged to
+            // the same still-alive "worker" and the other's beds would
+            // never resolve a head again.
+            if (!viaFamily) vs[heirIdx].homeHousehold = deceased.homeHousehold;
             deceased.occupation = Occupation::NONE;
             log.push_back({year, viaFamily
                 ? vs[heirIdx].name + " takes up the family trade as " + occupationName(occ) + "."
@@ -311,6 +321,19 @@ inline void simulateOneYear(std::vector<Villager>& vs, int year, std::vector<Leg
         int j = candidates[rand() % candidates.size()];
         vs[i].spouseId = j;
         vs[j].spouseId = i;
+        // Cross-household marriage: whichever of the two currently holds no
+        // occupation (a "spare" — most non-heirs) moves into the other's
+        // household; the working head's household is the one that keeps a
+        // worker. Ties (both or neither employed) default to i's household.
+        // Existing children of a remarrying widow/widower stay tagged to
+        // their own birth household — they're still that line's heirs, not
+        // the new stepparent's.
+        if (vs[i].homeHousehold != vs[j].homeHousehold) {
+            if (vs[j].occupation != Occupation::NONE && vs[i].occupation == Occupation::NONE)
+                vs[i].homeHousehold = vs[j].homeHousehold;
+            else
+                vs[j].homeHousehold = vs[i].homeHousehold;
+        }
         matchedThisYear[i] = matchedThisYear[j] = true;
         log.push_back({year, vs[i].name + " and " + vs[j].name + " are married."});
     }
@@ -345,33 +368,32 @@ inline constexpr int ECONOMY_FLAVOR_CHANCE_PERCENT = 20; // per household, per y
 // Persistent per-village pre-history (docs/world.md step 2: "Worldgen:
 // прогін N років для кожного села, spawnVillagers() читає результат").
 //
-// One simulated household — founder + spouse seeded young, aged forward
-// historyYears in isolation (no cross-household marriage; today's
-// "2 beds per building" model can't absorb a spouse relocating to a
-// different house during pre-history — a documented limit, not an
-// oversight). occupation on every member is a placeholder (FARMER for
-// farm-type, WOODCUTTER for trade-type) — hasReliableTrade()/succession
-// only ever check occupation != NONE, never the specific trade, so the
-// exact enum value is inert here. Which *real* trade this household
-// actually represents (Farmer/Herbalist/Blacksmith/Elder/Woodcutter)
-// isn't knowable map-free — it depends on which building placeVillage()
-// (map.cpp, map-dependent, can skip a role after 30 failed placement
-// tries) actually generates for a given village. The caller overwrites
-// the resolved head-of-household's occupation with the real one once
-// the physical building is known.
-struct HouseholdHistory {
+// All 5 households (2 farm-type + 3 trade-type) share ONE population vector
+// and are simulated together, year by year — NOT 5 independent 60-year runs
+// like an earlier version did. That isolation meant a household whose both
+// founders died (very likely within 60 years — human lifespan ~72-90,
+// founders start ~18-26) could never remarry: simulateOneYear()'s marriage
+// pass only ever saw that one family's own children, who are all siblings
+// (areRelated() rejects them), so a childless widow(er) heir was stuck alone
+// forever — confirmed via the `census` cheat panel showing a village with 5
+// households and exactly 5 living villagers, one per house (user report).
+// Villager::homeHousehold (npc.h) is what makes a shared population still
+// resolvable back into "who lives in which of the 5 buildings": it's set at
+// founding, inherited at birth, and reassigned at marriage/apprenticeship
+// (see simulateOneYear() above) — the actual mechanism, not a name only.
+//
+// occupation on every member is a placeholder (FARMER for farm-type,
+// WOODCUTTER for trade-type) — hasReliableTrade()/succession only ever check
+// occupation != NONE, never the specific trade, so the exact enum value is
+// inert here. Which *real* trade a household actually represents
+// (Farmer/Herbalist/Blacksmith/Elder/Woodcutter) isn't knowable map-free —
+// it depends on which building placeVillage() (map.cpp, map-dependent, can
+// skip a role after 30 failed placement tries) actually generates for a
+// given village. The caller overwrites the resolved head-of-household's
+// occupation with the real one once the physical building is known.
+struct HouseholdMeta {
     bool isFarmHousehold;
-    std::string surname;
-    std::vector<Villager> hist;   // full simulated roster, dead members kept (alive=false)
-    std::vector<int> diedAtYear;  // parallel to hist; -1 = still alive at "now"
-    // Deaths with diedAtYear <= this have already had a grave physically
-    // placed by spawnVillagers() on some earlier visit. Starts at 0 (nobody
-    // placed yet) and advances to VillageHistoryRecord::yearsSimulated each
-    // time spawnVillagers() processes this household — so a village ticked
-    // forward while the player was elsewhere (advanceVillageOneYear() below)
-    // only gets graves for the *newly* dead placed on the next visit, not a
-    // second copy of ones already standing in the graveyard.
-    int gravesPlacedThroughYear = 0;
+    std::string surname; // the FOUNDING surname — a later resident may carry a different one via marriage
 };
 
 // Map-free flavor for docs/village.md's economic cycle (real Item harvest/
@@ -379,97 +401,45 @@ struct HouseholdHistory {
 // in — main.cpp's HARVEST/CARRY_HARVEST/BUY_FOOD states — but every OTHER
 // village still deserves *some* record of it happening, for a Legends log
 // that doesn't depend on the player having visited or waited there — user
-// request). Called once per simulated year per household (from
-// simulateHousehold()/advanceHousehold() below). Not a real economy — no
-// Items move, nothing is counted — same abstraction the rest of
-// pre-history/distant-tick already is.
-inline void logEconomicFlavor(const HouseholdHistory& h, int year, std::vector<LegendEvent>& log) {
-    if ((rand() % 100) >= ECONOMY_FLAVOR_CHANCE_PERCENT) return;
-    for (const Villager& v : h.hist) {
-        if (!v.alive || v.isChild || v.occupation == Occupation::NONE) continue;
-        log.push_back({year, h.isFarmHousehold
-            ? v.name + "'s household brings in a good harvest this year."
-            : v.name + " trades with the farms to keep the household fed."});
-        return; // one line per household per year is plenty
+// request). Called once per simulated year. Not a real economy — no Items
+// move, nothing is counted — same abstraction the rest of pre-history/
+// distant-tick already is.
+inline void logEconomicFlavor(const std::vector<Villager>& pop, const std::vector<HouseholdMeta>& households,
+                               int year, std::vector<LegendEvent>& log) {
+    for (int h = 0; h < (int)households.size(); h++) {
+        if ((rand() % 100) >= ECONOMY_FLAVOR_CHANCE_PERCENT) continue;
+        for (const Villager& v : pop) {
+            if (v.homeHousehold != h || !v.alive || v.isChild || v.occupation == Occupation::NONE) continue;
+            log.push_back({year, households[h].isFarmHousehold
+                ? v.name + "'s household brings in a good harvest this year."
+                : v.name + " trades with the farms to keep the household fed."});
+            break; // one line per household per year is plenty
+        }
     }
 }
 
-inline HouseholdHistory simulateHousehold(const std::string& surname, bool isFarmHousehold, int historyYears,
-                                           std::vector<LegendEvent>& log) {
-    HouseholdHistory h;
-    h.isFarmHousehold = isFarmHousehold;
-    h.surname         = surname;
-
-    Villager founder;
-    founder.name = pickFirstName(h.hist, surname);
-    founder.age  = Names::generateAge(Race::HUMAN, raceTraits[(int)Race::HUMAN].minAge,
-                                                     raceTraits[(int)Race::HUMAN].minAge + 8);
-    giveOccupation(founder, isFarmHousehold ? Occupation::FARMER : Occupation::WOODCUTTER);
-    h.hist.push_back(founder);
-
-    Villager foundingSpouse;
-    int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, h.hist[0].age - 5);
-    int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, h.hist[0].age + 5);
-    foundingSpouse.age  = Names::generateAge(Race::HUMAN, lo, hi);
-    foundingSpouse.name = pickFirstName(h.hist, surname);
-    h.hist.push_back(foundingSpouse);
-    h.hist[0].spouseId = 1;
-    h.hist[1].spouseId = 0;
-    if (!isFarmHousehold && (rand() % 100) < 20)
-        giveOccupation(h.hist[1], Occupation::SEAMSTRESS);
-
-    h.diedAtYear.assign(h.hist.size(), -1);
-    for (int year = 1; year <= historyYears; year++) {
-        size_t before = h.hist.size();
-        std::vector<bool> wasAlive(before);
-        for (size_t k = 0; k < before; k++) wasAlive[k] = h.hist[k].alive;
-
-        simulateOneYear(h.hist, year, log);
-        logEconomicFlavor(h, year, log);
-
-        h.diedAtYear.resize(h.hist.size(), -1);
-        for (size_t k = 0; k < before; k++)
-            if (wasAlive[k] && !h.hist[k].alive) h.diedAtYear[k] = year;
-    }
-    return h;
-}
-
-// Advances one already-simulated household by exactly one more year (docs/
-// world.md step 5: "Подієва симуляція віддалених сіл під час гри"). Same
-// mechanics as the yearly loop inside simulateHousehold() above, just for a
-// single `year` number handed in by the caller instead of an internal 1..N
-// loop — used to keep ticking a village that already has a founding history
-// but isn't the one currently loaded on the map.
-inline void advanceHousehold(HouseholdHistory& h, int year, std::vector<LegendEvent>& log) {
-    size_t before = h.hist.size();
-    std::vector<bool> wasAlive(before);
-    for (size_t k = 0; k < before; k++) wasAlive[k] = h.hist[k].alive;
-
-    simulateOneYear(h.hist, year, log);
-    logEconomicFlavor(h, year, log);
-
-    h.diedAtYear.resize(h.hist.size(), -1);
-    for (size_t k = 0; k < before; k++)
-        if (wasAlive[k] && !h.hist[k].alive) h.diedAtYear[k] = year;
-}
-
-// One village's cached pre-history: 2 farm-type + 3 trade-type households,
-// matching worldgen_sim.cpp's seedVillage() role count (2 farms always
-// guaranteed by placeVillage(); Smith/Elder/Woodcutter may or may not
-// actually get placed on the map — unused cached households are simply
-// never consumed by the caller). yearsSimulated is the total number of
-// years this record has been advanced since founding (starts at
-// simulateVillageHistory()'s historyYears, +1 per advanceVillageOneYear()
-// call) — it's the "year" argument fed to advanceHousehold() and also what
-// a grave's diedYearsAgo is computed relative to, since pre-history and
-// later distant-tick years share one continuous numbering. `log` is the
-// merged, year-sorted chronicle across all 5 households (docs/world.md
-// "Legends-лог подій") — read by the `legends` cheat-console export
-// (main.cpp) for the standalone legends_viewer.exe tool.
+// yearsSimulated is the total number of years this record has been advanced
+// since founding (starts at simulateVillageHistory()'s historyYears, +1 per
+// advanceVillageOneYear() call) — it's the "year" argument fed to
+// simulateOneYear() and also what a grave's diedYearsAgo is computed
+// relative to, since pre-history and later distant-tick years share one
+// continuous numbering. `log` is the chronicle across the whole village
+// (docs/world.md "Legends-лог подій") — read by the `legends` cheat-console
+// export (main.cpp) for the standalone legends_viewer.exe tool.
 struct VillageHistoryRecord {
     std::string name; // set right after construction by generateAllVillageHistories() (main.cpp)
-    std::vector<HouseholdHistory> farmHouseholds;
-    std::vector<HouseholdHistory> tradeHouseholds;
+    std::vector<Villager> pop;              // every person ever founded/born in this village, together
+    std::vector<int> diedAtYear;            // parallel to pop; -1 = still alive "now"
+    std::vector<HouseholdMeta> households;  // index == Villager::homeHousehold; [0,1]=farm, [2..4]=trade
+    // Deaths with diedAtYear <= this have already had a grave physically
+    // placed by spawnVillagers() on some earlier visit. Starts at 0 (nobody
+    // placed yet) and advances to yearsSimulated each time spawnVillagers()
+    // processes this village — so a village ticked forward while the player
+    // was elsewhere (advanceVillageOneYear() below) only gets graves for the
+    // *newly* dead placed on the next visit, not a second copy of ones
+    // already standing in the graveyard. One village-wide counter (not
+    // per-household) now that pop/diedAtYear are shared too.
+    int gravesPlacedThroughYear = 0;
     int yearsSimulated = 0;
     std::vector<LegendEvent> log;
 };
@@ -479,32 +449,72 @@ inline VillageHistoryRecord simulateVillageHistory(int villageSurnameSeed, int h
     int nSurnames = countStrings(NPC_SURNAMES);
     auto surnameFor = [&](int slot) { return std::string(NPC_SURNAMES[(villageSurnameSeed + slot) % nSurnames]); };
 
-    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(0), true,  historyYears, rec.log));
-    rec.farmHouseholds.push_back(simulateHousehold(surnameFor(1), true,  historyYears, rec.log));
-    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(2), false, historyYears, rec.log)); // Smith
-    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(3), false, historyYears, rec.log)); // Elder
-    rec.tradeHouseholds.push_back(simulateHousehold(surnameFor(4), false, historyYears, rec.log)); // Woodcutter
-    rec.yearsSimulated = historyYears;
+    // households[0,1] = farm-type, households[2..4] = trade-type (Smith,
+    // Elder, Woodcutter placeholder-wise — the real trade is resolved later
+    // by the caller once the physical building is known).
+    for (int h = 0; h < 5; h++) {
+        bool isFarmHousehold = (h < 2);
+        std::string surname  = surnameFor(h);
+        rec.households.push_back({isFarmHousehold, surname});
 
-    // Each of the 5 calls above ran its own full 1..historyYears loop one
-    // after another, so rec.log is 5 chronologically-sorted runs concatenated
-    // back-to-back rather than one — sort once here so the merged chronicle
-    // reads in actual year order.
-    std::stable_sort(rec.log.begin(), rec.log.end(),
-                      [](const LegendEvent& a, const LegendEvent& b) { return a.year < b.year; });
+        Villager founder;
+        founder.name = pickFirstName(rec.pop, surname);
+        founder.age  = Names::generateAge(Race::HUMAN, raceTraits[(int)Race::HUMAN].minAge,
+                                                         raceTraits[(int)Race::HUMAN].minAge + 8);
+        giveOccupation(founder, isFarmHousehold ? Occupation::FARMER : Occupation::WOODCUTTER);
+        founder.homeHousehold = h;
+        int founderIdx = (int)rec.pop.size();
+        rec.pop.push_back(founder);
+
+        Villager foundingSpouse;
+        int lo = std::max(raceTraits[(int)Race::HUMAN].minAge, rec.pop[founderIdx].age - 5);
+        int hi = std::min(raceTraits[(int)Race::HUMAN].maxAge, rec.pop[founderIdx].age + 5);
+        foundingSpouse.age          = Names::generateAge(Race::HUMAN, lo, hi);
+        foundingSpouse.name         = pickFirstName(rec.pop, surname);
+        foundingSpouse.homeHousehold = h;
+        int spouseIdx = (int)rec.pop.size();
+        rec.pop.push_back(foundingSpouse);
+
+        rec.pop[founderIdx].spouseId = spouseIdx;
+        rec.pop[spouseIdx].spouseId  = founderIdx;
+        if (!isFarmHousehold && (rand() % 100) < 20)
+            giveOccupation(rec.pop[spouseIdx], Occupation::SEAMSTRESS);
+    }
+
+    rec.diedAtYear.assign(rec.pop.size(), -1);
+    for (int year = 1; year <= historyYears; year++) {
+        size_t before = rec.pop.size();
+        std::vector<bool> wasAlive(before);
+        for (size_t k = 0; k < before; k++) wasAlive[k] = rec.pop[k].alive;
+
+        simulateOneYear(rec.pop, year, rec.log);
+        logEconomicFlavor(rec.pop, rec.households, year, rec.log);
+
+        rec.diedAtYear.resize(rec.pop.size(), -1);
+        for (size_t k = 0; k < before; k++)
+            if (wasAlive[k] && !rec.pop[k].alive) rec.diedAtYear[k] = year;
+    }
+    rec.yearsSimulated = historyYears;
     return rec;
 }
 
-// Ticks every household of one village forward by one year — called for
-// every village *other* than the one currently loaded on the map (that one
-// advances live instead, via main.cpp's tickAgingOneYear()/
-// simulateVillageYear() acting on the real placed Villager objects). All 5
-// households advance the same `rec.yearsSimulated` in this one call, so
-// appending straight to rec.log (no re-sort needed) keeps it in order.
+// Advances one already-simulated village by exactly one more year (docs/
+// world.md step 5: "Подієва симуляція віддалених сіл під час гри") — called
+// for every village *other* than the one currently loaded on the map (that
+// one advances live instead, via main.cpp's simulateVillageYear() acting on
+// the real placed Villager objects).
 inline void advanceVillageOneYear(VillageHistoryRecord& rec) {
     rec.yearsSimulated++;
-    for (HouseholdHistory& h : rec.farmHouseholds)  advanceHousehold(h, rec.yearsSimulated, rec.log);
-    for (HouseholdHistory& h : rec.tradeHouseholds) advanceHousehold(h, rec.yearsSimulated, rec.log);
+    size_t before = rec.pop.size();
+    std::vector<bool> wasAlive(before);
+    for (size_t k = 0; k < before; k++) wasAlive[k] = rec.pop[k].alive;
+
+    simulateOneYear(rec.pop, rec.yearsSimulated, rec.log);
+    logEconomicFlavor(rec.pop, rec.households, rec.yearsSimulated, rec.log);
+
+    rec.diedAtYear.resize(rec.pop.size(), -1);
+    for (size_t k = 0; k < before; k++)
+        if (wasAlive[k] && !rec.pop[k].alive) rec.diedAtYear[k] = rec.yearsSimulated;
 }
 
 } // namespace VillageHistory

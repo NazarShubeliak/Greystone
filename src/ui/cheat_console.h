@@ -73,6 +73,13 @@ struct CheatConsole {
     // re-feeding/re-watering the player character just to keep testing.
     bool pendingBecomeLich = false;
 
+    // Pending census — consumed by main.cpp, which opens CensusPanel with a
+    // live count of villagers (alive/dead)/corpses/graves/enemies for the
+    // current sector. For an explicit before/after `simulatedays` compare
+    // (user request) — tells a real die-off apart from burial/decay just
+    // outrunning what's visible on screen.
+    bool pendingShowCensus = false;
+
     // Lowercase, no-space tokens — order MUST match enum Skill (skill.h) so
     // main.cpp can map token index -> Skill index directly.
     static constexpr const char* SKILL_TOKENS[] = {
@@ -168,12 +175,17 @@ struct CheatConsole {
         } else if (cmd == "help") {
             result   = "Commands: rm  hm  tp X Y  time HH:MM  season <s>  spawn <type> [N]  give <item>  "
                        "setskill <skill> <lvl>  setage <age>  skipyears <n>  simulatedays <n>  unlocktech <name>  unlockspell <name>  "
-                       "legends [file]  lich  gp  help";
+                       "legends [file]  census  lich  gp  help";
             resultOk = true;
 
         } else if (cmd == "lich") {
             pendingBecomeLich = true;
             result   = "You feel your heart stop. Hunger and thirst no longer touch you.";
+            resultOk = true;
+
+        } else if (cmd == "census") {
+            pendingShowCensus = true;
+            result   = "Taking a census of this sector...";
             resultOk = true;
 
         } else {
@@ -443,10 +455,13 @@ struct CheatConsole {
         if (input == "lich")
             return "lich   transforms you into a Lich (cheat-only for now) — no more hunger/thirst/aging, "
                    "for long simulatedays/skipyears tests without needing to eat/drink.";
+        if (input == "census")
+            return "census   opens a panel with a live count of villagers (alive/dead), corpses, graves "
+                   "and enemies in the current sector — for a before/after simulatedays comparison.";
         // Partial command suggestions
         static const char* cmds[] = {
             "reveal_map","rm","hide_map","hm","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","lich","help", nullptr
+            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","census","lich","help", nullptr
         };
         std::string sugg;
         for (int i = 0; cmds[i]; i++) {
@@ -462,7 +477,7 @@ struct CheatConsole {
         // Complete top-level command
         static const char* cmds[] = {
             "reveal_map","hide_map","tp","time","season","spawn","give",
-            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","lich","help", nullptr
+            "setskill","setage","skipyears","simulatedays","unlocktech","unlockspell","legends","census","lich","help", nullptr
         };
         if (input.find(' ') == std::string::npos) {
             for (int i = 0; cmds[i]; i++) {
